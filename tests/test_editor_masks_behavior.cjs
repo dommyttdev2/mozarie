@@ -8,7 +8,7 @@ function canvasContext(name) {
     name, pixels: false, calls: [],
     canvas: { width: 100, height: 80 },
     save() { this.calls.push("save"); }, restore() { this.calls.push("restore"); },
-    beginPath() {}, moveTo() {}, lineTo() {},
+    beginPath() {}, moveTo() {}, lineTo() {}, arc() {}, fill() { this.pixels = true; this.calls.push(`fill:${this.globalCompositeOperation}`); },
     stroke() { this.pixels = true; this.calls.push(`stroke:${this.globalCompositeOperation}`); },
     clearRect() { this.pixels = false; this.calls.push("clear"); },
     drawImage() { this.pixels = true; this.calls.push("draw"); },
@@ -72,11 +72,11 @@ const state = {
     { id: "apply", role: "apply", enabled: true, labelToken: "penis", source: "target", refinement: null, color: "#fff" },
     { id: "exclude", role: "exclude", enabled: true, forced: true, labelToken: "hand", source: "hand_exclusion", refinement: null, color: "#000" },
   ],
-  removedCandidateIds: new Set(), candidateImages: new Map(), blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, blinkTimer: null,
-  manualMaskPresent: true, manualEnabled: true, manualExclusionEnabled: true, manualExclusionEraseEnabled: true, manualExclusionForced: false,
+  removedCandidateIds: new Set(), candidateImages: new Map(), blinkCandidateIds: new Set(), blinkModes: new Map(), blinkRoleModes: new Map(), blinkPhase: false, blinkTimer: null,
+  manualMaskPresent: true, manualExclusionPresent: true, manualExclusionErasePresent: true, manualEnabled: true, manualExclusionEnabled: true, manualExclusionEraseEnabled: true, manualExclusionForced: false,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(),
   maskStatus: new Map(), images: [{ id: "image", assetVersion: "a", candidateRevision: 4, candidateCount: 0, enabledCandidateCount: 0 }],
-  history: [], historyIndex: 0, historyRestoreToken: 0, historyRemovedCandidateIds: new Set(), historyCandidateIds: new Set(["apply", "exclude"]), historyBaseDirty: false,
+  history: [], historyIndex: 0, historyRestoreToken: 0, historyRemovedCandidateIds: new Set(), historyCandidateIds: new Set(["apply", "exclude"]), historyBaseDirty: false, hiddenImageIds: new Set(), reviewedImageIds: new Set(),
   boundaryDrafts: [{ id: "draft", type: "rectangle", roi: { left: 1, top: 2, right: 10, bottom: 12 } }], boundaryActiveId: "draft", boundaryPending: false,
   importing: false, projectReadOnly: false, projectHistoryBusy: false, project: null, projectHistory: new Map(), drafts: new Map(), pendingImageId: null, fillPending: false, tool: "brush", view: { x: 0, y: 0, scale: 1 }, settings: { editing: { fill_color_tolerance: 12 } },
 };
@@ -107,13 +107,13 @@ const context = {
     createElement: () => element(`node-${elements.size}`),
   },
   setInterval: (callback) => { blinkTick = callback; return 1; }, clearInterval() {}, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {},
-  isBusy: () => false, isCurrentGeneration: (generation) => generation === state.imageGeneration,
+  isBusy: () => false, isGestureActive: () => false, catalogStagingEditsActive: () => false, currentImageActionPending: () => Boolean(state.pendingImageId), candidateControlLocked: () => false, isProcessableImage: () => true, manualCanvasInputLocked: () => false, hasDurableHistory: () => false, isCurrentGeneration: (generation) => generation === state.imageGeneration,
   catalogRecordMatches: () => true, currentRecord: () => state.images.find((record) => record.id === state.currentId),
   imageAssetVersion: (record) => record?.assetVersion || "", imageHasMask: () => true, canvasHasPixels: (ctx) => ctx.pixels,
   CANDIDATE_CLASS_TOKENS: new Set(["penis", "hand"]), CANDIDATE_SOURCE_TOKENS: new Set(["target", "hand_exclusion"]), CANDIDATE_REFINEMENT_TOKENS: new Set(),
   t: (key, values) => values?.label ? `${key}:${values.label}` : key, confirmationRequired: () => false, confirmAction: async () => true,
-  markMaskDirty: () => events.push("dirty"), markDraftDirty: (...layers) => events.push(`draft:${layers.join(",")}`),
-  markDraftDirtyRoi: (layer, roi) => dirtyRois.push({ layer, roi: roi && { ...roi } }),
+  markMaskDirty: () => events.push("dirty"), markDraftDirty: (...layers) => events.push(`draft:${layers.join(",")}`), publishWorkspaceFlags() {}, refreshReviewViews() {},
+  markDraftDirtyRoi: (layer, roi) => dirtyRois.push({ layer, roi: roi && { ...roi } }), mergeMosaicPreviewRoi: (_previous, roi) => roi,
   calculatedBlockSize: () => 8, composeCurrentMask: () => events.push("compose-roi"), flushMaskComposition: () => events.push("flush"), requestMosaicPreview: () => events.push("preview"), scheduleManualWorkspaceSave: () => events.push("save"), saveDraft: () => events.push("draft-save"),
   ensureHistoryCanvases: () => true, releaseHistoryCanvases() {},
   setReviewed: () => events.push("review"), updateHistoryButtons() {}, updateCandidateStatus() {}, refreshCurrentReviewAndMask() {}, refreshMaskStatus() {},
@@ -257,6 +257,7 @@ test.appendManualStrokePoint({ x: 8, y: 8 });
 test.completeManualStroke();
 assert.equal(state.history.length, 1, "a completed brush gesture is retained for undo");
 assert.equal(state.manualMaskPresent, true);
+state.removedCandidateIds.add("apply");
 test.recordHistoryOperation({ kind: "removeCandidates", ids: ["apply"] });
 assert.equal(state.historyIndex, 2);
 test.restoreSnapshot(1);
@@ -292,7 +293,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
     state.removedCandidateIds = new Set(); state.candidateUpdateChains = new Map(); state.candidateUpdateVersions = new Map();
     state.candidateDeleting = new Set(); state.candidateBatchPending = new Set(); state.maskStatus = new Map([["image", true]]);
     state.blinkCandidateIds = new Set(); state.blinkModes = new Map(); state.blinkPhase = false; state.blinkTimer = null;
-    state.manualMaskPresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
+    state.manualMaskPresent = true; state.manualExclusionPresent = true; state.manualExclusionErasePresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
     addCtx.pixels = true; exclusionCtx.pixels = true; exclusionEraseCtx.pixels = true;
     state.images = [{ id: "image", width: 100, height: 80, assetVersion: "a", candidateRevision: 4, candidateCount: 2, enabledCandidateCount: 1 }];
     state.history = []; state.historyIndex = 0; state.historyRemovedCandidateIds = new Set(); state.historyCandidateIds = new Set(["apply", "exclude"]);
@@ -303,11 +304,10 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   resetCandidateState();
   readCounts.clear(); batchPresences.length = 0;
   test.renderCandidateRows();
-  assert.equal(readCounts.get("exclude"), 1, "one candidate render reads the exclusion layer once");
-  assert.equal(readCounts.get("excludeErase"), 1, "one candidate render reads the exclusion-erase layer once");
+  assert.equal(readCounts.size, 0, "candidate rows use the tracked layer-presence state without synchronous canvas readback");
   assert.deepEqual({ ...batchPresences.at(-1) }, presentManualLayers, "the batch controls receive the same manual-layer presence used for candidate display");
   const eraseRow = [...elements.values()].find((node) => node.className === "candidate-row candidate-row-manual candidate-row-manual-exclude-erase");
-  const eraseToggle = eraseRow.children[0].children.find((node) => node.className === "candidate-toggle");
+  const eraseToggle = eraseRow.children[1].children.find((node) => node.className === "candidate-toggle");
   state.importing = true;
   eraseToggle.listeners.get("click")();
   assert.equal(state.manualExclusionEraseEnabled, true, "the manual exclusion-erase toggle ignores input while importing");

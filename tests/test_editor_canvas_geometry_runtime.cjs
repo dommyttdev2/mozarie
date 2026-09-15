@@ -46,7 +46,7 @@ const state = {
   currentId: "image", currentImage: { width: 100, height: 80, alpha: 255 }, candidates: [], candidateImages: new Map(), removedCandidateIds: new Set(),
   maskStatus: new Map(),
   images: [{ id: "image", assetVersion: "v1", candidateRevision: 1, enabledCandidateCount: 0 }], imageGeneration: 0, candidateBatchPending: new Set(),
-  imageCache: cache(), candidateBundleCache: cache(), imageInflight: new Map(), candidateInflight: new Map(), catalogLoadControllers: new Set(), catalogEpoch: 1,
+  imageCache: cache(), candidateBundleCache: cache(), imageInflight: new Map(), candidateInflight: new Map(), imageLoadControllers: new Map(), candidateLoadControllers: new Map(), resourceImageKeys: new Set(), resourceCandidateKeys: new Set(), catalogLoadControllers: new Set(), catalogEpoch: 1,
   drafts: new Map(), draftLayerDirty: new Set(), draftSaveChains: new Map(), history: [], historyIndex: 0, historyBaseDirty: false, historyRemovedCandidateIds: new Set(), historyCandidateIds: new Set(),
   boundaryDrafts: [], boundaryActiveId: null, boundaryDragging: false, boundaryStart: null, boundaryPoint: null, boundaryRoi: null, boundaryPromptPoint: null,
   polygonPoints: [], boundaryBrushStroke: null, boundaryDraftSequence: 0, boundaryPending: false, pendingImageId: null, importing: false,
@@ -63,7 +63,7 @@ class Worker {
 }
 const context = {
   codedError(code) { const error = new Error(); error.code = code; return error; },
-  state, Math, Map, Set, Array, Object, Number, Boolean, Uint8Array, Uint8ClampedArray, AbortController,
+  state, Math, Map, Set, Array, Object, Number, Boolean, Uint8Array, Uint8ClampedArray, AbortController, structuredClone,
   window: { devicePixelRatio: 1 }, document: { activeElement: null }, localStorage: { value: null, getItem() { return this.value; }, setItem(_key, value) { this.value = value; } }, stage: { clientWidth: 120, clientHeight: 90, dataset: {} }, toolRail: { offsetHeight: 30 }, renderedWidth: 0, renderedHeight: 0,
   requestAnimationFrame(callback) { callback(); return 1; }, cancelAnimationFrame() {}, Worker,
   canvas: displayCanvas, ctx: displayCanvas.ctx, layerCanvas, layerCtx: layerCanvas.ctx, boundaryOverlayCanvas: overlayCanvas, boundaryOverlayCtx: overlayCanvas.ctx,
@@ -72,7 +72,7 @@ const context = {
   currentRecord: () => state.images[0] || { enabledCandidateCount: 0 },
   imageUrl: (record) => `/image/${record.id}`, maskUrl: (imageId, candidateId) => `/mask/${imageId}/${candidateId}`,
   decodedImageWeight: () => 1, closeBitmap(image) { image?.close?.(); }, forgetThumbnail() {}, abortCatalogLoads() {}, releaseCandidateBitmapBundle() {}, catalogRecordMatches: () => true, isCurrentGeneration: () => true,
-  clearTimeout() {}, showUserError(error) { context.lastUserError = error; }, queueWorkspaceDraft() {}, closeBoundaryModeMenu() {}, cancelFillWork() {}, clearBoundaryInteraction() {}, clearEditor() {}, updateGalleryCurrent() {}, renderCandidates() {}, updateNavigationControls() {}, updateBlockSizeDisplay() {}, clearStatus() {}, prefetchNeighbors() {}, resetHistoryToCurrentManualMask() {}, rebuildManualMaskFromHistory() {}, updateHistoryButtons() {}, calculatedBlockSize: () => 4, flushMaskComposition() {}, prepareOriginalImage() {},
+  clearTimeout() {}, showUserError(error) { context.lastUserError = error; }, queueWorkspaceDraft() {}, closeBoundaryModeMenu() {}, cancelFillWork() {}, clearBoundaryInteraction() {}, clearEditor() {}, clearCandidateBlink() {}, updateGalleryCurrent() {}, renderCandidates() {}, updateNavigationControls() {}, updateBlockSizeDisplay() {}, clearStatus() {}, syncResourceOwnership() {}, invalidateMaskComposition() {}, inheritRoleCandidateDisplayMode() {}, syncCandidateBlinkTimer() {}, historyEditorState: () => ({}), manualLayerPresence: () => ({ hasManualExclude: Boolean(state.manualExclusionPresent), hasManualExclusionErase: Boolean(state.manualExclusionErasePresent) }), galleryNavigationNeighbors: () => [], prefetchNeighbors() {}, resetHistoryToCurrentManualMask() {}, rebuildManualMaskFromHistory() {}, updateHistoryButtons() {}, calculatedBlockSize: () => 4, flushMaskComposition() {}, prepareOriginalImage() {}, render() {}, requestMosaicPreview() {},
   setCssTransform(target) { target.setTransform(1, 0, 0, 1, 0, 0); },
 };
 context.combinedCtx = context.combinedCanvas.getContext("2d");
@@ -327,9 +327,10 @@ test.render(); test.flushRender();
 
   state.images = [{ id: "prefetch", assetVersion: "v1" }, { id: "selected", assetVersion: "v1" }, { id: "next", assetVersion: "v1" }];
   const prefetched = [];
+  context.galleryNavigationNeighbors = (imageId) => imageId === "selected" ? [state.images[0], state.images[2]] : [];
   context.schedulePrefetch = (record, priority) => prefetched.push([record.id, priority]);
   test.prefetchNeighbors(state.images[1]);
-  assert.deepEqual(prefetched, [["prefetch", 1], ["next", 1]]);
+  assert.deepEqual(prefetched, [["prefetch", undefined], ["next", undefined]], "prefetch follows the current filtered navigation neighbors");
   state.imageCache = cache(); state.imageInflight = new Map(); state.catalogLoadControllers = new Set(); state.catalogEpoch = 1;
   context.fetchBitmap = async () => ({ width: 2, height: 2, close() { released.push("fetched"); } });
   context.imageUrl = (record) => `/images/${record.id}`;
@@ -595,7 +596,7 @@ test.render(); test.flushRender();
   state.history = [{ kind: "brush" }]; state.historyIndex = 1; state.removedCandidateIds = new Set(); state.historyRemovedCandidateIds = new Set(); state.historyCandidateIds = new Set();
   context.historyAddCanvas.ctx.alpha = context.historyExclusionCanvas.ctx.alpha = context.historyExclusionEraseCanvas.ctx.alpha = 0;
   await test.saveDraft();
-  assert.deepEqual(JSON.parse(JSON.stringify(state.drafts.get("save-current").historyBase)), { add: "", exclusion: "", exclusionErase: "", removedCandidateIds: [], candidateIds: [] });
+  assert.deepEqual(JSON.parse(JSON.stringify(state.drafts.get("save-current").historyBase)), { add: "", exclusion: "", exclusionErase: "", removedCandidateIds: [], candidateIds: [], editorState: {} });
 
   state.currentId = "different"; context.loadCandidateBundle = async () => ({ candidates: [], candidateImages: new Map(), candidateRevision: 1 });
   assert.equal(await test.reconcileCurrentCandidates("save-current", 70), false, "a candidate response for a no-longer-current image is ignored");

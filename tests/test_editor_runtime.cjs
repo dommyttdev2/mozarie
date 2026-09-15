@@ -57,17 +57,17 @@ const context = {
   $: (selector) => element(selector), document: { activeElement: null, documentElement: { clientWidth: 320, clientHeight: 240 } },
   window: { innerWidth: 320, innerHeight: 240 }, crypto: { randomUUID: () => "key-1" },
   navigator: { clipboard: { writeText: async () => {} } },
-  isBusy: () => false, catalogStagingEditsActive: () => false, manualCanvasInputLocked: () => false, isProcessableImage: () => true, hasDurableHistory: () => false, clearBoundaryInteraction() {}, clearBoundaryConstruction() {}, closeBoundaryModeMenu: () => false,
+  isBusy: () => false, catalogStagingEditsActive: () => false, currentImageActionPending: () => Boolean(state.pendingImageId), manualCanvasInputLocked: () => false, isProcessableImage: () => true, hasDurableHistory: () => false, clearBoundaryInteraction() {}, clearBoundaryConstruction() {}, closeBoundaryModeMenu: () => false,
   updateBoundaryActions() {}, render() {}, focusCanvas() {}, focusElement() {}, t: (key, values = {}) => `${key}:${values.value || ""}`,
   calculatedBlockSize: () => 4, currentRecord: () => state.images[0], mosaicDivisor: () => 2, normaliseDivisor: (value) => Number(value),
-  markMaskDirty() {}, markDraftDirty() {}, flushMaskComposition() {}, requestMosaicPreview() {}, scheduleManualWorkspaceSave() {},
+  markMaskDirty() {}, markDraftDirty() {}, flushMaskComposition() {}, requestMosaicPreview() {}, scheduleManualWorkspaceSave() {}, setStatusKey() {},
   canvasHasPixels: () => true, setReviewed() {}, updateCandidateStatus() {}, refreshCurrentReviewAndMask() {}, renderCandidates() {},
   refreshMaskStatus() {}, releaseCandidateBundles() {}, markImagesUnreviewed() {}, renderCatalogViews() {}, updateNavigationControls() {},
   updateActionButtons() {}, closeProcessing() {}, beginCatalogEpoch: () => 1, isCurrentCatalogEpoch: () => true, clearStatus() {}, flushAllWorkspaceMutations: async () => {},
   clearStoredCatalogState() {}, resetCatalog() {}, releaseImageCaches() {}, clearEditor() {}, updateSelectionActionBar() {}, renderOverview() {},
   selectedImages: () => state.images, closeBatchMoreMenus() {}, setHidden: async () => {}, setReviewed: async () => {}, openDetectionDialog() {},
   clearMasks: async () => {}, removeImageFromCatalog: async () => {}, shortcutFromEvent: (event) => event.binding,
-  isEditableTarget: () => false, hasOpenDialog: () => false, isGestureActive: () => false,
+  isEditableTarget: () => false, isTextEditableTarget: () => false, hasOpenDialog: () => false, isGestureActive: () => false,
   moveCurrentBy(distance) { navigationActions.push(distance); }, selectImage() {}, reviewAndMoveNext() {}, setViewMode(mode) { state.viewMode = mode; },
   isReviewed: () => false, isHidden: () => false,
   api: async () => ({ settings: state.settings }), showModalFromInvoker() {}, showUserError(error) { userErrors.push(error); },
@@ -158,7 +158,7 @@ assert.equal(state.currentId, "image"); assert.equal(state.pendingImageId, "imag
 assert.equal(test.navigationShortcutAction({ binding: "ArrowLeft" }), "previous");
 assert.equal(test.navigationShortcutAction({ binding: "Nope" }), null);
 let prevented = false; assert.equal(test.handleNavigationKeydown({ binding: "ArrowRight", preventDefault() { prevented = true; } }), true); assert.equal(prevented, true);
-test.updateBrushSize(999); assert.equal(element("#brushSize").value, 500);
+test.updateBrushSize(999); assert.equal(element("#brushSize").value, 999, "brush size keeps the requested value without a hidden cap");
 test.updateBlockSizeDisplay(); assert.match(element("#blockSizeValue").textContent, /4/);
 test.setTool("bucket"); assert.equal(state.tool, "bucket"); assert.equal(context.canvas.style.cursor, "default", "ordinary tools retain the standard pointer");
 

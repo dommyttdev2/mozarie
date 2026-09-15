@@ -19,6 +19,7 @@ function element(children = {}) {
     attributes, children: [], classList: classList(), dataset: {}, disabled: false, hidden: false,
     textContent: "", title: "", value: "", style: {}, tabIndex: -1, scrollTop: 0,
     append(child) { this.children.push(child); child.parentNode = this; },
+    insertBefore(child, before) { if (child.parentNode) child.parentNode.children.splice(child.parentNode.children.indexOf(child), 1); const index = before ? this.children.indexOf(before) : -1; if (index >= 0) this.children.splice(index, 0, child); else this.children.push(child); child.parentNode = this; },
     remove() { this.parentNode?.children.splice(this.parentNode.children.indexOf(this), 1); this.removed = true; },
     removeAttribute(name) { attributes.delete(name); },
     setAttribute(name, value) { attributes.set(name, String(value)); },
@@ -68,7 +69,7 @@ function makeGalleryRuntime() {
   const selected = []; const prefetched = []; const menus = []; const calls = [];
   const observers = [];
   const state = {
-    images: [], currentId: null, viewMode: "edit", galleryFilter: "all", overviewFilter: "all", overviewFolder: "", overviewQuery: "",
+    images: [], currentId: null, viewMode: "edit", galleryFilter: new Set(), overviewFilter: new Set(), overviewFolder: "", overviewQuery: "",
     galleryNodes: new Map(), overviewNodes: new Map(), selectedImageIds: new Set(), selectionAnchorId: null, batchMode: false, viewGeneration: 0,
   };
   const frames = [];
@@ -78,20 +79,20 @@ function makeGalleryRuntime() {
     createElement() { return element(); },
   };
   const context = {
-    codedError(code) { const error = new Error(); error.code = code; return error; },
+    codedError(code) { const error = new Error(); error.code = code; return error; }, responseError(response, payload) { const error = new Error(); error.status = response.status; error.code = payload?.error_code || "internal_error"; return error; },
     console, Map, Set, Array, Math, String, Object, document, encodeURIComponent, window: { addEventListener() {} },
     IntersectionObserver: class { constructor(callback, options) { this.callback = callback; this.options = options; observers.push(this); } observe(image) { this.observed = image; } unobserve(image) { image.unobserved = true; } },
     state, $: (selector) => nodes.get(selector), $$: () => [],
     t(key, values = {}) { return `${key}:${Object.values(values).join(",")}`; },
     imageAssetVersion(image) { return image.assetVersion || ""; },
-    isHidden(image) { return Boolean(image?.hidden); }, isReviewed(image) { return Boolean(image?.reviewed); }, imageHasMask(image) { return Boolean(image?.masked); },
+    isHidden(image) { return Boolean(image?.hidden); }, isReviewed(image) { return Boolean(image?.reviewed); }, imageHasMask(image) { return Boolean(image?.masked); }, currentImageActionPending() { return Boolean(state.pendingImageId); }, hasDurableHistory() { return false; },
     selectCatalogImage(id) { selected.push(id); }, schedulePrefetch(image) { prefetched.push(`schedule:${image.id}`); }, prefetchNeighbors(image) { prefetched.push(`neighbors:${image.id}`); },
-    openCatalogContextMenu(_event, id) { menus.push(id); }, updateActionButtons() { calls.push("actions"); }, updateSelectionActionBar() { calls.push("selection"); },
+    openCatalogContextMenu(_event, id) { menus.push(id); }, updateActionButtons() { calls.push("actions"); }, updateSelectionActionBar() { calls.push("selection"); }, updateFilterMenuButtons() {}, syncResourceOwnership() {}, closeFilterPopovers() {},
     setViewMode(mode) { calls.push(`stub-view:${mode}`); }, closeBatchMoreMenus() { calls.push("close-menu"); }, clearBatchSelection() { state.selectedImageIds.clear(); calls.push("clear-selection"); },
     discardCatalogNodes(map, parent) { for (const node of map.values()) node.remove(); map.clear(); parent.discarded = true; }, resizeRenderCanvas() { calls.push("resize"); }, focusCanvas() { calls.push("focus-canvas"); }, focusElement(node) { node.focused = true; },
     requestAnimationFrame(callback) { frames.push(callback); }, isGestureActive() { return Boolean(context.gesture); }, currentRecord() { return state.images.find((image) => image.id === state.currentId) || null; },
     imageIndex(id = state.currentId) { return state.images.findIndex((image) => image.id === id); },
-    async selectImage(id) { selected.push(`image:${id}`); }, async setReviewed(image, value) { image.reviewed = value; return context.reviewResult; }, async setHidden(image, value) { image.hidden = value; return context.hideResult; },
+    async selectImage(id) { selected.push(`image:${id}`); }, async setHidden(image, value) { image.hidden = value; return context.hideResult; }, async queueImageMutation(_id, action) { return action(); }, async saveWorkspaceFlagNow(image, _flag, value, after) { image.reviewed = value; after?.(); return context.reviewResult; }, refreshReviewViews() {},
   };
   context.reviewResult = true; context.hideResult = true;
   const source = fs.readFileSync(path.join(jsRoot, "gallery.js"), "utf8");
@@ -118,7 +119,7 @@ async function galleryInteractions() {
   assert.equal(standalone.src, "/api/thumbnail/one?v=v%201"); runtime.forgetThumbnail(standalone); runtime.forgetThumbnail(null);
 
   runtime.renderGallery();
-  assert.equal(runtime.gallery.children.length, 4, "the fixed-row window keeps one spacer plus the mounted cards");
+  assert.equal(runtime.gallery.children.length, 4, "the virtualized gallery keeps one spacer and its mounted window");
   const galleryWindow = runtime.catalogWindows.get("gallery");
   galleryWindow.frame = 1;
   runtime.gallery.listeners.get("scroll")();
@@ -145,16 +146,16 @@ async function galleryInteractions() {
   assert.equal(secondaryPointer.prevented, true, "a secondary pointer press is consumed before it can move catalog focus");
   firstNode.onkeydown({ key: "Enter", preventDefault() { this.prevented = true; } });
   firstNode.onkeydown({ key: " ", preventDefault() {} }); firstNode.onkeydown({ key: "ContextMenu" }); firstNode.onkeydown({ key: "F10", shiftKey: true });
-  assert.deepEqual(runtime.selected.slice(0, 3), ["one", "one", "one"]); assert.equal(runtime.menus.length, 3); assert.equal(runtime.prefetched.length, 2);
+  assert.deepEqual(runtime.selected.slice(0, 3), ["one", "one", "one"]); assert.equal(runtime.menus.length, 3); assert.equal(runtime.prefetched.length, 1, "hover schedules only its image; filtered neighbors are owned by the resource cache");
   for (const [filter, expected] of [["hidden", true], ["masked", true], ["unmasked", true], ["reviewed", true], ["unreviewed", true], ["all", true]]) {
-    state.galleryFilter = filter; assert.equal(runtime.imageMatchesGalleryFilter(filter === "hidden" ? second : filter === "masked" || filter === "reviewed" ? first : third), expected);
+    state.galleryFilter = filter === "all" ? new Set() : new Set([filter]); assert.equal(runtime.imageMatchesGalleryFilter(filter === "hidden" ? second : filter === "masked" || filter === "reviewed" ? first : third), expected);
   }
-  state.galleryFilter = "masked"; runtime.renderGallery(); assert.deepEqual([...state.galleryNodes.keys()], ["one"]);
-  state.galleryFilter = "hidden"; runtime.renderGallery(); assert.deepEqual([...state.galleryNodes.keys()], ["two"]);
-  state.galleryFilter = "reviewed"; runtime.renderGallery(); assert.deepEqual([...state.galleryNodes.keys()], ["one"]);
-  first.masked = false; state.galleryFilter = "masked"; runtime.renderGallery(); assert.equal(runtime.nodes.get("#galleryFilteredEmptyState").hidden, false); first.masked = true;
+  state.galleryFilter = new Set(["masked"]); runtime.renderGallery(); assert.deepEqual([...state.galleryNodes.keys()], ["one"]);
+  state.galleryFilter = new Set(["hidden"]); runtime.renderGallery(); assert.deepEqual([...state.galleryNodes.keys()], ["two"]);
+  state.galleryFilter = new Set(["reviewed"]); runtime.renderGallery(); assert.deepEqual([...state.galleryNodes.keys()], ["one"]);
+  first.masked = false; state.galleryFilter = new Set(["masked"]); runtime.renderGallery(); assert.equal(runtime.nodes.get("#galleryFilteredEmptyState").hidden, false); first.masked = true;
   state.images = []; runtime.renderGallery(); assert.equal(runtime.nodes.get("#galleryEmptyState").hidden, false);
-  state.images = [first, second, third]; state.galleryFilter = "all"; state.viewMode = "overview"; const before = runtime.gallery.children.length; runtime.renderGallery(); assert.equal(runtime.gallery.children.length, before); runtime.renderGallery(true);
+  state.images = [first, second, third]; state.galleryFilter = new Set(); state.viewMode = "overview"; const before = runtime.gallery.children.length; runtime.renderGallery(); assert.equal(runtime.gallery.children.length, before); runtime.renderGallery(true);
   state.viewMode = "edit"; runtime.renderGallery(true);
   runtime.document.createElement = null; state.images = [first]; runtime.renderGallery(true);
   assert.deepEqual([...state.galleryNodes.keys()], ["one"], "the gallery keeps the current catalog when DOM creation is unavailable");
@@ -182,7 +183,7 @@ async function galleryInteractions() {
   const catalogImages = state.images;
   runtime.gallery.clientWidth = 360; runtime.gallery.clientHeight = 152;
   state.images = Array.from({ length: 800 }, (_, index) => ({ id: `window-${index}`, relativePath: `set/${index}.png`, width: 100, height: 100 }));
-  state.galleryFilter = "all"; runtime.renderGallery(true);
+  state.galleryFilter = new Set(); runtime.renderGallery(true);
   assert.ok(state.galleryNodes.size < 40, "the fixed-row gallery mounts only a small scroll window");
   runtime.gallery.scrollTop = 152 * 120; runtime.renderGallery(true);
   assert.ok(state.galleryNodes.has("window-360"), "scrolling remounts the logical row at the new position");
@@ -193,7 +194,7 @@ async function galleryInteractions() {
   runtime.scrollCatalogImage("gallery", "window-4");
   assert.equal(runtime.gallery.scrollTop, visibleTop, "selecting another visible card does not recenter the gallery");
   runtime.scrollCatalogImage("gallery", "missing");
-  state.images = catalogImages; state.galleryFilter = "all"; runtime.gallery.scrollTop = 0; runtime.renderGallery(true);
+  state.images = catalogImages; state.galleryFilter = new Set(); runtime.gallery.scrollTop = 0; runtime.renderGallery(true);
 
   runtime.gallery.scrollTop = 999; runtime.overviewGrid.scrollTop = 555;
   runtime.renderGallery(true); runtime.renderOverview(true);
@@ -204,32 +205,32 @@ async function galleryInteractions() {
   assert.equal(runtime.catalogWindows.get("overview").focusId, null, "replacing a catalog clears its virtual overview focus");
 
   assert.deepEqual([...runtime.overviewFolderOptions()], ["sets", "sets/sub"]);
-  state.overviewFilter = "all"; state.overviewFolder = "sets"; state.overviewQuery = "two"; assert.deepEqual(runtime.overviewImages().map((image) => image.id), ["two"]);
+  state.overviewFilter = new Set(); state.overviewFolder = "sets"; state.overviewQuery = "two"; assert.deepEqual(runtime.overviewImages().map((image) => image.id), ["two"]);
   state.overviewFolder = ""; state.overviewQuery = "";
-  for (const [filter, expected] of [["hidden", ["two"]], ["reviewed", ["one"]], ["unreviewed", ["three"]], ["masked", ["one"]], ["unmasked", ["three"]]]) { state.overviewFilter = filter; assert.deepEqual(runtime.overviewImages().map((image) => image.id), expected); }
-  state.overviewFilter = "all"; state.overviewFolder = "missing"; runtime.syncOverviewFolders(); assert.equal(state.overviewFolder, "");
+  for (const [filter, expected] of [["hidden", ["two"]], ["reviewed", ["one"]], ["unreviewed", ["three"]], ["masked", ["one"]], ["unmasked", ["three"]]]) { state.overviewFilter = new Set([filter]); assert.deepEqual(runtime.overviewImages().map((image) => image.id), expected); }
+  state.overviewFilter = new Set(); state.overviewFolder = "missing"; runtime.syncOverviewFolders(); assert.equal(state.overviewFolder, "");
   state.viewMode = "overview"; state.batchMode = false; runtime.selectOverviewImage("one"); assert.deepEqual(runtime.selected.at(-1), "one");
   state.batchMode = true; runtime.selectOverviewImage("one", {}); assert.equal(state.selectedImageIds.has("one"), true); runtime.selectOverviewImage("one", {}); assert.equal(state.selectedImageIds.has("one"), false);
   runtime.selectOverviewImage("one", {}); runtime.selectOverviewImage("three", { ctrlKey: true }); runtime.selectOverviewImage("two", { shiftKey: true }); assert.deepEqual([...state.selectedImageIds], ["two", "three"]);
   runtime.selectOverviewImage("three", { shiftKey: true, ctrlKey: true }); assert.equal(state.selectedImageIds.has("three"), true); runtime.selectOverviewImage("gone", {});
   state.currentId = "one"; state.selectedImageIds = new Set(["one"]); runtime.renderOverview(true); const overviewNode = state.overviewNodes.get("one");
   assert.equal(overviewNode.getAttribute("aria-pressed"), "true"); overviewNode.onclick({}); overviewNode.oncontextmenu({}); overviewNode.onkeydown({ key: "Enter", preventDefault() {} }); overviewNode.onkeydown({ key: "F10", shiftKey: true });
-  state.overviewFilter = "hidden"; runtime.renderOverview(true); assert.deepEqual([...state.overviewNodes.keys()], ["two"]);
-  state.overviewFilter = "all"; runtime.renderOverview(true);
+  state.overviewFilter = new Set(["hidden"]); runtime.renderOverview(true); assert.deepEqual([...state.overviewNodes.keys()], ["two"]);
+  state.overviewFilter = new Set(); runtime.renderOverview(true);
   const savedGrid = runtime.nodes.get("#overviewGrid"); runtime.nodes.delete("#overviewGrid"); runtime.renderOverview(true); runtime.nodes.set("#overviewGrid", savedGrid);
 
   state.viewMode = "edit"; state.galleryNodes.set("one", galleryItem("gallery")); runtime.setViewMode("overview"); assert.equal(state.viewMode, "overview"); runtime.frames.shift()(); assert.equal(runtime.nodes.get("#overviewPane").focused, true);
   runtime.setViewMode("edit"); assert.equal(state.viewMode, "edit"); runtime.setViewMode("overview"); const stale = runtime.frames.pop(); state.viewMode = "edit"; stale();
-  state.currentId = "one"; runtime.context.gesture = true; runtime.moveCurrentBy(1); runtime.context.gesture = false; runtime.moveCurrentBy(1); assert.deepEqual(runtime.selected.at(-1), "image:three");
-  runtime.context.gesture = true; assert.equal(await runtime.reviewAndMoveNext(), null); runtime.context.gesture = false; state.currentId = "missing"; assert.equal(await runtime.reviewAndMoveNext(), null); state.currentId = "one"; runtime.context.reviewResult = false; assert.equal(await runtime.reviewAndMoveNext(), null); runtime.context.reviewResult = true; assert.equal((await runtime.reviewAndMoveNext()).id, "three"); state.currentId = "three"; assert.equal(await runtime.reviewAndMoveNext(), null);
+  state.currentId = "one"; runtime.context.gesture = true; runtime.moveCurrentBy(1); runtime.context.gesture = false; runtime.moveCurrentBy(1); assert.deepEqual(runtime.selected.at(-1), "image:two");
+  runtime.context.gesture = true; assert.equal(await runtime.reviewAndMoveNext(), null); runtime.context.gesture = false; state.currentId = "missing"; assert.equal(await runtime.reviewAndMoveNext(), null); state.currentId = "one"; runtime.context.reviewResult = false; assert.equal(await runtime.reviewAndMoveNext(), null); runtime.context.reviewResult = true; assert.equal((await runtime.reviewAndMoveNext()).id, "two"); state.currentId = "three"; assert.equal(await runtime.reviewAndMoveNext(), null);
   runtime.context.gesture = true; await runtime.hideAndMoveNext(); runtime.context.gesture = false; state.currentId = "missing"; await runtime.hideAndMoveNext(); state.currentId = "one"; runtime.context.hideResult = false; await runtime.hideAndMoveNext(); runtime.context.hideResult = true; await runtime.hideAndMoveNext(); state.currentId = "three"; await runtime.hideAndMoveNext();
   await runtime.runNavigationAction(async () => runtime.calls.push("navigate")); assert.ok(runtime.calls.includes("focus-canvas"));
-  state.currentId = "one"; runtime.updateNavigationControls(); assert.match(runtime.nodes.get("#imagePosition").textContent, /1/); first.reviewed = false; runtime.updateNavigationControls(); state.currentId = null; runtime.updateNavigationControls(); assert.equal(runtime.nodes.get("#imagePosition").textContent, "- / -");
+  state.currentId = "one"; runtime.updateNavigationControls(); assert.match(runtime.nodes.get("#imagePosition").textContent, /1/); first.reviewed = false; runtime.updateNavigationControls(); state.currentId = null; runtime.updateNavigationControls(); assert.equal(runtime.nodes.get("#imagePosition").textContent, "- / 3", "navigation keeps the filtered-image count when no item is selected");
 }
 
 function makeSaveRuntime() {
   const nodes = new Map();
-  const ids = ["#applyResult", "#applyStartButton", "#deleteOriginal", "#applySuffix", "#applyTargetMode", "#applyTargetCount", "#applyDivisor", "#divisor", "#applySuffixRow", "#deleteOriginalRow", "#applyOutputDirectoryRow", "#chooseOutputDirectoryButton", "#applyOutputDirectoryStatus", "#applyTemporarySourceNote", "#applyOverwriteMode", "#applyOverwriteRow", "#settingsDefaultOutputDirectory", "#settingsChooseOutputDirectory", "#applyProgress", "#applyCurrentName", "#applyProgressText", "#applyPauseButton", "#applyCancelButton", "#applyCloseButton", "#applySettings", "#applyProgressPanel", "#applyDialog", "#singleSaveOutputDirectoryStatus", "#singleSaveResult", "#singleSaveSuffixRow", "#singleSaveDeleteOriginalRow", "#singleSaveOutputDirectoryRow", "#singleSaveOverwriteMode", "#singleSaveOverwriteRow", "#singleSaveDeleteOriginal", "#singleSaveChooseOutputDirectoryButton", "#singleSaveStartButton", "#singleSaveSettings", "#singleSaveCopyMode", "#singleSaveSuffix", "#singleSaveDialog"];
+  const ids = ["#applyResult", "#applyStartButton", "#applyCopyMode", "#deleteOriginal", "#applySuffix", "#applyTargetMode", "#applyTargetCount", "#applyDivisor", "#divisor", "#applySuffixRow", "#deleteOriginalRow", "#applyOutputDirectoryRow", "#chooseOutputDirectoryButton", "#applyOutputDirectoryStatus", "#applyTemporarySourceNote", "#applyOverwriteMode", "#applyOverwriteRow", "#applyOutputFormat", "#applyKeepMetadata", "#applyFormatNote", "#settingsDefaultOutputDirectory", "#settingsChooseOutputDirectory", "#applyProgress", "#applyCurrentName", "#applyProgressText", "#applyPauseButton", "#applyCancelButton", "#applyCloseButton", "#applySettings", "#applyProgressPanel", "#applyDialog", "#singleSaveTarget", "#singleSaveOutputDirectoryStatus", "#singleSaveResult", "#singleSaveSuffixRow", "#singleSaveDeleteOriginalRow", "#singleSaveOutputDirectoryRow", "#singleSaveOverwriteMode", "#singleSaveOverwriteRow", "#singleSaveDeleteOriginal", "#singleSaveChooseOutputDirectoryButton", "#singleSaveStartButton", "#singleSaveSettings", "#singleSaveCopyMode", "#singleSaveSuffix", "#singleSaveOutputFormat", "#singleSaveKeepMetadata", "#singleSaveFormatNote", "#singleSaveDialog"];
   for (const id of ids) nodes.set(id, element());
   nodes.get("#applyTargetMode").value = "masked"; nodes.get("#applyDivisor").value = "16"; nodes.get("#divisor").value = "16"; nodes.get("#applySuffix").value = "_m";
   const saveMode = element(); saveMode.value = "copy"; const singleSaveMode = element(); singleSaveMode.value = "copy";
@@ -246,16 +247,16 @@ function makeSaveRuntime() {
     return {};
   };
   const context = {
-    codedError(code) { const error = new Error(); error.code = code; return error; },
+    codedError(code) { const error = new Error(); error.code = code; return error; }, responseError(response, payload) { const error = new Error(); error.status = response.status; error.code = payload?.error_code || "internal_error"; return error; },
     console, Map, Set, Array, Math, Number, Boolean, JSON, Promise, Uint8Array, Error, DOMException, window: { showDirectoryPicker: async () => ({ name: "picked", async queryPermission() { return "granted"; } }) }, navigator: { locks: { async request(_name, _options, callback) { return callback(); } } }, document: { activeElement: nodes.get("#applyStartButton"), querySelector(selector) { if (selector === 'input[name="batchSaveMode"]:checked') return saveMode; if (selector === 'input[name="singleSaveMode"]:checked') return singleSaveMode; if (selector === 'meta[name="mozarie-token"]') return { content: "token" }; return nodes.get(selector); } },
-    state, $: (selector) => nodes.get(selector), t(key, values = {}) { return `${key}:${Object.values(values).join(",")}`; }, api(url, options) { requests.push({ url, options }); return handler(url, options); },
+    state, $: (selector) => nodes.get(selector), t(key, values = {}) { return `${key}:${Object.values(values).join(",")}`; }, catalogRequestHeaders() { return {}; }, api(url, options) { requests.push({ url, options }); return handler(url, options); },
     fetch(url, options) { return handler(url, options); }, setTimeout(callback, delay) { if (delay === 150) callback(); return 1; }, clearTimeout() {},
     showUserError(error) { errors.push(error); }, userErrorCode(error) { return error?.code || "internal_error"; }, showModalFromInvoker(node) { node.open = true; }, setSettingsForm(settings) { state.settings = settings; }, async rememberOutputDirectoryHandle() {},
-    saveTargets() { return state.applyTargetIds; }, isBusy() { return Boolean(context.busy); }, async flushDraftSaves() { if (context.flushError) throw context.flushError; }, async waitForCandidateMutations() { calls.push("wait-candidates"); }, updateBlockSizeDisplay() { calls.push("block-size"); },
+    saveTargets() { return state.applyTargetIds; }, isBusy() { return Boolean(context.busy); }, currentImageActionPending() { return Boolean(state.pendingImageId); }, catalogStagingEditsActive() { return false; }, isProcessableImage() { return true; }, async flushDraftSaves() { if (context.flushError) throw context.flushError; }, async waitForCandidateMutations() { calls.push("wait-candidates"); }, updateBlockSizeDisplay() { calls.push("block-size"); },
     updateActionButtons() { calls.push("actions"); }, releaseCandidateBundles(id) { calls.push(`release:${id}`); }, resetCurrentDraft() { calls.push("reset-draft"); }, pruneSourceAccess() { calls.push("prune"); },
     releaseImageCaches(id) { calls.push(`cache:${id}`); }, clearCandidateMutationState(id) { calls.push(`mutation:${id}`); }, clearReviewForRemovedImage() { calls.push("clear-review"); }, clearBatchSelection() { calls.push("clear-batch"); }, clearEditor() { calls.push("clear-editor"); }, renderCatalogViews() { calls.push("catalog"); }, updateSelectionActionBar() { calls.push("selection"); },
     async selectImage(id) { calls.push(`select:${id}`); }, async setReviewed() { calls.push("reviewed"); return true; }, updateNavigationControls() { calls.push("navigation"); }, refreshMaskStatus() { calls.push("mask-status"); }, renderCandidates() { calls.push("candidates"); }, render() { calls.push("render"); },
-    isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }, isCurrentGeneration(generation) { return state.imageGeneration === generation; }, async moveReviewedPathAfterApply() { calls.push("review-path"); },
+    isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }, isCurrentGeneration(generation) { return state.imageGeneration === generation; }, async resyncAfterStaleCatalog() {}, async moveReviewedPathAfterApply() { calls.push("review-path"); },
     async confirmAction() { return context.confirmed; }, async ensureSaveSources() {}, async runBrowserSave() { calls.push("run-browser"); }, closeProcessing() { calls.push("close-processing"); }, markImagesUnreviewed() { calls.push("unreview"); },
     modalInvokers: new Map(), updateProgress() { calls.push("progress"); }, setStatusKey(key) { calls.push(`status:${key}`); }, scheduleJobPoll() { calls.push("schedule"); },
   };
@@ -268,6 +269,7 @@ function makeSaveRuntime() {
 
 async function saveInteractions() {
   const runtime = makeSaveRuntime(); const { state } = runtime;
+  state.currentId = "file"; state.currentImage = { width: 1, height: 1 };
   runtime.setApplyResult("ok"); assert.equal(runtime.nodes.get("#applyResult").textContent, "ok"); runtime.setApplyResult("bad", true); runtime.showApplyError("bad"); assert.equal(runtime.errors.length, 2);
   assert.equal(runtime.selectedSingleSaveMode(), "copy"); runtime.setSingleSaveResult("single", true); assert.equal(runtime.nodes.get("#singleSaveResult").textContent, "single");
   await runtime.openSingleSaveDialog(null); runtime.context.busy = true; await runtime.openSingleSaveDialog("file"); runtime.context.busy = false; runtime.context.flushError = new Error("draft"); await runtime.openSingleSaveDialog("file"); runtime.context.flushError = null; state.candidateUpdateChains.set("pending", Promise.resolve()); await runtime.openSingleSaveDialog("file"); state.candidateUpdateChains.clear(); assert.equal(state.singleSave.imageId, "file");
