@@ -2983,17 +2983,17 @@ async function main() {
       await restoreDraft("sample", state.imageGeneration);
     });
     await page.waitForFunction(() => state.history.length === 1 && state.historyIndex === 1 && canvasHasPixels(addCtx, addCanvas));
-    const restoredHistory = await page.evaluate(() => {
+    const restoredHistory = await page.evaluate(async () => {
       const restored = state.history.length === 1 && state.historyIndex === 1 && canvasHasPixels(addCtx, addCanvas);
-      restoreSnapshot(0);
+      await restoreSnapshot(0);
       const undoWorked = !canvasHasPixels(addCtx, addCanvas) && !$("#redoButton").disabled;
-      restoreSnapshot(1);
+      await restoreSnapshot(1);
       const redoWorked = canvasHasPixels(addCtx, addCanvas);
       resetCurrentDraft(); state.drafts.delete("sample");
       return { restored, undoWorked, redoWorked };
     });
     assert.deepEqual(restoredHistory, { restored: true, undoWorked: true, redoWorked: true }, "manual history survives changing away and back to an image");
-    const mosaicEraserHistory = await page.evaluate(() => {
+    const mosaicEraserHistory = await page.evaluate(async () => {
       const candidates = state.candidates; const candidateImages = state.candidateImages; const tool = state.tool;
       const automatic = document.createElement("canvas"); automatic.width = addCanvas.width; automatic.height = addCanvas.height; automatic.getContext("2d").fillRect(2, 2, 8, 8);
       state.candidates = [{ id: "automatic-range", role: "apply", enabled: true, labelToken: "penis", source: "target", refinement: null }]; state.candidateImages = new Map([["automatic-range", automatic]]);
@@ -3010,7 +3010,7 @@ async function main() {
       beginManualStroke(point); appendManualStrokePoint({ x: point.x + 1, y: point.y + 1 }); completeManualStroke();
       state.tool = "mosaic_eraser"; beginManualStroke(point); appendManualStrokePoint({ x: point.x + 1, y: point.y + 1 }); completeManualStroke();
       const historyTools = state.history.map((stroke) => stroke.tool);
-      restoreSnapshot(1); const undo = state.historyIndex === 1 && canvasHasPixels(addCtx, addCanvas); restoreSnapshot(2); const redo = state.historyIndex === 2;
+      await restoreSnapshot(1); const undo = state.historyIndex === 1 && canvasHasPixels(addCtx, addCanvas); await restoreSnapshot(2); const redo = state.historyIndex === 2;
       const automaticUnchanged = state.candidates[0].enabled && canvasHasPixels(automatic.getContext("2d"), automatic);
       state.candidates = candidates; state.candidateImages = candidateImages; state.tool = tool; resetHistoryToCurrentManualMask(); renderCandidates();
       return { added, erased, undo, redo, automaticUnchanged, historyTools };
@@ -3744,7 +3744,7 @@ async function main() {
       const candidate = { id: "history-candidate", role: "apply", enabled: true, labelToken: "penis", source: "target", refinement: null, color: "#fff" };
       state.candidates = [candidate]; state.candidateImages = new Map([[candidate.id, mask]]); state.removedCandidateIds = new Set(); state.settings.confirmations.candidateDelete = false; resetHistoryToCurrentManualMask();
       await deleteCandidate(candidate); const afterDelete = state.removedCandidateIds.has(candidate.id) && state.history.length === 1 && currentRecord().candidateCount === 0;
-      restoreSnapshot(0); const undo = !state.removedCandidateIds.has(candidate.id); restoreSnapshot(1); const redo = state.removedCandidateIds.has(candidate.id);
+      await restoreSnapshot(0); const undo = !state.removedCandidateIds.has(candidate.id); await restoreSnapshot(1); const redo = state.removedCandidateIds.has(candidate.id);
       for (let index = 0; index < 13; index += 1) recordHistoryOperation({ kind: "removeCandidates", ids: [`trim-${index}`] });
       const trimmed = state.history.length > 12 && !state.historyRemovedCandidateIds.has("trim-0");
       state.removedCandidateIds.delete(candidate.id);
@@ -3810,8 +3810,8 @@ async function main() {
       await selectImage("sample-two", true, { saveCurrentDraft: false });
       await selectImage("sample", true, { saveCurrentDraft: false });
       const restoredHistory = state.history.length === 1 && state.historyIndex === 1;
-      restoreSnapshot(0); const undo = state.historyIndex === 0;
-      restoreSnapshot(1); const redo = state.historyIndex === 1;
+      await restoreSnapshot(0); const undo = state.historyIndex === 0;
+      await restoreSnapshot(1); const redo = state.historyIndex === 1;
       const bulk = draftPayload(["sample", "sample-two"]);
       const result = { restoredHistory, undo, redo, bulk: Object.keys(bulk).sort(), retained: [state.drafts.has("sample"), state.drafts.has("sample-two")] };
       state.project = originalProject; state.projectReadOnly = originalProjectReadOnly;
@@ -4072,9 +4072,18 @@ async function main() {
           assert.equal(accepts(pixels), true, `4K ${tool} changes its intended pixel layer`);
         }
         await page.waitForFunction(() => !state.activeStroke && !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
-        const editorPerf = await page.evaluate(() => {
-          let undo = 0; for (let index = 0; index < 10; index += 1) { const start = performance.now(); restoreSnapshot(Math.max(0, state.historyIndex - 1)); undo = Math.max(undo, performance.now() - start); }
-          let redo = 0; for (let index = 0; index < 10; index += 1) { const start = performance.now(); restoreSnapshot(Math.min(state.history.length, state.historyIndex + 1)); redo = Math.max(redo, performance.now() - start); }
+        const editorPerf = await page.evaluate(async () => {
+          let undo = 0; let redo = 0;
+          for (let index = 0; index < 10; index += 1) {
+            const undoTarget = state.historyIndex - 1;
+            if (undoTarget < 0) throw new Error("4K undo measurement requires one undoable history step");
+            let start = performance.now(); await restoreSnapshot(undoTarget); undo = Math.max(undo, performance.now() - start);
+            if (state.historyIndex !== undoTarget) throw new Error("4K undo measurement did not reach its requested history position");
+            const redoTarget = state.historyIndex + 1;
+            if (redoTarget > state.history.length) throw new Error("4K redo measurement requires one redoable history step");
+            start = performance.now(); await restoreSnapshot(redoTarget); redo = Math.max(redo, performance.now() - start);
+            if (state.historyIndex !== redoTarget) throw new Error("4K redo measurement did not reach its requested history position");
+          }
           const value = window.__editorPerf;
           const result = { pendingMax: value.pendingMax, undo, redo };
           const canvas = document.querySelector("#editorCanvas"); canvas.removeEventListener("pointermove", value.begin, true); canvas.removeEventListener("pointermove", value.end); delete window.__editorPerf;
