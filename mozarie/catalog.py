@@ -1263,9 +1263,10 @@ class CatalogMixin:
             if record.image_id not in removed_ids: continue
             try: quarantine.unlink()
             except OSError:
-                LOGGER.exception("元画像の完全削除に失敗: %s", record.relative_path)
-                failures.append({"imageId": record.image_id, "reason": "source_delete_failed"}); cleanup_paths.append(str(quarantine))
-        result = {**removed, "failed": failures, "state": "cleanup_pending" if cleanup_paths else "committed", "quarantinePaths": cleanup_paths}
+                LOGGER.warning("元画像削除の後処理を保留: %s", record.relative_path)
+                cleanup_paths.append(str(quarantine))
+        result = {**removed, "failed": failures, "state": "cleanup_pending" if cleanup_paths else "committed",
+                  "quarantinePaths": cleanup_paths, "cleanupPendingCount": len(cleanup_paths)}
         names = {image_id: record.relative_path for image_id, record in records.items() if record is not None}
         names.update({str(item["imageId"]): str(item.get("relativePath", item["imageId"])) for item in operation.get("items", [])})
         for failure in result["failed"]:
@@ -1296,6 +1297,15 @@ class CatalogMixin:
             self.workspace_store.update_source_delete_operation(token, "cancelled", result)
             return {"deleteToken": token, **result}
         return operation
+
+    def acknowledge_source_delete(self, token: str) -> dict[str, Any]:
+        operation = self.source_delete_status(token)
+        if operation["state"] not in {"committed", "cancelled"}:
+            raise ClientError("削除の後処理が完了するまで確認できません。", "source_delete_cleanup_pending")
+        self.workspace_store.acknowledge_source_delete(token)
+        with self.lock:
+            self.source_delete_receipts.pop(token, None)
+        return {"acknowledged": True, "deleteToken": token}
 
     def retry_source_delete_cleanups(self) -> None:
         """Finish source unlinks left after a committed workspace deletion."""

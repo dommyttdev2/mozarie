@@ -1293,6 +1293,26 @@ class WorkspaceStore:
                 db.execute("ROLLBACK")
                 raise
 
+    def acknowledge_source_delete(self, token: str) -> bool:
+        """Discard only a terminal receipt the browser has already received."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                operations = self._source_delete_operations_db(db)
+                operation = operations.get(token)
+                if operation is None:
+                    db.execute("COMMIT")
+                    return False
+                if operation.get("state") not in {"committed", "cancelled"}:
+                    raise ValueError("source delete operation is not terminal")
+                operations.pop(token, None)
+                self._write_source_delete_operations_db(db, operations)
+                db.execute("COMMIT")
+                return True
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
     def pending_source_delete_cleanups(self) -> list[tuple[str, list[str]]]:
         with self._lock, self._connect() as db:
             operations = self._source_delete_operations_db(db)

@@ -305,6 +305,11 @@ async function commitSourceDeleteWithRetry(payload) {
   }
 }
 
+async function acknowledgeSourceDelete(deleteToken) {
+  await api("/api/catalog/delete-source/ack", { method: "POST", body: JSON.stringify({ deleteToken }), resyncOnStale: false });
+  await forgetPendingSourceDelete(deleteToken);
+}
+
 async function resumePendingSourceDeletes() {
   for (const pending of await pendingSourceDeletes()) {
     try {
@@ -316,8 +321,11 @@ async function resumePendingSourceDeletes() {
         await api("/api/catalog/delete-source/cancel", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
       }
       const settled = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
-      if (settled.state !== "prepared") await forgetPendingSourceDelete(pending.deleteToken);
-    } catch { /* Keep the token until the next startup or reconnect. */ }
+      if (["committed", "cancelled"].includes(settled.state)) await acknowledgeSourceDelete(pending.deleteToken);
+    } catch (error) {
+      if (error?.code === "source_delete_not_prepared") await forgetPendingSourceDelete(pending.deleteToken);
+      // Keep prepared and cleanup-pending operations until a terminal receipt is acknowledged.
+    }
   }
   await resyncCatalog().catch(() => null);
 }
@@ -365,9 +373,10 @@ async function permanentlyDeleteImages(images, visibleImages) {
     await restoreDeletionSelection(selection, imageIds);
     const failed = [...local.failed, ...(prepared.failed || []), ...browser.failed, ...(data.failed || [])];
     const failureDetails = failed.map((failure) => `${failure.relativePath || failure.imageId}: ${failure.reason}`).join("、");
-    setStatus(`元画像を${removed.size}件削除しました。${failed.length ? `失敗${failed.length}件: ${failureDetails}` : ""}`, failed.length ? "warning" : "success");
+    const cleanupNotice = data.cleanupPendingCount ? ` 元画像ファイルの後処理${data.cleanupPendingCount}件を再試行します。` : "";
+    setStatus(`元画像を${removed.size}件削除しました。${failed.length ? `失敗${failed.length}件: ${failureDetails}` : ""}${cleanupNotice}`, failed.length ? "warning" : "success");
     if (failed.length) showUserError(codedError(failed[0].reason));
-    if (data.state !== "cleanup_pending") await forgetPendingSourceDelete(token);
+    if (data.state === "committed") await acknowledgeSourceDelete(token);
   } catch (error) {
     await restoreDeletionSelection(selection, imageIds);
     showUserError(error);
