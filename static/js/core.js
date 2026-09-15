@@ -24,11 +24,10 @@ const state = {
   sourceAccess: new Map(),
   // Projectless directory imports retain their root only until the session is named.
   projectlessDirectorySources: new Map(),
-  processing: null, imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null, pendingImageKey: null, pendingCandidateKey: null,
+  processing: null, imageInflight: new Map(), candidateInflight: new Map(), imageLoadControllers: new Map(), candidateLoadControllers: new Map(), loadingDelay: null, pendingImageKey: null, pendingCandidateKey: null,
   galleryCollapsed: false, inspectorCollapsed: false,
   settings: null, settingsStatus: null, jobPollTimer: null,
-  imageCache: null, candidateBundleCache: null, catalogLoadControllers: new Set(),
-  prefetchQueue: [], prefetchActive: 0, prefetchTimer: null,
+  imageCache: null, candidateBundleCache: null, catalogLoadControllers: new Set(), resourceImageKeys: new Set(), resourceCandidateKeys: new Set(), hoverPrefetchId: null,
   fillWorker: null, fillPending: false,
   project: null, projectReadOnly: false, projectHistory: new Map(), projectHistoryBusy: false, projectOperationPending: false,
   missingNativeSources: [],
@@ -535,8 +534,8 @@ function catalogRecordMatches(record, epoch, { version = imageAssetVersion(recor
 function abortCatalogLoads() {
   for (const controller of state.catalogLoadControllers) controller.abort();
   state.catalogLoadControllers.clear();
-  state.imageInflight.clear(); state.candidateInflight.clear(); state.prefetchQueue = [];
-  clearTimeout(state.prefetchTimer); state.prefetchTimer = null;
+  state.imageLoadControllers.clear(); state.candidateLoadControllers.clear();
+  state.imageInflight.clear(); state.candidateInflight.clear();
 }
 function cancelFillWork() { state.fillWorker?.terminate?.(); state.fillWorker = null; state.fillPending = false; }
 function isGestureActive() { return state.drawing || state.panning || state.boundaryDragging; }

@@ -88,7 +88,8 @@ function setCatalogNode(windowState, image, index, layout, rowNode) {
     item.querySelector(".gallery-review-badge").textContent = reviewed ? t("review.reviewedBadge") : t("review.unreviewedBadge");
     item.setAttribute("aria-label", [image.relativePath, reviewed ? t("review.reviewedBadge") : t("review.unreviewedBadge")].join(t("a11y.separator")));
     item.onclick = () => { windowState.focusId = image.id; selectCatalogImage(image.id); };
-    item.onmouseenter = () => { schedulePrefetch(image, 2); prefetchNeighbors(image); };
+    item.onmouseenter = () => { state.hoverPrefetchId = image.id; schedulePrefetch(image); };
+    item.onmouseleave = () => { if (state.hoverPrefetchId === image.id) { state.hoverPrefetchId = null; syncResourceOwnership(); } };
   } else {
     item.querySelector(".overview-item-name").textContent = image.relativePath.split(/[\\/]/).pop();
     item.querySelector(".overview-item-dimensions").textContent = `${image.width} × ${image.height}`;

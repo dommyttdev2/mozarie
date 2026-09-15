@@ -529,12 +529,15 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 source_kind = self.headers.get("X-Mozarie-Source-Kind", "browser-files")
                 import_intent = self.headers.get("X-Mozarie-Import-Intent", "")
                 import_session_id = self.headers.get("X-Mozarie-Import-Session", "")
+                requested_parallelism = self.headers.get("X-Mozarie-Import-Parallelism", "")
+                target_count = self.headers.get("X-Mozarie-Import-Target-Count", "")
                 raw_mtime = self.headers.get("X-Mozarie-File-Mtime", "0")
                 raw_size = self.headers.get("X-Mozarie-File-Size", "0")
                 if (source_identity and not _is_canonical_uuid(source_identity)
                         or source_kind not in {"browser-files", "browser-directory"}
                         or import_intent not in {"add", "restore"}
-                        or not raw_mtime.isdigit() or not raw_size.isdigit()):
+                        or not raw_mtime.isdigit() or not raw_size.isdigit()
+                        or not requested_parallelism.isdigit() or not target_count.isdigit()):
                     self._reject_unread_request(ClientError("画像の更新情報が正しくありません。", "input_invalid"))
                 try:
                     mtime_ns = int(raw_mtime) * 1_000_000
@@ -546,7 +549,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 except ClientError as exc:
                     self._reject_unread_request(exc)
                 try:
-                    STATE.begin_import_transfer(import_session_id, expected_project_id, expected_catalog_generation)
+                    STATE.begin_import_transfer(
+                        import_session_id, expected_project_id, expected_catalog_generation,
+                        int(requested_parallelism), int(target_count),
+                    )
                 except ClientError as exc:
                     self._reject_unread_request(exc)
                 except Exception:
@@ -555,10 +561,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 response = None
                 succeeded = False
                 try:
-                    with STATE.import_staging_gate:
-                        staged_path = self._read_binary_body_to_file(content_length)
-                        requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
-                        try:
+                    staged_path = self._read_binary_body_to_file(content_length)
+                    requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
+                    try:
                             # Keep implicit API callers from splitting a
                             # parallel empty-catalog upload across IDs. This
                             # lock only verifies that the browser is still
@@ -566,24 +571,24 @@ class MosaicHandler(BaseHTTPRequestHandler):
                             # decoding and file copy below retain their
                             # parallelism.  A request header never opens or
                             # changes a project.
-                            with STATE.import_lock:
-                                if requested_catalog and STATE.catalog_id != requested_catalog:
-                                    raise ClientError("画像追加中にフォルダを切り替えることはできません。", "operation_in_progress")
-                            import_args = {
-                                "name": name, "relative_path": relative_path, "client_key": client_key,
-                                "include_images": False, "transfer_active": True,
-                                "import_session_id": import_session_id,
-                                "import_project_id": expected_project_id,
-                                "import_catalog_generation": expected_catalog_generation,
-                                "source_identity": source_identity or None,
-                                "source_kind": source_kind,
-                                "intent": import_intent,
-                                "mtime_ns": mtime_ns,
-                                "size_bytes": size_bytes,
-                            }
-                            _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
-                        finally:
-                            staged_path.unlink(missing_ok=True)
+                        with STATE.import_lock:
+                            if requested_catalog and STATE.catalog_id != requested_catalog:
+                                raise ClientError("画像追加中にフォルダを切り替えることはできません。", "operation_in_progress")
+                        import_args = {
+                            "name": name, "relative_path": relative_path, "client_key": client_key,
+                            "include_images": False, "transfer_active": True,
+                            "import_session_id": import_session_id,
+                            "import_project_id": expected_project_id,
+                            "import_catalog_generation": expected_catalog_generation,
+                            "source_identity": source_identity or None,
+                            "source_kind": source_kind,
+                            "intent": import_intent,
+                            "mtime_ns": mtime_ns,
+                            "size_bytes": size_bytes,
+                        }
+                        _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
+                    finally:
+                        staged_path.unlink(missing_ok=True)
                     response = {"imported": imported, "catalogId": STATE.catalog_id,
                                 "catalogGeneration": STATE.catalog_snapshot()["catalogGeneration"]}
                     succeeded = True
@@ -788,19 +793,23 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     output_format=str(payload.get("format", "original")),
                     keep_metadata=_read_bool(payload.get("keepMetadata", True), "メタ情報の保持"),
                 ))
-                output, record, revision, save_token = rendered
                 if copy_to_default:
-                    self._json({"output": str(rendered.output_path), "candidateRevision": revision, "saveToken": save_token})
+                    self._json({
+                        "output": str(rendered.output_path),
+                        "candidateRevision": rendered.candidate_revision,
+                        "saveToken": rendered.save_token,
+                    })
                 else:
-                    self._binary(
-                        output,
-                        rendered.mime_type,
-                        headers={
-                            "X-Mozarie-Revision": str(revision),
-                            "X-Mozarie-Save-Token": save_token,
+                    assert rendered.response_path is not None
+                    try:
+                        self._stream_path(rendered.response_path, rendered.mime_type, {
+                            "X-Mozarie-Revision": str(rendered.candidate_revision),
+                            "X-Mozarie-Save-Token": rendered.save_token,
                             "X-Mozarie-No-Effect": "1" if rendered.no_effect else "0",
-                        },
-                    )
+                        })
+                    finally:
+                        if rendered.response_path_is_temporary:
+                            rendered.response_path.unlink(missing_ok=True)
             elif path == "/api/save/commit":
                 source_mtime_ms = payload.get("sourceMtimeMs")
                 source_size_bytes = payload.get("sourceSizeBytes")
@@ -1000,10 +1009,10 @@ class MosaicHandler(BaseHTTPRequestHandler):
             thumbnail_dir = STATE.cache_dir / "thumbnails"
             thumbnail_dir.mkdir(parents=True, exist_ok=True)
             thumbnail_path = thumbnail_dir / f"{record.image_id}-{asset_version}.jpg"
-            # Single-flight first: waiters for the same thumbnail do not consume a
-            # global generation slot.  Only its cache-miss producer takes one.
+            # A visible thumbnail is single-flight by asset.  Unrelated visible
+            # requests are not held behind a fixed process-wide worker count.
             if not thumbnail_path.is_file():
-                with STATE.thumbnail_gate:
+                with STATE.thumbnail_generation_lock(f"{image_id}-{asset_version}"):
                     if not thumbnail_path.is_file():
                         with STATE.lock:
                             current = STATE.images.get(image_id)

@@ -17,7 +17,6 @@ from typing import Any
 
 from .core import (
     APP_DIR, CACHE_BASE_DIR, DEFAULT_COLORS, LOGGER, SESSION_BASE_DIR,
-    THUMBNAIL_WORKERS,
     BrowserSaveReceipt, BrowserSaveToken, Candidate, ClientError, ImageRecord,
     InferenceGate, Job, JobControl, torch_module,
 )
@@ -142,8 +141,11 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         # mutation still uses ``lock``; never acquire an image lock while that
         # global lock is held.
         self._image_io_locks: dict[str, threading.RLock] = {}
-        self.thumbnail_gate = threading.BoundedSemaphore(THUMBNAIL_WORKERS)
-        self.import_staging_gate = threading.BoundedSemaphore(10)
+        # Thumbnail work is single-flight per visible asset.  There is no
+        # process-wide worker ceiling: unrelated visible requests may proceed
+        # with the browser's actual demand.
+        self._thumbnail_locks_guard = threading.Lock()
+        self._thumbnail_locks: dict[str, tuple[threading.Lock, int]] = {}
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
         # A claimed token is being committed outside ``lock``.  Expiry polling
         # must leave its already-written copy alone until the commit finishes.
@@ -179,6 +181,25 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         """Let long-lived local operations leave cleanly during process shutdown."""
         self.shutdown_requested.set()
         self.workspace_store.shutdown()
+
+    @contextmanager
+    def thumbnail_generation_lock(self, key: str):
+        """Serialize one thumbnail path without retaining a global worker cap."""
+        with self._thumbnail_locks_guard:
+            lock, waiters = self._thumbnail_locks.get(key, (threading.Lock(), 0))
+            self._thumbnail_locks[key] = (lock, waiters + 1)
+        try:
+            with lock:
+                yield
+        finally:
+            with self._thumbnail_locks_guard:
+                current = self._thumbnail_locks.get(key)
+                if current is None or current[0] is not lock:
+                    return
+                if current[1] <= 1:
+                    self._thumbnail_locks.pop(key, None)
+                else:
+                    self._thumbnail_locks[key] = (lock, current[1] - 1)
 
     def set_image_flags_bulk(self, payload: dict[str, Any]) -> dict[str, dict[str, bool]]:
         """Keep durable bulk flags and a concurrent catalog publication in one state epoch."""
@@ -305,9 +326,18 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if session["active"] or session["touched"] >= cutoff
         }
 
-    def begin_import_transfer(self, session_id: str, expected_project_id: str | None, expected_catalog_generation: int) -> None:
+    def begin_import_transfer(
+        self,
+        session_id: str,
+        expected_project_id: str | None,
+        expected_catalog_generation: int,
+        requested_parallelism: int,
+        target_count: int,
+    ) -> None:
         """Claim one browser import batch without serialising its file I/O."""
-        if not isinstance(session_id, str) or not _is_canonical_uuid(session_id):
+        if (not isinstance(session_id, str) or not _is_canonical_uuid(session_id)
+                or isinstance(requested_parallelism, bool) or not isinstance(requested_parallelism, int) or requested_parallelism < 1
+                or isinstance(target_count, bool) or not isinstance(target_count, int) or target_count < 1):
             raise ClientError("画像追加セッションが正しくありません。", "input_invalid")
         with self.import_lock:
             with self.lock:
@@ -319,11 +349,14 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                     if self._import_sessions:
                         raise ClientError("別の画像追加が完了するまでお待ちください。", "operation_in_progress")
                     self._assert_catalog_expectation(expected_project_id, expected_catalog_generation)
+                    effective_parallelism = min(requested_parallelism, target_count)
                     session = {"project_id": expected_project_id, "generation": expected_catalog_generation,
                                "last_generation": expected_catalog_generation, "active": 0, "finish_requested": False,
-                               "succeeded": 0, "failed": 0, "started_at": time.monotonic(), "outcome": {}, "touched": time.monotonic()}
+                               "succeeded": 0, "failed": 0, "started_at": time.monotonic(), "outcome": {}, "touched": time.monotonic(),
+                               "requested_parallelism": requested_parallelism, "effective_parallelism": effective_parallelism,
+                               "target_count": target_count}
                     self._import_sessions[session_id] = session
-                    LOGGER.info("ブラウザー画像読込を開始")
+                    LOGGER.info("ブラウザー画像読込を開始: 対象=%d件 要求並列=%d 実効並列=%d", target_count, requested_parallelism, effective_parallelism)
                 elif session["project_id"] != expected_project_id or session["generation"] != expected_catalog_generation:
                     raise ClientError("画像追加セッションが更新されています。", "stale_catalog")
                 elif session["finish_requested"]:
@@ -362,7 +395,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
     def _log_import_session_finished(session: dict[str, Any]) -> None:
         outcome = session.get("outcome", {})
         LOGGER.info(
-            "ブラウザー画像読込を完了: 送信成功=%d件 送信失敗=%d件 完了=%d件 失敗=%s 取消=%s 所要=%.2f秒",
+            "ブラウザー画像読込を完了: 対象=%d件 要求並列=%d 実効並列=%d 送信成功=%d件 送信失敗=%d件 完了=%d件 失敗=%s 取消=%s 所要=%.2f秒",
+            session["target_count"], session["requested_parallelism"], session["effective_parallelism"],
             session["succeeded"], session["failed"], int(outcome.get("completed", session["succeeded"])),
             bool(outcome.get("failed", False)), bool(outcome.get("cancelled", False)), time.monotonic() - session["started_at"],
         )

@@ -24,8 +24,6 @@ from .image_io import (
 )
 from .masks import compose_masks, expand_mask, union_mask
 
-_SAVE_RENDER_MEMORY_BUDGET = 512 * 1024 * 1024
-
 class SavingMixin:
     def start_apply(
         self,
@@ -139,6 +137,8 @@ class SavingMixin:
         if output_format == "jpg" and keep_metadata:
             raise ClientError("JPG形式ではメタ情報を保持できません。", "input_invalid")
         rendered_path: Path | None = None
+        response_path: Path | None = None
+        response_path_is_temporary = False
         output_path: Path | None = None
         output_fingerprint: tuple[int, int] | None = None
         configured_output_directory: Path | None = None
@@ -210,7 +210,8 @@ class SavingMixin:
                 # copied as-is.  An overwrite deliberately becomes a commit
                 # with ``keep`` instead of touching its source file.
                 if no_effect:
-                    output = read_stable_source_bytes(record, source_fingerprint); output_suffix = record.path.suffix.lower()
+                    output = read_stable_source_bytes(record, source_fingerprint) if copy_to_default else None
+                    output_suffix = record.path.suffix.lower()
                     _output_mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(output_suffix, "application/octet-stream")
                 else:
                     output, output_suffix, _output_mime = render_output(record, mask, calculate_block_size(record.width, record.height, divisor), output_format, keep_metadata)
@@ -220,6 +221,7 @@ class SavingMixin:
                     target_record = replace(record, path=record.path.with_suffix(output_suffix))
                     output_path = self._reserve_output_destination(target_record, _read_save_suffix(suffix), configured_output_directory)
                     try:
+                        assert output is not None
                         write_rendered_copy(output_path, output)
                         output_stat = output_path.stat()
                         output_fingerprint = (output_stat.st_mtime_ns, output_stat.st_size)
@@ -227,18 +229,25 @@ class SavingMixin:
                         raise ClientError("保存先フォルダへ保存できませんでした。設定で変更してください。", "save_write_failed") from exc
                     finally:
                         self._release_output_destination(output_path)
-                elif not copy_to_browser and not no_effect:
-                    # Browser copies stream the render straight to the chosen
-                    # File System Access destination.  Keeping a second cache
-                    # file until the browser acknowledges the commit made large
-                    # batches both memory- and disk-bound for no benefit.  An
-                    # overwrite still needs this staged replacement.
+                elif not no_effect:
+                    # Stream rendered data from a file instead of retaining a
+                    # second response-sized browser buffer.  Overwrites keep
+                    # their staged file until commit; copy saves discard it as
+                    # soon as the response finishes streaming.
                     rendered_dir = self.cache_dir / "browser-save"
                     rendered_dir.mkdir(parents=True, exist_ok=True)
                     with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=output_suffix, delete=False) as handle:
                         rendered_path = Path(handle.name)
+                        assert output is not None
                         handle.write(output)
                         handle.flush()
+                    response_path = rendered_path
+                    response_path_is_temporary = copy_to_browser
+                    output = None
+                elif not copy_to_default:
+                    # A no-effect save is the original file.  It can go
+                    # straight to the HTTP stream without materialising it.
+                    response_path = record.path
 
                 with self.lock:
                     self._assert_image_editable(image_id)
@@ -253,16 +262,23 @@ class SavingMixin:
                     if self._has_active_worker():
                         raise ClientError("バックグラウンド処理中は保存できません。完了後にもう一度実行してください。", "operation_in_progress")
                     save_token = self._issue_browser_save_token_unchecked(
-                        record, current_revision, source_fingerprint, catalog_generation, rendered_path, output_path, output_fingerprint,
+                        record, current_revision, source_fingerprint, catalog_generation,
+                        None if response_path_is_temporary else rendered_path, output_path, output_fingerprint,
                         allow_copy_action=copy_to_browser or no_effect,
                         no_effect=no_effect,
                         output_format=output_format, keep_metadata=keep_metadata,
                     )
+                    # The token or the HTTP handler now owns the staged file.
                     rendered_path = None
-            return BrowserSaveRender(output, record, current_revision, save_token, output_path, no_effect, output_format, _output_mime, output_suffix)
+            return BrowserSaveRender(
+                output, record, current_revision, save_token, output_path, no_effect, output_format, _output_mime, output_suffix,
+                response_path, response_path_is_temporary,
+            )
         finally:
             if rendered_path is not None:
                 rendered_path.unlink(missing_ok=True)
+            if response_path_is_temporary and response_path is not None and 'save_token' not in locals():
+                response_path.unlink(missing_ok=True)
             if output_path is not None and 'save_token' not in locals():
                 output_path.unlink(missing_ok=True)
 
@@ -612,12 +628,10 @@ class SavingMixin:
                         self.invalidate_sam_image(record.image_id)
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
 
-            # Rendering holds decoded pixels, a mask and an encoder buffer at
-            # once.  Bound workers by the largest image instead of letting
-            # eight 4K encodes reserve roughly a gigabyte at the same time.
-            largest_render_bytes = max((record.width * record.height * 32 for record in records), default=1)
-            memory_workers = max(1, _SAVE_RENDER_MEMORY_BUDGET // largest_render_bytes)
-            worker_count = min(8, max(1, saving_parallelism), memory_workers)
+            requested_parallelism = max(1, int(saving_parallelism))
+            worker_count = min(requested_parallelism, len(records))
+            self._set_job_parallelism(worker_count, job_generation, catalog_generation)
+            LOGGER.info("ファイル保存の並列数: 対象=%d件 要求並列=%d 実効並列=%d", len(records), requested_parallelism, worker_count)
             failures = self._run_fixed_workers(
                 records, worker_count, save_record,
                 control, job_generation, catalog_generation,
