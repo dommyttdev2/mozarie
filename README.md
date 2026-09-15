@@ -123,6 +123,18 @@ GPUを使う場合は、**設定 > 検出**で選択します。GPUが対応し�
 
 [実機確認手順](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md)に従って確認してください。
 
+## テスト
+
+依存関係を準備して、バックエンドとフロントエンドのテストを実行します。
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pip install -r requirements-test.txt
+npm ci
+node scripts/test-quiet.cjs all
+```
+
+自動テストはHTTP、SQLite、実ファイル、ブラウザーUIの契約を確認します。リリース前には[実機確認手順](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md)も実施してください。
+
 ## ライセンス
 
 Mozarieは[MIT License](LICENSE)で公開しています。第三者コンポーネントとモデルの情報は[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)を参照してください。

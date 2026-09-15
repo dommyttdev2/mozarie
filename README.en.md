@@ -123,6 +123,18 @@ Use **Check for updates** in Settings or run `update.bat`. Close Mozarie before 
 
 Follow the [manual verification guide](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md).
 
+## Tests
+
+Install the test dependencies, then run the backend and frontend suites.
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pip install -r requirements-test.txt
+npm ci
+node scripts/test-quiet.cjs all
+```
+
+The automated suites verify HTTP, SQLite, real-file, and browser UI contracts. Run the [manual verification guide](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md) before a release as well.
+
 ## License
 
 Mozarie is released under the [MIT License](LICENSE). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for third-party components and model sources.

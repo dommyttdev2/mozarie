@@ -334,9 +334,16 @@ class MosaicHandler(BaseHTTPRequestHandler):
 
     def _request_body_length(self, *, required: bool = False) -> int:
         """Validate the only request framing this HTTP/1.1 server accepts."""
-        if self.headers.get_all("Transfer-Encoding"):
+        get_all = getattr(self.headers, "get_all", None)
+        def header_values(name: str) -> list[str]:
+            if get_all:
+                return get_all(name, [])
+            return [self.headers[name]] if name in self.headers else []
+
+        transfer_encodings = header_values("Transfer-Encoding")
+        if transfer_encodings:
             self._reject_unread_request(ClientError("リクエスト形式が正しくありません。", "input_invalid"))
-        lengths = self.headers.get_all("Content-Length", [])
+        lengths = header_values("Content-Length")
         if not lengths:
             if required:
                 self._reject_unread_request(ClientError("リクエストサイズが不正です。", "input_invalid"))
