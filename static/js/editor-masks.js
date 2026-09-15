@@ -109,8 +109,8 @@ async function commitCandidatePadding() {
   const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
   const previousReviewed = currentRecord()?.reviewed === true;
   const generation = state.imageGeneration;
-  candidate.expandPx = appliedValue; invalidateMaskComposition(); setEditorUnreviewed();
-  const editorState = historyEditorState(); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
+  candidate.expandPx = appliedValue; setEditorUnreviewed();
+  const editorState = historyEditorState(); syncCurrentCandidateRecord(); renderCandidates();
   closeCandidatePadding();
   if (await updateCandidate(candidate, candidate.enabled, previousMaskStatus, candidate.forced, session.original)) {
     recordHistoryOperation({ kind: "candidateState", editorState });
@@ -134,7 +134,7 @@ async function commitBatchCandidatePadding(session, value) {
     if (state.currentId === imageId && isCurrentGeneration(generation)) {
       await reconcileCurrentCandidates(imageId, generation);
       retainCurrentCandidateBundle(imageId, result.candidateRevision);
-      setEditorUnreviewed(); recordHistoryOperation({ kind: "candidateBatch" }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
+      setEditorUnreviewed(); recordHistoryOperation({ kind: "candidateBatch" }); syncCurrentCandidateRecord();
     } else await refreshCandidateRecord(imageId, true);
       return result;
     });
@@ -508,6 +508,11 @@ function restoreCandidateMutationReview(imageId, catalogEpoch, record, generatio
   void saveWorkspaceFlagNow(record, "reviewed", reviewed, undefined, true);
   if (state.currentId === imageId && isCurrentGeneration(generation)) { refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render(); }
   renderCatalogViews();
+}
+
+function refreshCurrentCandidateComposition() {
+  invalidateMaskComposition();
+  refreshMaskStatus(true); updateCandidateStatus(); requestMosaicPreview(); renderCandidates(); render();
 }
 
 async function updateCandidate(candidate, previousEnabled, previousMaskStatus, previousForced = candidate.forced, previousExpandPx = candidate.expandPx || 0) {
@@ -1149,16 +1154,25 @@ async function syncLocalTransformFromHistory(imageId, generation, previousIndex)
 async function syncProjectlessCandidateHistory(imageId, previous, generation) {
   const before = new Map((previous?.candidates || []).map((candidate) => [candidate.id, candidate]));
   const after = new Map(historyEditorState().candidates.map((candidate) => [candidate.id, candidate]));
-  for (const candidate of state.candidates) {
-    const oldValue = before.get(candidate.id); const newValue = after.get(candidate.id);
-    if (!oldValue || !newValue || (oldValue.enabled === newValue.enabled && oldValue.forced === newValue.forced && oldValue.expandPx === newValue.expandPx && oldValue.color === newValue.color)) continue;
-    const result = await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
-      method: "POST", body: JSON.stringify({ enabled: newValue.enabled, forced: newValue.forced, expandPx: newValue.expandPx, color: newValue.color }),
-    });
-    if (state.currentId !== imageId || !isCurrentGeneration(generation)) return;
-    const record = currentRecord(); if (record) record.candidateRevision = Number(result.candidateRevision || record.candidateRevision || 0);
-    if (oldValue.expandPx !== newValue.expandPx) await refreshCandidateBitmap(candidate, imageId, Number(result.candidateRevision || 0), generation, candidateMutationKey(imageId, candidate.id), nextCandidateMutationVersion(candidateMutationKey(imageId, candidate.id)));
+  let refreshedBitmap = false;
+  try {
+    for (const candidate of state.candidates) {
+      const oldValue = before.get(candidate.id); const newValue = after.get(candidate.id);
+      if (!oldValue || !newValue || (oldValue.enabled === newValue.enabled && oldValue.forced === newValue.forced && oldValue.expandPx === newValue.expandPx && oldValue.color === newValue.color)) continue;
+      const result = await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
+        method: "POST", body: JSON.stringify({ enabled: newValue.enabled, forced: newValue.forced, expandPx: newValue.expandPx, color: newValue.color }),
+      });
+      if (state.currentId !== imageId || !isCurrentGeneration(generation)) return false;
+      const record = currentRecord(); if (record) record.candidateRevision = Number(result.candidateRevision || record.candidateRevision || 0);
+      if (oldValue.expandPx !== newValue.expandPx) {
+        if (!await refreshCandidateBitmap(candidate, imageId, Number(result.candidateRevision || 0), generation, candidateMutationKey(imageId, candidate.id), nextCandidateMutationVersion(candidateMutationKey(imageId, candidate.id)))) return false;
+        refreshedBitmap = true;
+      }
+    }
+  } finally {
+    if (refreshedBitmap && state.currentId === imageId && isCurrentGeneration(generation)) refreshCurrentCandidateComposition();
   }
+  return refreshedBitmap;
 }
 
 function restoreSnapshot(index) {

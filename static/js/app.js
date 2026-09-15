@@ -1222,11 +1222,11 @@ function bindEvents() {
   canvas.addEventListener("contextmenu", (event) => event.preventDefault());
   canvas.addEventListener("pointerdown", (event) => {
     if (!state.currentImage || isBusy() || state.importing || currentImageActionPending()) return;
-    if (manualCanvasInputLocked()) return;
     if (event.button === 1) {
       canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; updateBrushCursor(); return;
     }
     if (event.button !== 0) return;
+    if (manualCanvasInputLocked()) return;
     if (state.projectReadOnly || currentRecord()?.sourceDimensionsChanged) return;
     if (catalogStagingEditsActive() && ["boundary", "polygon", "boundary_brush"].includes(state.tool)) return;
     canvas.setPointerCapture(event.pointerId);
