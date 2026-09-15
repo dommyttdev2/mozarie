@@ -40,4 +40,5 @@
 6. [画像反転・保存形式・メタ情報](manual-verification/flip-export.md)
 7. [無名作業の反転上書きと4K多候補の保存・マスク書出し（DI-099〜101）](manual-verification/data-integrity.md)：単一・一括保存、PNG・ZIPの出力範囲と処理中メモリを確認する。
 8. [カタログ世代・PJ切替・ブラウザー復元・ZIPスナップショット（DI-102〜125）](manual-verification/data-integrity.md)：遅延要求、並列インポート、保存後の古い要求、ZIP書出し中の編集、候補保存と切替の境界を確認する。
-9. [確認済みにして次へのフィルター別遷移（WS-033、DI-161・181・212）](manual-verification/workspace.md)：確認操作は次の一致画像だけへ進み、末尾・1件では現在画像とキャンバスを保持する。削除と非表示にして次へは末尾で直前へ移ることも確認する。
+9. [確認済みにして次への左一覧フィルター別遷移（WS-033）](manual-verification/workspace.md)：確認操作は次の一致画像だけへ進み、末尾・1件では現在画像とキャンバスを保持する。
+10. [確認済みにして次への整合性・異常時遷移（DI-161・181・212）](manual-verification/data-integrity.md)：削除と非表示にして次へは末尾で直前へ移り、確認操作は戻らないこと、409・通信断・遅延・Undo/Redoを確認する。
