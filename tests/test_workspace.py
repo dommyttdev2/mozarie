@@ -420,6 +420,7 @@ class WorkspaceTests(unittest.TestCase):
                 db.execute("ALTER TABLE images RENAME TO images_old")
                 db.execute("CREATE TABLE images (catalog_id TEXT NOT NULL, relative_path TEXT NOT NULL, image_id TEXT NOT NULL UNIQUE, size_bytes INTEGER NOT NULL, mtime_ns INTEGER NOT NULL, hidden INTEGER NOT NULL DEFAULT 0, reviewed INTEGER NOT NULL DEFAULT 0, candidate_revision INTEGER NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(catalog_id, relative_path))")
                 db.execute("DROP TABLE images_old")
+            db.close()
             before = store.path.read_bytes()
             with self.assertRaises(WorkspaceOpenError):
                 WorkspaceStore(root)
@@ -435,6 +436,7 @@ class WorkspaceTests(unittest.TestCase):
                     db.execute(f"CREATE TABLE meta ({definition})")
                     db.execute("INSERT INTO meta SELECT * FROM meta_old")
                     db.execute("DROP TABLE meta_old")
+                db.close()
                 before = store.path.read_bytes()
                 with self.assertRaises(WorkspaceOpenError):
                     WorkspaceStore(root)
@@ -488,6 +490,7 @@ class WorkspaceTests(unittest.TestCase):
                     "missing-image", "orphan", "penis", 0.9, self._png(), 1, "#123456", "detector",
                     "automatic", None, "apply", 0, 0,
                 ))
+            db.close()
             before = store.path.read_bytes()
             with self.assertRaises(WorkspaceOpenError):
                 WorkspaceStore(root)
