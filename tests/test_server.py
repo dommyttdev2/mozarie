@@ -500,7 +500,7 @@ class MozarieTests(unittest.TestCase):
             with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
                  patch.object(state, "_hand_refinement_context", return_value=(segments, np.zeros_like(mask), [])), \
                  patch.object(state, "_attach_hand_evidence", side_effect=lambda items, *_args: items), \
-                 patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items, *_args: items):
+                 patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items, *_args, **_kwargs: items):
                 detected = state._detect_image(Mock(), record, .5)
             self.assertEqual([(item.role.value, item.label_token, item.expand_px) for item in detected], [
                 ("exclude", "hand", 4), ("exclude", "fluid", 4), ("apply", "penis", 4), ("exclude", "hand", 4),
@@ -509,7 +509,7 @@ class MozarieTests(unittest.TestCase):
             with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
                  patch.object(state, "_hand_refinement_context", return_value=(segments, np.zeros_like(mask), [])), \
                  patch.object(state, "_attach_hand_evidence", side_effect=lambda items, *_args: items), \
-                 patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items, *_args: items):
+                 patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items, *_args, **_kwargs: items):
                 refreshed = state._detect_image(Mock(), record, .5)
             self.assertTrue(all(item.expand_px == 4 for item in detected))
             self.assertTrue(all(item.expand_px == 7 for item in refreshed))
@@ -558,7 +558,7 @@ class MozarieTests(unittest.TestCase):
             with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
                     patch.object(state, "_hand_refinement_context", return_value=(segments, np.zeros_like(mask), [])), \
                     patch.object(state, "_attach_hand_evidence", side_effect=lambda items, *_args: items), \
-                    patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items, *_args: items):
+                    patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items, *_args, **_kwargs: items):
                 explicit = state._detect_image(Mock(), record, .5, default_padding=2)
             self.assertEqual([item.expand_px for item in explicit], [2])
             for item in explicit:
@@ -4425,7 +4425,7 @@ class MozarieTests(unittest.TestCase):
             ), patch.object(state, "_sam_predictor_for", return_value=Mock()), patch.object(
                 state, "_high_precision_segments_with_predictor", side_effect=refine
             ), patch.object(
-                state, "_finalize_exclusions", side_effect=lambda _rgb, segments: segments):
+                state, "_finalize_exclusions", side_effect=lambda _rgb, segments, **_kwargs: segments):
                 candidates = state._detect_image(DetectionModels(target=object()), record, 0.5, mode="high_precision")
             with Image.open(candidates[0].mask_path) as stored:
                 self.assertTrue(np.array_equal(np.asarray(stored), refined_mask))
@@ -7885,7 +7885,7 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             with patch.object(state, "_detect_arbitrated_segments", return_value=segments), \
                     patch.object(state, "_hand_refinement_context", return_value=([segments[1]], np.zeros((6, 6), dtype=np.uint8), [])), \
                     patch.object(state, "_attach_hand_evidence", side_effect=lambda items, *_args: items), \
-                    patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items: items):
+                    patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, items, **_kwargs: items):
                 candidates = state._detect_image(DetectionModels(target=Mock(), auxiliaries=[]), record, .5)
             self.assertEqual(len(candidates), 1)
             self.assertTrue(candidates[0].mask_path.is_file())
@@ -7997,7 +7997,7 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
                 patch.object(detection_module, "select_best_sam_mask", return_value=(np.ones((6, 6), dtype=np.uint8), .5)), \
                 patch.object(state, "_boundary_hand_boxes", return_value=[(1, 1, 4, 4)]), \
                 patch.object(state, "_hand_boxes_over_apply", return_value=[(1, 1, 4, 4)]), \
-                patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, segments: (segments[0].update({"image_exclusions": {"hand": np.zeros((6, 6), dtype=np.uint8)}}), segments)[1]):
+                patch.object(state, "_finalize_exclusions", side_effect=lambda _rgb, segments, **_kwargs: (segments[0].update({"image_exclusions": {"hand": np.zeros((6, 6), dtype=np.uint8)}}), segments)[1]):
             state.add_boundary_candidate(image_id, payload)
 
         state, image_id, predictor = make_state()
