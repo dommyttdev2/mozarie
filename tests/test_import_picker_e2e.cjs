@@ -104,7 +104,6 @@ function startFixtureServer() {
   let failNextSettingsSave = false;
   let updateAvailable = false;
   let currentJob = { kind: "idle", state: "idle" };
-  let nextSaveToken = 1;
   const saveTokens = new Map();
   const sourceDeletes = new Map();
   const sourceDeleteRequests = [];
@@ -341,10 +340,19 @@ function startFixtureServer() {
       response.end(JSON.stringify({ entries: payload.imageIds.map((imageId) => ({ imageId, candidateRevision: 0, relativePath: catalog.find((image) => image.id === imageId)?.relativePath || imageId })) }));
       return;
     }
+    if (requestPath === "/api/save/reserve" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const saveToken = payload.clientSaveToken;
+      if (!saveToken || saveTokens.has(saveToken)) { response.writeHead(400, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "invalid_save_token" })); return; }
+      saveTokens.set(saveToken, { state: "rendering", imageId: payload.imageId }); saveRequests.push({ path: requestPath, payload });
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ state: "rendering" }));
+      return;
+    }
     if (requestPath === "/api/save/render" && request.method === "POST") {
       let body = ""; for await (const chunk of request) body += chunk;
-      const payload = JSON.parse(body); const saveToken = `save-${nextSaveToken++}`;
-      saveTokens.set(saveToken, { state: "pending", imageId: payload.imageId }); saveRequests.push({ path: requestPath, payload });
+      const payload = JSON.parse(body); const saveToken = payload.clientSaveToken; const token = saveTokens.get(saveToken);
+      if (!token || token.imageId !== payload.imageId) { response.writeHead(400, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "invalid_save_token" })); return; }
+      token.state = "pending"; saveRequests.push({ path: requestPath, payload });
       if (holdSaveRender) await new Promise((resolve) => { pendingSaveRenders.push(resolve); });
       if (payload.copyToDefault) {
         response.writeHead(200, { "Content-Type": "application/json", "X-Mozarie-Save-Token": saveToken });
@@ -372,8 +380,10 @@ function startFixtureServer() {
     if (requestPath === "/api/save/ack" && request.method === "POST") {
       let body = ""; for await (const chunk of request) body += chunk;
       const payload = JSON.parse(body); const token = saveTokens.get(payload.saveToken);
-      if (token?.state === "committed") token.state = "acknowledged";
-      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ state: token ? token.state : "unknown" }));
+      const acknowledged = token?.state === "committed";
+      if (acknowledged) token.state = "acknowledged";
+      saveRequests.push({ path: requestPath, payload });
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ acknowledged }));
       return;
     }
     if (requestPath === "/api/save/cancel" && request.method === "POST") {
@@ -3123,8 +3133,14 @@ async function main() {
     await page.locator("#confirmAccept").click();
     await page.waitForFunction(() => state.applyRunning && state.saving, null, { timeout: 5000 });
     await page.waitForFunction(() => !state.applyRunning && !state.saving, null, { timeout: 5000 });
-    assert.equal(await page.locator("#errorDialog").evaluate((dialog) => dialog.open), false, `batch overwrite must not fail: ${await page.locator("#applyResult").textContent}`);
-    assert.deepEqual(saveRequests.slice(saveRequestStart).map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"], "batch overwrite renders and commits through the browser-owned save path");
+    assert.equal(await page.locator("#errorDialog").evaluate((dialog) => dialog.open), false, `batch overwrite must not fail: ${await page.locator("#applyResult").textContent()}`);
+    const batchSaveRequests = saveRequests.slice(saveRequestStart);
+    assert.deepEqual(batchSaveRequests.map((request) => request.path), ["/api/save/prepare", "/api/save/reserve", "/api/save/render", "/api/save/commit", "/api/save/ack"], "batch overwrite uses the durable browser save path");
+    const batchSaveToken = batchSaveRequests[1].payload.clientSaveToken;
+    assert.ok(batchSaveToken, "batch overwrite reserves a client save token");
+    assert.deepEqual([batchSaveRequests[2].payload.clientSaveToken, batchSaveRequests[3].payload.saveToken, batchSaveRequests[4].payload.saveToken], [batchSaveToken, batchSaveToken, batchSaveToken], "batch overwrite keeps one token from reserve through acknowledgement");
+    assert.equal(batchSaveRequests[3].payload.sourceAction, "overwrite", "batch overwrite records its source action in the durable receipt");
+    assert.deepEqual(await page.evaluate(() => pendingSaveTokens()), {}, "batch overwrite acknowledgement clears the pending browser save record");
     assert.match(await page.locator("#applyResult").textContent(), /完了しました。1件を処理しました。/, "batch overwrite reports its completed result");
     assert.equal(await page.locator("#applyCloseButton").isDisabled(), false, "the completed overwrite dialog can be closed");
     await page.locator("#applyCloseButton").click();
@@ -4267,7 +4283,7 @@ async function main() {
       await browserSavePage.locator("#confirmAccept").click();
       await browserSavePage.waitForFunction(() => state.saving, null, { timeout: 5000 });
       await browserSavePage.waitForFunction(() => !state.saving, null, { timeout: 5000 });
-      assert.deepEqual(saveRequests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"], "single copy-and-delete drives prepare, render, and commit in order");
+      assert.deepEqual(saveRequests.map((request) => request.path), ["/api/save/prepare", "/api/save/reserve", "/api/save/render", "/api/save/commit", "/api/save/ack"], "single copy-and-delete drives the durable browser save lifecycle in order");
       assert.equal(await browserSavePage.evaluate(() => window.__singleSaveFiles.has("sample_検証_1.png")), true, "single save keeps Unicode suffixes and avoids an existing output name");
       assert.deepEqual(await browserSavePage.evaluate(() => ({ imageIds: state.images.map((image) => image.id), currentId: state.currentId, reviewed: state.images.find((image) => image.id === "sample")?.reviewed })), { imageIds: ["sample", "sample-two"], currentId: "sample", reviewed: false }, "single save reloads without changing catalogue or reviewed state");
       await browserSavePage.evaluate(() => window.__outputPermission.set("prompt"));
