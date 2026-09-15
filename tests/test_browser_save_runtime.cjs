@@ -1041,7 +1041,7 @@ async function runDeleteOriginalCase() {
 
 async function runHandleOverwriteCase() {
     let written = null;
-  const sourceFile = { name: "source.png", size: 12, lastModified: 34 };
+  const sourceFile = { name: "source.png", size: 12, lastModified: 34, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } };
   const sourceHandle = {
     async getFile() { return sourceFile; },
     async createWritable() {
