@@ -73,7 +73,7 @@ function openCandidatePadding(candidateId, trigger) {
   const value = candidate.expandPx || 0;
   input.removeAttribute("max"); input.value = String(value); input.placeholder = "";
   input.setAttribute("aria-invalid", "false"); $("#candidatePaddingValidation").textContent = "";
-  candidatePaddingSession = { mode: "single", imageId: state.currentId, candidateId, original: value, trigger, committing: false };
+  candidatePaddingSession = { mode: "single", imageId: state.currentId, candidateId, original: value, trigger, committing: false, catalogEpoch: state.catalogEpoch, record: currentRecord() };
   const popover = $("#candidatePaddingPopover"); popover.showPopover(); positionCandidatePadding(trigger);
   input.focus(); input.select();
 }
@@ -88,7 +88,7 @@ function openBatchCandidatePadding(role, trigger) {
   input.removeAttribute("max"); input.value = values.size === 1 ? String(values.values().next().value) : "";
   input.placeholder = values.size === 1 ? "" : t("candidates.paddingMixed");
   input.setAttribute("aria-invalid", "false"); $("#candidatePaddingValidation").textContent = "";
-  candidatePaddingSession = { mode: "batch", imageId: state.currentId, role, original: values.size === 1 ? values.values().next().value : null, trigger, committing: false };
+  candidatePaddingSession = { mode: "batch", imageId: state.currentId, role, original: values.size === 1 ? values.values().next().value : null, trigger, committing: false, catalogEpoch: state.catalogEpoch, record: currentRecord() };
   const popover = $("#candidatePaddingPopover"); popover.showPopover(); positionCandidatePadding(trigger);
   input.focus(); input.select();
 }
@@ -116,7 +116,7 @@ async function commitCandidatePadding() {
     recordHistoryOperation({ kind: "candidateState", editorState });
     return true;
   }
-  restoreCandidateMutationReview(session.imageId, generation, previousReviewed);
+  restoreCandidateMutationReview(session.imageId, session.catalogEpoch, session.record, generation, previousReviewed);
   return false;
 }
 
@@ -309,14 +309,14 @@ function renderCandidates() {
       const previousEnabled = candidate.enabled;
       const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
       const previousReviewed = currentRecord()?.reviewed === true;
-      const imageId = state.currentId; const generation = state.imageGeneration;
+      const imageId = state.currentId; const generation = state.imageGeneration; const catalogEpoch = state.catalogEpoch; const record = currentRecord();
       candidate.enabled = !candidate.enabled;
       markMaskDirty();
       setEditorUnreviewed();
       const editorState = historyEditorState(); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
       const updated = await updateCandidate(candidate, previousEnabled, previousMaskStatus);
       if (updated) recordHistoryOperation({ kind: "candidateState", editorState });
-      else if (updated === false) restoreCandidateMutationReview(imageId, generation, previousReviewed);
+      else if (updated === false) restoreCandidateMutationReview(imageId, catalogEpoch, record, generation, previousReviewed);
     }, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId));
     const blink = makeDisplay(candidate.id, role);
     row.dataset.candidateBlinkId = candidate.id; row.dataset.candidateBlinkRole = role;
@@ -335,13 +335,13 @@ function renderCandidates() {
         const previousForced = candidate.forced !== false;
         const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
         const previousReviewed = currentRecord()?.reviewed === true;
-        const imageId = state.currentId; const generation = state.imageGeneration;
+        const imageId = state.currentId; const generation = state.imageGeneration; const catalogEpoch = state.catalogEpoch; const record = currentRecord();
         candidate.forced = !previousForced; setEditorUnreviewed();
         markMaskDirty();
         const editorState = historyEditorState(); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
         const updated = await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
         if (updated) recordHistoryOperation({ kind: "candidateState", editorState });
-        else if (updated === false) restoreCandidateMutationReview(imageId, generation, previousReviewed);
+        else if (updated === false) restoreCandidateMutationReview(imageId, catalogEpoch, record, generation, previousReviewed);
       }, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId));
       appendRow(row, label, enabled, [blink, candidateEffectiveToggle(candidate.id, role), makeExpandButton(candidate, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId), labelText), forced, remove]);
     } else appendRow(row, label, enabled, [blink, candidateEffectiveToggle(candidate.id, role), makeExpandButton(candidate, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId), labelText), remove]);
@@ -499,14 +499,12 @@ async function waitForCandidateMutations() {
   }
 }
 
-function restoreCandidateMutationReview(imageId, generation, reviewed) {
-  if (!imageId || !isCurrentGeneration(generation)) return;
-  const record = state.images.find((image) => image.id === imageId);
-  if (!record) return;
+function restoreCandidateMutationReview(imageId, catalogEpoch, record, generation, reviewed) {
+  if (!imageId || !isCurrentCatalogEpoch(catalogEpoch) || state.images.find((image) => image.id === imageId) !== record) return;
   record.reviewed = reviewed;
   if (reviewed) state.reviewedImageIds.add(record.id); else state.reviewedImageIds.delete(record.id);
   void saveWorkspaceFlagNow(record, "reviewed", reviewed, undefined, true);
-  if (state.currentId === imageId) { refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render(); }
+  if (state.currentId === imageId && isCurrentGeneration(generation)) { refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render(); }
   renderCatalogViews();
 }
 

@@ -59,6 +59,10 @@ class CatalogMixin:
         for image_id in image_ids:
             self._assert_image_processable(image_id)
 
+    def _assert_history_images_present(self, image_ids: list[str]) -> None:
+        if any(image_id not in self.images for image_id in image_ids):
+            raise ClientError("画像が見つかりません。", "image_not_found")
+
     def _assert_image_editable(self, image_id: str) -> None:
         with self.lock:
             self._assert_catalog_mutable()
@@ -439,17 +443,25 @@ class CatalogMixin:
         # has passed the scan above. Failed scans leave the prior workspace and
         # its undo history untouched.
         created_projectless_id: str | None = None
+        created_projectless_stored: dict[str, dict[str, Any]] | None = None
         if catalog_id is None:
-            created_projectless_id = self.workspace_store.create_projectless_catalog(str(root))
+            created_projectless_id, source_id, created_projectless_stored = self.workspace_store.create_projectless_native_workspace(root, records)
             catalog_id = created_projectless_id
         if source_id is None:
-            source_id = self.workspace_store.ensure_project_source(
-                catalog_id, kind="native-folder", display_name=root.name or str(root), identity=native_source_identity(root),
-            )
+            try:
+                source_id = self.workspace_store.ensure_project_source(
+                    catalog_id, kind="native-folder", display_name=root.name or str(root), identity=native_source_identity(root),
+                )
+            except Exception:
+                if created_projectless_id is not None:
+                    self.workspace_store.delete_project(created_projectless_id)
+                raise
         records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
         prehydrated: dict[str, tuple[int, list[Candidate]]] | None = None
         try:
-            if staging:
+            if created_projectless_stored is not None:
+                stored = created_projectless_stored
+            elif staging:
                 stored = self.workspace_store.preview_reconcile_images(catalog_id, source_id, records)
             elif relink_source_id:
                 preview = self.workspace_store.preview_reconcile_images(catalog_id, source_id, records)
@@ -465,14 +477,22 @@ class CatalogMixin:
             else:
                 stored = {}
         except ProjectSourcePathConflictError as exc:
+            if created_projectless_id is not None:
+                self.workspace_store.delete_project(created_projectless_id)
             if relink_source_id:
                 raise ClientError("このプロジェクトの別の元フォルダーに同じパスが設定されています。", "project_source_conflict") from exc
             raise
         except ProjectSourceNoMatchError as exc:
+            if created_projectless_id is not None:
+                self.workspace_store.delete_project(created_projectless_id)
             raise ClientError("指定したフォルダーに、この元フォルダーの画像がありません。", "project_source_no_match") from exc
         except ProjectSourceUnavailableError as exc:
+            if created_projectless_id is not None:
+                self.workspace_store.delete_project(created_projectless_id)
             raise ClientError("元フォルダーが見つかりません。", "project_source_unavailable") from exc
         except ValueError as exc:
+            if created_projectless_id is not None:
+                self.workspace_store.delete_project(created_projectless_id)
             if relink_source_id:
                 raise ClientError("元フォルダーを読み込めません。", "project_source_unavailable") from exc
             raise
@@ -504,27 +524,35 @@ class CatalogMixin:
                 retained = [record for record in self.images.values() if record.source_id != source_id]
             records = retained + records
             records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path, record.image_id))
-        prehydrated = self._stage_workspace_candidates(records) if catalog_id is not None and prehydrated is None else prehydrated
-        publish_sources = self.workspace_store.project_sources(catalog_id) if catalog_id is not None else []
+        try:
+            prehydrated = self._stage_workspace_candidates(records) if catalog_id is not None and prehydrated is None else prehydrated
+            publish_sources = self.workspace_store.project_sources(catalog_id) if catalog_id is not None else []
+        except Exception:
+            if created_projectless_id is not None:
+                self.workspace_store.delete_project(created_projectless_id)
+            raise
         with self.lock:
             publish_mismatches = {image_id: dimensions for image_id, dimensions in self.source_mismatches.items()
                                   if image_id not in source_image_ids}
         publish_mismatches.update(source_mismatches)
-        images = self._replace_catalog(root, records, detach_project=not inherit_current_catalog, prehydrated=prehydrated,
-                                       publish_workspace_id=catalog_id if previous_catalog_id is None else None,
-                                       publish_source_mismatches=publish_mismatches if catalog_id is not None else None,
-                                       publish_sources=publish_sources)
+        try:
+            images = self._replace_catalog(root, records, detach_project=not inherit_current_catalog, prehydrated=prehydrated,
+                                           publish_workspace_id=catalog_id if previous_catalog_id is None else None,
+                                           publish_source_mismatches=publish_mismatches if catalog_id is not None else None,
+                                           publish_sources=publish_sources)
+        except Exception:
+            if created_projectless_id is not None:
+                self.workspace_store.delete_project(created_projectless_id)
+            raise
         with self.lock:
             self.project_read_only = completed
         # Once the new unnamed workspace is visible, the old one is no longer
         # reachable. Delete it last so a publication failure never loses work.
         if created_projectless_id is not None:
-            self.workspace_store.set_active_projectless_catalog(created_projectless_id)
-            if previous_catalog_id is None and previous_workspace_id and previous_workspace_id != created_projectless_id:
-                try:
-                    self.workspace_store.delete_project(previous_workspace_id)
-                except ValueError:
-                    pass
+            self.workspace_store.publish_active_projectless_catalog(
+                created_projectless_id,
+                previous_workspace_id if previous_catalog_id is None else None,
+            )
         return images
 
     def relink_project_native_source(self, project_id: str, source_id: str, raw_path: str) -> dict[str, Any]:
@@ -1004,6 +1032,12 @@ class CatalogMixin:
                         raise ClientError("画像一覧が変更されたため、操作をやり直してください。", "catalog_changed")
                     if prune_workspace and workspace_id:
                         self.workspace_store.prune_catalog_images(workspace_id, set())
+                    # An unnamed workspace has no user-visible project entry.
+                    # Closing or replacing it must remove both its hidden
+                    # catalog and the active-workspace pointer before the live
+                    # state is detached, otherwise it reappears after restart.
+                    if catalog_id is None and workspace_id:
+                        self.workspace_store.delete_project(workspace_id)
                     catalog_id, session = self._detach_catalog_state_unchecked()
                     if publish_catalog_id is not None:
                         self.catalog_id = publish_catalog_id
@@ -1066,6 +1100,10 @@ class CatalogMixin:
                         removed_set = set(removed_ids)
                         self.order = [current_id for current_id in self.order if current_id not in removed_set]
                         self.catalog_generation += 1
+                    if not self.order and self.catalog_id is None and self.workspace_id:
+                        self.workspace_store.delete_project(self.workspace_id)
+                        self.workspace_id = None
+                        self.catalog_sources = []
                     self._clear_browser_save_tokens_unchecked()
                 snapshot = self.catalog_snapshot()
                 self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id for record in records])
@@ -1453,11 +1491,16 @@ class CatalogMixin:
                 durable_source_created = False
                 durable_created_ids: list[str] = []
                 created_projectless_id: str | None = None
+                stored_images: dict[str, dict[str, Any]] = {}
                 try:
                     if self.workspace_id is None:
-                        created_projectless_id = self.workspace_store.create_projectless_catalog()
+                        created_projectless_id, durable_source_id, stored_images = self.workspace_store.create_projectless_browser_workspace(
+                            added, kind=source_kind, display_name=source_kind, source_identity=browser_identity,
+                        )
                         self.workspace_id = created_projectless_id
-                    if self.workspace_id:
+                        durable_source_created = True
+                        durable_created_ids = [str(stored["image_id"]) for stored in stored_images.values()]
+                    elif self.workspace_id:
                         try:
                             durable_source_id, durable_source_created = self.workspace_store.resolve_browser_source(
                                 self.workspace_id,
@@ -1468,8 +1511,7 @@ class CatalogMixin:
                             )
                         except ValueError as exc:
                             raise ClientError("選択した画像ソースをこのプロジェクトに復元できません。", "project_source_unavailable") from exc
-                    stored_images: dict[str, dict[str, Any]] = {}
-                    if self.workspace_id:
+                    if self.workspace_id and created_projectless_id is None:
                         try:
                             stored_images = self.workspace_store.reconcile_images(
                                 self.workspace_id,
@@ -1526,7 +1568,7 @@ class CatalogMixin:
                         # request captured before this visible catalogue change.
                         self.catalog_generation += 1
                     if created_projectless_id:
-                        self.workspace_store.set_active_projectless_catalog(created_projectless_id)
+                        self.workspace_store.publish_active_projectless_catalog(created_projectless_id)
                     images = self.list_images() if include_images else []
                     for path in set(replaced_session_paths):
                         try:
@@ -1905,10 +1947,8 @@ class CatalogMixin:
         # images.
         with self.import_lock:
             self.image_for_id(image_id)
-            self._assert_image_editable(image_id)
             with self.lock:
                 self._assert_catalog_mutable()
-                self._assert_image_editable(image_id)
                 catalog_id = self.catalog_id
                 workspace_id = self.workspace_id
                 catalog_generation = self.catalog_generation
@@ -1925,22 +1965,31 @@ class CatalogMixin:
                         raise ClientError("プロジェクト一覧が更新されました。もう一度操作してください。", "stale_catalog")
                     changed_ids = self.workspace_store.restore_history(
                         image_id, direction,
-                        member_guard=self._assert_images_processable,
+                        member_guard=self._assert_history_images_present,
                         expected_members=record_ids,
                     )
                     if not changed_ids:
                         return {"changedImageIds": [], "current": {}, **self.workspace_store.history_status(image_id)}
-                hydrated: dict[str, tuple[int, list[Candidate], bool, bool, dict[str, Any]]] = {}
-                for changed_id in record_ids:
-                    shutil.rmtree(self.cache_dir / changed_id, ignore_errors=True)
-                    revision, candidates = self.workspace_store.hydrate_candidates(
-                        changed_id, self.cache_dir / changed_id, self._candidate_from_workspace,
-                    )
-                    hidden, reviewed = self.workspace_store.image_state(changed_id)
-                    hydrated[changed_id] = (revision, candidates, hidden, reviewed, self.workspace_store.image_transform(changed_id))
-                with self.lock:
-                    if self.catalog_id != catalog_id or self.workspace_id != workspace_id or self.catalog_generation != catalog_generation:
-                        raise ClientError("プロジェクト一覧が更新されました。もう一度操作してください。", "stale_catalog")
+                    # Keep the durable cursor restore, its candidate hydration,
+                    # and the live-state swap behind one catalogue lock. Cache
+                    # masks are lazily materialized from SQLite, so no stale
+                    # candidate PNG can become externally visible here.
+                    hydrated: dict[str, tuple[int, list[Candidate], bool, bool, dict[str, Any]]] = {}
+                    try:
+                        for changed_id in record_ids:
+                            shutil.rmtree(self.cache_dir / changed_id, ignore_errors=True)
+                            revision, candidates = self.workspace_store.hydrate_candidates(
+                                changed_id, self.cache_dir / changed_id, self._candidate_from_workspace,
+                            )
+                            hidden, reviewed = self.workspace_store.image_state(changed_id)
+                            hydrated[changed_id] = (revision, candidates, hidden, reviewed, self.workspace_store.image_transform(changed_id))
+                    except Exception:
+                        self.workspace_store.restore_history(
+                            image_id, "redo" if direction == "undo" else "undo",
+                            member_guard=self._assert_history_images_present,
+                            expected_members=record_ids,
+                        )
+                        raise
                     for changed_id, (revision, candidates, hidden, reviewed, transform) in hydrated.items():
                         record = self.images[changed_id]
                         record.hidden = hidden

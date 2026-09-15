@@ -469,33 +469,79 @@ class WorkspaceStore:
             exists = db.execute("SELECT 1 FROM catalogs WHERE catalog_id=? AND name IS NULL", (catalog_id,)).fetchone()
         return catalog_id if exists is not None else None
 
-    def create_projectless_catalog(self, source_root: str | None = None) -> str:
-        """Create and publish one internal unnamed workspace.
-
-        It deliberately uses the ordinary catalog tables so every edit follows
-        the same durable history path as a named project.  ``projects()``
-        hides these rows from the project UI.
-        """
+    def create_projectless_native_workspace(self, root: Path, records: list[Any]) -> tuple[str, str, dict[str, dict[str, Any]]]:
+        """Create and reconcile a fresh unnamed native folder in one transaction."""
         catalog_id = uuid.uuid4().hex
         now = time.time_ns()
+        identity = native_source_identity(root)
+        stored: dict[str, dict[str, Any]] = {}
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
                 db.execute("INSERT INTO catalogs(catalog_id,name,status,source_root,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-                           (catalog_id, None, "working", source_root, now, now))
+                           (catalog_id, None, "working", str(root.resolve()), now, now))
+                source_id = self._ensure_project_source_db(db, catalog_id, "native-folder", root.name or str(root), identity)
+                for record in records:
+                    image_id = str(getattr(record, "image_id", "")) or uuid.uuid4().hex
+                    db.execute("INSERT INTO images(catalog_id,source_id,relative_path,image_id,size_bytes,mtime_ns,width,height,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                               (catalog_id, source_id, record.relative_path, image_id, record.size_bytes, record.mtime_ns,
+                                int(getattr(record, "width", 0)), int(getattr(record, "height", 0)), now))
+                    stored[str(record.relative_path)] = {
+                        "image_id": image_id, "hidden": False, "reviewed": False, "revision": 0,
+                        "changed": False, "created": True,
+                    }
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")
                 raise
-        return catalog_id
+        return catalog_id, source_id, stored
 
-    def set_active_projectless_catalog(self, catalog_id: str) -> None:
+    def create_projectless_browser_workspace(
+        self, records: list[Any], *, kind: str, display_name: str, source_identity: str,
+    ) -> tuple[str, str, dict[str, dict[str, Any]]]:
+        """Create one unnamed browser workspace and its initial images atomically."""
+        if kind not in {"browser-directory", "browser-files"} or not source_identity:
+            raise ValueError("invalid browser workspace source")
+        catalog_id = uuid.uuid4().hex
+        now = time.time_ns()
+        stored: dict[str, dict[str, Any]] = {}
         with self._lock, self._connect() as db:
-            row = db.execute("SELECT 1 FROM catalogs WHERE catalog_id=? AND name IS NULL", (catalog_id,)).fetchone()
-            if row is None:
-                raise ValueError("projectless workspace is missing")
-            db.execute("INSERT INTO meta(key,value) VALUES('active_projectless_catalog_id',?) "
-                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (catalog_id,))
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                db.execute("INSERT INTO catalogs(catalog_id,name,status,source_root,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                           (catalog_id, None, "working", None, now, now))
+                source_id = self._ensure_project_source_db(db, catalog_id, kind, display_name, source_identity)
+                for record in records:
+                    image_id = str(getattr(record, "image_id", "")) or uuid.uuid4().hex
+                    db.execute("INSERT INTO images(catalog_id,source_id,relative_path,image_id,size_bytes,mtime_ns,width,height,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                               (catalog_id, source_id, record.relative_path, image_id, record.size_bytes, record.mtime_ns,
+                                int(getattr(record, "width", 0)), int(getattr(record, "height", 0)), now))
+                    stored[str(record.relative_path)] = {
+                        "image_id": image_id, "hidden": False, "reviewed": False, "revision": 0,
+                        "changed": False, "created": True,
+                    }
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+        return catalog_id, source_id, stored
+
+    def publish_active_projectless_catalog(self, catalog_id: str, discard_catalog_id: str | None = None) -> None:
+        """Make one unnamed workspace restart-visible and discard its predecessor."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                row = db.execute("SELECT 1 FROM catalogs WHERE catalog_id=? AND name IS NULL", (catalog_id,)).fetchone()
+                if row is None:
+                    raise ValueError("projectless workspace is missing")
+                db.execute("INSERT INTO meta(key,value) VALUES('active_projectless_catalog_id',?) "
+                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (catalog_id,))
+                if discard_catalog_id and discard_catalog_id != catalog_id:
+                    db.execute("DELETE FROM catalogs WHERE catalog_id=? AND name IS NULL", (discard_catalog_id,))
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
 
     def project(self, catalog_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
@@ -746,6 +792,7 @@ class WorkspaceStore:
                 image_ids = [str(row["image_id"]) for row in db.execute(
                     "SELECT image_id FROM images WHERE catalog_id=?", (catalog_id,)
                 )]
+                db.execute("DELETE FROM meta WHERE key='active_projectless_catalog_id' AND value=?", (catalog_id,))
                 cursor = db.execute("DELETE FROM catalogs WHERE catalog_id=?", (catalog_id,))
                 if not cursor.rowcount:
                     raise ValueError("project is missing")
@@ -1336,9 +1383,11 @@ class WorkspaceStore:
                     self._write_candidate_state_db(
                         db, image_id, revision, candidates, effective,
                         replace=True, history_group=history_group,
-                        expected_revision=expected_revision, preserve_reviewed=True,
+                        expected_revision=expected_revision,
                         require_candidate_masks=True,
                     )
+                if history_group:
+                    db.execute("UPDATE history_groups SET status='committed' WHERE group_id=? AND status='building'", (history_group,))
                 return _PendingWorkspaceCommit(db)
             except Exception:
                 db.execute("ROLLBACK")
@@ -1758,7 +1807,7 @@ class WorkspaceStore:
         return group_id
 
     def finish_history_group(self, group_id: str, *, failed: bool = False) -> None:
-        """Publish a completed batch, or leave its committed subset explicitly failed."""
+        """Mark an abandoned building group failed and discard its empty shell."""
         with self._lock, self._connect() as db:
             db.execute("UPDATE history_groups SET status=? WHERE group_id=? AND status='building'", ("failed" if failed else "committed", group_id))
             db.execute("DELETE FROM history_groups WHERE group_id=? AND NOT EXISTS (SELECT 1 FROM history_entries WHERE group_id=?)", (group_id, group_id))

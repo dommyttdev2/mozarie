@@ -700,7 +700,8 @@ function bindEvents() {
     const name = $("#projectNameInput").value.trim(); const mode = projectNameMode;
     const projectlessSave = mode === "name" && !state.project?.id;
     if (mode === "new" || projectlessSave) { await flushAllImageMutations(); await flushAllWorkspaceMutations(); }
-    const projectId = projectlessSave ? crypto.randomUUID().replaceAll("-", "") : "";
+    const projectId = projectlessSave ? state.workspaceId : "";
+    if (projectlessSave && !projectId) throw codedError("project_not_found");
     if (projectlessSave) await rememberProjectlessPromotionSources(projectId);
     let data;
     try {
@@ -711,9 +712,7 @@ function bindEvents() {
       if (projectlessSave && Number.isInteger(error?.status) && error.status >= 400 && error.status < 500) await forgetProjectSources(projectId);
       throw error;
     }
-    if (projectlessSave && data.project?.id !== projectId) {
-      await forgetProjectSources(projectId);
-    }
+    if (projectlessSave && data.project?.id !== projectId) throw codedError("response_invalid");
     state.project = data.project; state.projectReadOnly = false;
     if (projectlessSave) state.projectlessDirectorySources.clear();
     $("#projectNameDialog").close(); if (mode === "new") { resetCatalog([], ""); state.missingNativeSources = []; } renderProjectCurrent();
@@ -1031,7 +1030,7 @@ function bindEvents() {
   $("#detectCancelButton").addEventListener("click", () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; $("#detectTargetValidation").hidden = true; });
   $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; $("#detectTargetValidation").hidden = true; });
   lightDismiss($("#detectDialog"), () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
-  $("#undoButton").addEventListener("click", () => { if (state.project?.id) void restoreProjectHistory("undo"); else restoreSnapshot(state.historyIndex - 1); }); $("#redoButton").addEventListener("click", () => { if (state.project?.id) void restoreProjectHistory("redo"); else restoreSnapshot(state.historyIndex + 1); });
+  $("#undoButton").addEventListener("click", () => { if (hasDurableHistory()) void restoreProjectHistory("undo"); else restoreSnapshot(state.historyIndex - 1); }); $("#redoButton").addEventListener("click", () => { if (hasDurableHistory()) void restoreProjectHistory("redo"); else restoreSnapshot(state.historyIndex + 1); });
   const grid = $(".studio-grid");
   const paneStorage = { gallery: "mozarie.galleryWidth", inspector: "mozarie.inspectorWidth" };
   const paneDefaultsForWidth = (width) => width >= 1600 ? { gallery: 260, inspector: 320 } : width >= 1280 ? { gallery: 216, inspector: 292 } : { gallery: 190, inspector: 270 };

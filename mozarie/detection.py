@@ -338,31 +338,33 @@ class DetectionMixin:
                          combined[record.image_id], self._effective_mask_for_candidates(record.image_id, combined[record.image_id]))
                         for record in records
                     ]
-                    pending = self.workspace_store.prepare_detection_states(
-                        states, history_group=getattr(self, "_detection_history_group", None),
-                    )
+                    # All state-changing paths use catalogue lock -> workspace
+                    # transaction.  Acquiring the catalogue lock before the
+                    # prepared write avoids waiting on another edit that holds
+                    # that lock while it writes SQLite.
+                    with self.lock:
+                        if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                                or not self._job_is_current(job_generation, catalog_generation)
+                                or any(self.images.get(record.image_id) is not record for record in records)
+                                or any(self._candidate_revision(record.image_id) != expected_revisions[record.image_id] for record in records)):
+                            raise ClientError("フォルダを再読み込みしたため、検出結果を破棄しました。", "catalog_changed")
+                        pending = self.workspace_store.prepare_detection_states(
+                            states, history_group=getattr(self, "_detection_history_group", None),
+                        )
+                        # SQLite and the process cache become visible under the
+                        # same catalogue lock. A catalog transition cannot
+                        # interleave this commit and the in-memory publish.
+                        pending.commit()
+                        durable_published = True
+                        for record in records:
+                            self.candidates[record.image_id] = combined[record.image_id]
+                            self.candidate_revisions[record.image_id] = expected_revisions[record.image_id] + 1
+                            record.reviewed = False
+                            self._record_job_success(staged[record.image_id][0], record.image_id, None, job_generation, catalog_generation)
                 except Exception:
                     for _index, _record, candidates in staged.values():
                         self._discard_candidates(candidates)
                     raise
-                with self.lock:
-                    if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
-                            or not self._job_is_current(job_generation, catalog_generation)
-                            or any(self.images.get(record.image_id) is not record for record in records)
-                            or any(self._candidate_revision(record.image_id) != expected_revisions[record.image_id] for record in records)):
-                        pending.rollback()
-                        for _index, _record, candidates in staged.values():
-                            self._discard_candidates(candidates)
-                        raise ClientError("フォルダを再読み込みしたため、検出結果を破棄しました。", "catalog_changed")
-                    # SQLite and the process cache become visible under the
-                    # same catalogue lock.  Do not re-check global state after
-                    # this commit: a catalog transition cannot interleave it.
-                    pending.commit()
-                    durable_published = True
-                    for record in records:
-                        self.candidates[record.image_id] = combined[record.image_id]
-                        self.candidate_revisions[record.image_id] = expected_revisions[record.image_id] + 1
-                        self._record_job_success(staged[record.image_id][0], record.image_id, None, job_generation, catalog_generation)
                 for record in records:
                     for candidate in previous[record.image_id]:
                         if candidate.origin != "boundary":
@@ -373,8 +375,6 @@ class DetectionMixin:
                                 # cleanup must not turn a published history
                                 # group into a failed operation.
                                 pass
-            group_id = getattr(self, "_detection_history_group", None)
-            if group_id: self.workspace_store.finish_history_group(group_id)
             self._finish_job(job_generation, catalog_generation)
         except Exception as exc:  # A background job must not kill the HTTP server.
             models = None
