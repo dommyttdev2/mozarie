@@ -395,11 +395,10 @@ async function hideAndMoveNext() {
   const current = currentRecord();
   if (!current) return;
   const currentId = current.id;
-  const target = nextGalleryFilteredImage(currentId, { fallback: true });
+  const target = nextGalleryFilteredImage(currentId);
   if (!await setHidden(current, true)) return;
   if (state.currentId !== currentId) return;
   if (target) await selectImage(target.id);
-  else clearCurrentImageSelection();
 }
 async function runNavigationAction(action) {
   await action();
