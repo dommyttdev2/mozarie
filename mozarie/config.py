@@ -155,6 +155,13 @@ def validate_settings(value: Any) -> dict[str, Any]:
     fluid_exclusion_enabled = _expect_bool(
         detection.get("fluid_exclusion_enabled"), "detection.fluid_exclusion_enabled"
     )
+    fluid_color_fill_enabled = _expect_bool(
+        detection.get("fluid_color_fill_enabled", True), "detection.fluid_color_fill_enabled"
+    )
+    fluid_color_fill_tolerance = detection.get("fluid_color_fill_tolerance", 26)
+    if (isinstance(fluid_color_fill_tolerance, bool) or not isinstance(fluid_color_fill_tolerance, int)
+            or not 0 <= fluid_color_fill_tolerance <= 255):
+        raise SettingsError("detection.fluid_color_fill_tolerance must be an integer between 0 and 255")
     exclude_forced_default = _expect_bool(detection.get("exclude_forced_default"), "detection.exclude_forced_default")
     default_candidate_padding_px = detection.get("default_candidate_padding_px", 0)
     default_exclude_candidate_padding_px = detection.get("default_exclude_candidate_padding_px", default_candidate_padding_px)
@@ -217,6 +224,8 @@ def validate_settings(value: Any) -> dict[str, Any]:
         "detection": {
             "mode": mode,
             "fluid_exclusion_enabled": fluid_exclusion_enabled,
+            "fluid_color_fill_enabled": fluid_color_fill_enabled,
+            "fluid_color_fill_tolerance": fluid_color_fill_tolerance,
             "exclude_forced_default": exclude_forced_default,
             "default_candidate_padding_px": default_candidate_padding_px,
             "default_exclude_candidate_padding_px": default_exclude_candidate_padding_px,

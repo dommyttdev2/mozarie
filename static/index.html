@@ -288,9 +288,18 @@
         <span data-i18n="detectDialog.excludeCandidatePadding">除外候補の枠</span>
         <span class="inline-field"><input id="detectExcludeCandidatePadding" type="number" min="0" step="1" value="0" inputmode="numeric" data-i18n-aria-label="detectDialog.excludeCandidatePadding" aria-label="除外候補の枠"><span>px</span></span>
        </label>
-      <p id="detectDialogHelp" class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
-      <p id="detectTargetValidation" class="dialog-result error" role="alert" hidden></p>
-      <p id="detectPaddingValidation" class="dialog-result error" role="alert" hidden></p>
+       <label class="form-row">
+        <span data-i18n="detectDialog.fluidColorFillEnabled">精液候補を色で広げる</span>
+        <input id="detectFluidColorFillEnabled" type="checkbox" checked data-i18n-aria-label="detectDialog.fluidColorFillEnabled" aria-label="精液候補を色で広げる">
+       </label>
+       <label class="form-row">
+        <span data-i18n="detectDialog.fluidColorFillTolerance">精液候補の色の許容範囲</span>
+        <span class="inline-field"><input id="detectFluidColorFillTolerance" type="number" min="0" max="255" step="1" value="26" inputmode="numeric" data-i18n-aria-label="detectDialog.fluidColorFillTolerance" aria-label="精液候補の色の許容範囲"><span data-i18n="detectDialog.toleranceUnit">/ 255</span></span>
+       </label>
+       <p id="detectDialogHelp" class="fixed-note" data-i18n="detectDialog.help">高いほど誤検出は減りますが、見逃しは増えます。</p>
+       <p id="detectTargetValidation" class="dialog-result error" role="alert" hidden></p>
+       <p id="detectPaddingValidation" class="dialog-result error" role="alert" hidden></p>
+       <p id="detectFluidColorFillValidation" class="dialog-result error" role="alert" hidden></p>
       <div class="dialog-actions">
         <button id="detectCancelButton" type="button" data-i18n="dialog.cancel">キャンセル</button>
         <button id="detectStartButton" type="submit" class="primary" data-i18n="detectDialog.start">検出を開始</button>

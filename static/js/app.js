@@ -849,7 +849,7 @@ function bindEvents() {
   };
   $("#detectAllButton").addEventListener("click", detectAll);
   document.querySelectorAll("#dialogTargetPenis, #dialogTargetPussy").forEach((input) => input.addEventListener("change", () => validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"))));
-  $("#detectCurrentButton").addEventListener("click", () => { const image = currentRecord(); if (!currentImageActionPending() && isProcessableImage(image)) void runDetection([image.id], detectionConfidence(), 1, detectionTargets()); });
+  $("#detectCurrentButton").addEventListener("click", () => { const image = currentRecord(); if (!currentImageActionPending() && isProcessableImage(image)) openDetectionDialog([image.id]); });
   $("#saveAllButton").addEventListener("click", saveAll); $("#saveButton").addEventListener("click", saveCurrent); $("#singleViewButton").addEventListener("click", () => setDisplayMode("single")); $("#compareViewButton").addEventListener("click", () => setDisplayMode("compare")); $("#fitButton").addEventListener("click", () => { if (!isBusy() && !state.importing) fitImage(); });
   $("#flipHorizontalButton").addEventListener("click", () => { void toggleImageFlip("horizontal"); });
   $("#flipVerticalButton").addEventListener("click", () => { void toggleImageFlip("vertical"); });
@@ -1021,6 +1021,8 @@ function bindEvents() {
   $("#confidence").addEventListener("input", () => { if (!isBusy() && !state.importing) setDetectionConfidence($("#confidence").value); });
   $("#detectConfidenceRange").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceRange").value));
   $("#detectConfidenceNumber").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceNumber").value));
+  $("#detectFluidColorFillEnabled").addEventListener("change", syncDetectionFluidColorFill);
+  $("#detectFluidColorFillTolerance").addEventListener("input", validateDetectionFluidColorFill);
   document.querySelectorAll(".target-chip input").forEach((input) => input.addEventListener("change", () => {
     syncDetectionTargetSwitch(input);
     if (input.id.startsWith("dialog")) validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"));

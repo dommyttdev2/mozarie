@@ -25,6 +25,25 @@ function validateDetectionCandidatePadding() {
   $("#detectCandidatePadding").setAttribute("aria-invalid", String(!valid));
   return valid;
 }
+function detectionFluidColorFillTolerance() {
+  const text = String($("#detectFluidColorFillTolerance").value).trim();
+  const value = Number(text);
+  return /^\d+$/.test(text) && Number.isSafeInteger(value) && value <= 255 ? value : null;
+}
+function validateDetectionFluidColorFill() {
+  const valid = detectionFluidColorFillTolerance() !== null;
+  const input = $("#detectFluidColorFillTolerance");
+  const message = $("#detectFluidColorFillValidation");
+  input.setAttribute("aria-invalid", String(!valid));
+  message.textContent = valid ? "" : t("detectDialog.fluidColorFillToleranceInvalid");
+  message.hidden = valid;
+  return valid;
+}
+function syncDetectionFluidColorFill() {
+  const enabled = $("#detectFluidColorFillEnabled").checked;
+  $("#detectFluidColorFillTolerance").disabled = !enabled;
+  validateDetectionFluidColorFill();
+}
 function syncDetectionActions() {
   const enabled = persistedDetectionTargets().length > 0 && !isBusy() && !state.importing && !catalogStagingEditsActive()
     && !state.projectReadOnly && !currentRecord()?.sourceDimensionsChanged && !currentImageActionPending();
@@ -63,7 +82,10 @@ function openDetectionDialog(imageIds) {
   $("#detectParallelism").value = String(detectionParallelism());
   $("#detectCandidatePadding").value = String(state.settings?.detection?.default_candidate_padding_px || 0);
   $("#detectExcludeCandidatePadding").value = String(state.settings?.detection?.default_exclude_candidate_padding_px || 0);
+  $("#detectFluidColorFillEnabled").checked = state.settings?.detection?.fluid_color_fill_enabled !== false;
+  $("#detectFluidColorFillTolerance").value = String(state.settings?.detection?.fluid_color_fill_tolerance ?? 26);
   $("#detectCandidatePadding").setAttribute("aria-invalid", "false"); $("#detectPaddingValidation").hidden = true;
+  syncDetectionFluidColorFill();
   $("#detectParallelism").disabled = false;
   setDetectionTargets(state.settings?.detection?.targets, "dialogTarget");
   validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"));
@@ -117,15 +139,26 @@ async function startDetectionFromDialog(event) {
   const confidence = normaliseDetectionConfidence($("#detectConfidenceNumber").value);
   const parallelism = detectionParallelism();
   const targetClasses = detectionTargets("dialogTarget");
-  if (!validateDetectionTargets(targetClasses, $("#detectTargetValidation")) || !validateDetectionCandidatePadding()) return;
+  if (!validateDetectionTargets(targetClasses, $("#detectTargetValidation")) || !validateDetectionCandidatePadding() || !validateDetectionFluidColorFill()) return;
   const defaultCandidatePadding = detectionCandidatePadding();
   const defaultExcludeCandidatePadding = detectionCandidatePadding("#detectExcludeCandidatePadding");
+  const fluidColorFillEnabled = $("#detectFluidColorFillEnabled").checked;
+  const fluidColorFillTolerance = detectionFluidColorFillTolerance();
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   beginDetectionStart(imageIds);
   if (state.settings) {
     const settings = structuredClone(state.settings);
-    settings.detection = { ...settings.detection, threshold: confidence, parallelism, targets: targetClasses, default_candidate_padding_px: defaultCandidatePadding, default_exclude_candidate_padding_px: defaultExcludeCandidatePadding };
+    settings.detection = {
+      ...settings.detection,
+      threshold: confidence,
+      parallelism,
+      targets: targetClasses,
+      default_candidate_padding_px: defaultCandidatePadding,
+      default_exclude_candidate_padding_px: defaultExcludeCandidatePadding,
+      fluid_color_fill_enabled: fluidColorFillEnabled,
+      fluid_color_fill_tolerance: fluidColorFillTolerance,
+    };
     try {
       const saved = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(settings) });
       state.settings = saved.settings;

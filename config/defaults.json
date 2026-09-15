@@ -40,6 +40,8 @@
   "detection": {
     "mode": "standard",
     "fluid_exclusion_enabled": true,
+    "fluid_color_fill_enabled": true,
+    "fluid_color_fill_tolerance": 26,
     "exclude_forced_default": true,
     "default_candidate_padding_px": 0,
     "default_exclude_candidate_padding_px": 0,

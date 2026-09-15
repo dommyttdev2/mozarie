@@ -15,7 +15,7 @@ from PIL import Image, ImageOps, PngImagePlugin
 from .core import (
     DEFAULT_COLORS, DEFAULT_DETECTION_CONFIDENCE, HAND_CONFIDENCE,
     DETECTED_TARGET_CLASSES, TARGET_CLASSES, Candidate, CandidateRole,
-    ClientError, HAND_MAX_REMOVAL_RATIO, ImageRecord, JobControl, accepted_hand_sam_mask,
+    ClientError, HAND_MAX_REMOVAL_RATIO, ImageRecord, JobControl, LOGGER, accepted_hand_sam_mask,
     accepted_specialist_hand_mask, arbitrate_segment_sources, clip_mask_to_roi,
     confidence_for_source, detection_tiles, mask_iou, materialize_tile_mask,
     merge_tile_segment, padded_hand_box, read_boundary_request,
@@ -25,7 +25,7 @@ from .core import (
     select_best_sam_mask, select_semantic_sam_mask,
     torch_module, _read_detection_parallelism, _read_target_classes,
 )
-from .fluid import white_fluid_mask
+from .fluid import expand_white_fluid_mask, white_fluid_mask
 from .image_io import canonical_image
 from .runtime import runtime_backend
 from .runtime_types import DetectionModels
@@ -113,13 +113,32 @@ class DetectionMixin:
             # Candidates remain staged until every target is ready, then the
             # group is published as one SQLite transaction.
             self._detection_history_group = self.workspace_store.begin_history_group()
-            # Capture the default here. Settings may be changed after the job
-            # starts, but one detection run must use one coherent value.
-            self._active_detection_default_padding = int(self.settings["detection"]["default_candidate_padding_px"])
-            self._active_detection_default_exclude_padding = int(self.settings["detection"]["default_exclude_candidate_padding_px"])
-            args: tuple[Any, ...] = (confidence, _read_detection_parallelism(parallelism))
-            if targets != TARGET_CLASSES:
-                args = (*args, targets)
+            # Capture every per-run option before the worker starts.  A saved
+            # settings change must never alter only the latter images of one
+            # detection run.
+            detection = self.settings["detection"]
+            detection_options = {
+                "mode": str(detection["mode"]),
+                "fluid_exclusion_enabled": bool(detection["fluid_exclusion_enabled"]),
+                "fluid_color_fill": (
+                    bool(detection["fluid_color_fill_enabled"]),
+                    int(detection["fluid_color_fill_tolerance"]),
+                ),
+                "default_padding": int(detection["default_candidate_padding_px"]),
+                "default_exclude_padding": int(detection["default_exclude_candidate_padding_px"]),
+            }
+            LOGGER.info(
+                "自動検出開始: 対象=%d件 精液候補の色拡張=%s 許容範囲=%d",
+                len(records),
+                "ON" if detection_options["fluid_color_fill"][0] else "OFF",
+                detection_options["fluid_color_fill"][1],
+            )
+            args: tuple[Any, ...] = (
+                confidence,
+                _read_detection_parallelism(parallelism),
+                targets,
+                detection_options,
+            )
             self._start_job("detect", records, self._detect_worker, *args, expected_catalog_generation=catalog_generation)
 
 
@@ -219,6 +238,7 @@ class DetectionMixin:
         confidence: float,
         parallelism: int = 2,
         target_classes: set[str] | None = None,
+        detection_options: dict[str, Any] | None = None,
         *,
         control: JobControl | None = None,
         job_generation: int | None = None,
@@ -235,7 +255,19 @@ class DetectionMixin:
             if catalog_generation is None:
                 with self.lock:
                     catalog_generation = self.catalog_generation
-            mode = str(self.settings["detection"]["mode"])
+            if detection_options is None:
+                detection = self.settings["detection"]
+                detection_options = {
+                    "mode": str(detection["mode"]),
+                    "fluid_exclusion_enabled": bool(detection["fluid_exclusion_enabled"]),
+                    "fluid_color_fill": (
+                        bool(detection["fluid_color_fill_enabled"]),
+                        int(detection["fluid_color_fill_tolerance"]),
+                    ),
+                    "default_padding": int(detection["default_candidate_padding_px"]),
+                    "default_exclude_padding": int(detection["default_exclude_candidate_padding_px"]),
+                }
+            mode = str(detection_options["mode"])
             requested_parallelism = _read_detection_parallelism(parallelism)
             if runtime_backend(torch_module=torch_module()) == "directml":
                 requested_parallelism = 1
@@ -257,7 +289,17 @@ class DetectionMixin:
             def claim_and_run(index: int, record: ImageRecord) -> None:
                 try:
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
-                    candidates = self._detect_image(models, record, confidence, mode, target_classes or TARGET_CLASSES)
+                    candidates = self._detect_image(
+                        models,
+                        record,
+                        confidence,
+                        mode,
+                        target_classes or TARGET_CLASSES,
+                        default_padding=int(detection_options["default_padding"]),
+                        default_exclude_padding=int(detection_options["default_exclude_padding"]),
+                        fluid_exclusion_enabled=bool(detection_options["fluid_exclusion_enabled"]),
+                        fluid_color_fill=detection_options["fluid_color_fill"],
+                    )
                     if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
                         self._discard_candidates(candidates)
                         return
@@ -503,7 +545,7 @@ class DetectionMixin:
         return self._attach_hand_evidence(segments, detected, hand_mask)
 
     @staticmethod
-    def _metadata_fluid_mask(
+    def _metadata_fluid_search(
         rgb: np.ndarray, final_masks: list[np.ndarray], hand_evidence: np.ndarray, faces: list[dict[str, Any]], scene_fluid_tags: frozenset[str],
     ) -> np.ndarray:
         shape = np.asarray(rgb).shape[:2]
@@ -551,13 +593,21 @@ class DetectionMixin:
                     center + width * .50,
                     bottom + height * 1.75,
                 )
-        return white_fluid_mask(rgb, search) if np.any(search) else np.zeros(shape, dtype=np.uint8)
+        return search
 
     def _finalize_exclusions(
         self, rgb: np.ndarray, segments: list[dict[str, Any]], scene_fluid_tags: frozenset[str] = frozenset(),
+        *,
+        alpha: np.ndarray | None = None,
+        fluid_exclusion_enabled: bool | None = None,
+        fluid_color_fill: tuple[bool, int] | None = None,
     ) -> list[dict[str, Any]]:
         """Create reviewable non-hand exclusions from the final APPLY mask."""
         shape = np.asarray(rgb).shape[:2]
+        if fluid_exclusion_enabled is None:
+            fluid_exclusion_enabled = bool(self.settings["detection"]["fluid_exclusion_enabled"])
+        expand_fluid = fluid_color_fill is not None and fluid_color_fill[0]
+        fluid_tolerance = fluid_color_fill[1] if expand_fluid else 0
         targets = [segment for segment in segments if segment.get("class_name") in DETECTED_TARGET_CLASSES]
         faces = [segment for segment in segments if segment.get("class_name") == "female_face"]
         if not targets and not scene_fluid_tags:
@@ -588,13 +638,20 @@ class DetectionMixin:
         safe_hand = np.where(unsafe_targets > 0, 0, safe_hand).astype(np.uint8) * 255
 
         fluid_union = np.zeros(shape, dtype=np.uint8)
-        if self.settings["detection"]["fluid_exclusion_enabled"]:
+        if fluid_exclusion_enabled:
             for final_mask in final_masks:
                 if np.any(final_mask):
-                    fluid_union = np.maximum(fluid_union, white_fluid_mask(rgb, final_mask))
+                    fluid_seed = white_fluid_mask(rgb, final_mask)
+                    fluid_mask = (
+                        expand_white_fluid_mask(rgb, fluid_seed, final_mask, fluid_tolerance, alpha=alpha)
+                        if expand_fluid else fluid_seed
+                    )
+                    fluid_union = np.maximum(fluid_union, fluid_mask)
+        metadata_search = self._metadata_fluid_search(rgb, final_masks, hand_evidence, faces, scene_fluid_tags)
+        metadata_seed = white_fluid_mask(rgb, metadata_search) if fluid_exclusion_enabled and np.any(metadata_search) else np.zeros(shape, dtype=np.uint8)
         metadata_fluid = (
-            self._metadata_fluid_mask(rgb, final_masks, hand_evidence, faces, scene_fluid_tags)
-            if self.settings["detection"]["fluid_exclusion_enabled"] else np.zeros(shape, dtype=np.uint8)
+            expand_white_fluid_mask(rgb, metadata_seed, metadata_search, fluid_tolerance, alpha=alpha)
+            if expand_fluid and np.any(metadata_seed) else metadata_seed
         )
         if not targets:
             if np.any(metadata_fluid):
@@ -718,6 +775,9 @@ class DetectionMixin:
         self, models: DetectionModels, record: ImageRecord, confidence: float, mode: str | None = None,
         target_classes: set[str] | None = None,
         default_padding: int | None = None,
+        default_exclude_padding: int | None = None,
+        fluid_exclusion_enabled: bool | None = None,
+        fluid_color_fill: tuple[bool, int] | None = None,
     ) -> list[Candidate]:
         # Decode is a short per-image phase. Do not hold the image
         # lock while detector/SAM inference runs.
@@ -726,8 +786,10 @@ class DetectionMixin:
                 int(self._active_detection_default_padding),
                 int(np.ceil(np.hypot(record.width - 1, record.height - 1))),
             )
+        if default_exclude_padding is None:
+            default_exclude_padding = int(self._active_detection_default_exclude_padding)
         default_exclude_padding = min(
-            int(self._active_detection_default_exclude_padding),
+            default_exclude_padding,
             int(np.ceil(np.hypot(record.width - 1, record.height - 1))),
         )
         with self.image_io_lock(record.image_id):
@@ -735,7 +797,11 @@ class DetectionMixin:
             image, _source, info = canonical_image(record)
             scene_fluid_tags = _scene_fluid_tags(info)
             rgb = np.asarray(image.convert("RGB")).copy()
-        if not self.settings["detection"]["fluid_exclusion_enabled"]:
+            has_alpha = "A" in image.getbands() or (image.mode == "P" and "transparency" in image.info)
+            alpha = np.asarray(image.convert("RGBA"))[:, :, 3].copy() if has_alpha else None
+        if fluid_exclusion_enabled is None:
+            fluid_exclusion_enabled = bool(self.settings["detection"]["fluid_exclusion_enabled"])
+        if not fluid_exclusion_enabled:
             scene_fluid_tags = frozenset()
         segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES, scene_fluid_tags)
         detected, hand_mask, _ = self._hand_refinement_context(models, record, rgb, segments)
@@ -747,8 +813,14 @@ class DetectionMixin:
                 segments = self._high_precision_segments_with_predictor(rgb, segments, predictor)
         else:
             segments = self._attach_hand_evidence(segments, detected, hand_mask)
-        segments = (self._finalize_exclusions(rgb, segments, scene_fluid_tags)
-                    if scene_fluid_tags else self._finalize_exclusions(rgb, segments))
+        segments = self._finalize_exclusions(
+            rgb,
+            segments,
+            scene_fluid_tags,
+            alpha=alpha,
+            fluid_exclusion_enabled=fluid_exclusion_enabled,
+            fluid_color_fill=fluid_color_fill,
+        )
         candidates: list[Candidate] = []
         destination = self.cache_dir / record.image_id
         destination.mkdir(parents=True, exist_ok=True)

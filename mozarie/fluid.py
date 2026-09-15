@@ -8,11 +8,62 @@ import cv2
 import numpy as np
 
 
-__all__ = ["white_fluid_mask"]
+__all__ = ["expand_white_fluid_mask", "white_fluid_mask"]
 
 
 _MAX_COMPONENT_RATIO = 0.15
 _MAX_TOTAL_RATIO = 0.20
+
+
+def expand_white_fluid_mask(
+    rgb: np.ndarray,
+    seed_mask: np.ndarray,
+    allowed_mask: np.ndarray,
+    tolerance: int,
+    *,
+    alpha: np.ndarray | None = None,
+) -> np.ndarray:
+    """Grow accepted fluid seeds through their permitted colour-connected area.
+
+    The white-fluid detector remains the authority for seed selection.  This
+    optional post-process only expands each accepted seed through a 4-connected
+    fixed-range RGB region, bounded by the target or metadata search region.
+    """
+
+    if isinstance(tolerance, bool) or not isinstance(tolerance, int) or not 0 <= tolerance <= 255:
+        raise ValueError("tolerance must be an integer between 0 and 255")
+    pixels = np.asarray(rgb)
+    if pixels.ndim != 3 or pixels.shape[2] != 3:
+        raise ValueError("rgb must have shape (height, width, 3)")
+    seeds = np.asarray(seed_mask) > 0
+    allowed = np.asarray(allowed_mask) > 0
+    if seeds.shape != pixels.shape[:2] or allowed.shape != pixels.shape[:2]:
+        raise ValueError("fluid masks must match rgb dimensions")
+    if alpha is not None:
+        alpha_values = np.asarray(alpha)
+        if alpha_values.shape != seeds.shape:
+            raise ValueError("alpha must match rgb dimensions")
+        allowed &= alpha_values > 0
+    seeds &= allowed
+    if not np.any(seeds) or tolerance == 0:
+        return np.asarray(seeds, dtype=np.uint8) * 255
+
+    # ``floodFill`` uses a mask two pixels larger than the source image.  A
+    # non-zero entry blocks traversal, so pre-fill every pixel outside the
+    # permitted region and preserve that boundary for every seed component.
+    flood_mask = np.pad(np.asarray(~allowed, dtype=np.uint8), 1, constant_values=1)
+    source = np.ascontiguousarray(pixels)
+    expanded = np.zeros_like(seeds, dtype=bool)
+    component_count, labels = cv2.connectedComponents(np.asarray(seeds, dtype=np.uint8), connectivity=4)
+    flags = 4 | cv2.FLOODFILL_FIXED_RANGE | cv2.FLOODFILL_MASK_ONLY | (2 << 8)
+    difference = (tolerance, tolerance, tolerance)
+    for label in range(1, component_count):
+        row, column = np.argwhere(labels == label)[0]
+        cv2.floodFill(source, flood_mask, (int(column), int(row)), 0, difference, difference, flags)
+        expanded |= flood_mask[1:-1, 1:-1] == 2
+    # A fixed-range fill may not cover every accepted seed if another component
+    # has already marked it in the shared mask.  Preserve every accepted seed.
+    return np.asarray(expanded | seeds, dtype=np.uint8) * 255
 
 
 def white_fluid_mask(rgb: np.ndarray, penis_mask: np.ndarray) -> np.ndarray:
