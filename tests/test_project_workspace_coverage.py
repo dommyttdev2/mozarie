@@ -182,7 +182,7 @@ class ProjectWorkspaceCoverageTests(unittest.TestCase):
             store.set_image_flags(first)
             store.commit_save(first, mtime_ns=30, size_bytes=31, candidate_revision=9, clear_workspace=True)
             self.assertEqual(store.reconcile_images(catalog, [self.record("one.png", size=31, mtime=30, width=8, height=4)])["one.png"]["revision"], 9)
-            store.prune_catalog_images(catalog, {"one.png"})
+            store.delete_images([second])
             self.assertFalse(store.has_image(second))
             store.delete_images([]); store.delete_images([first])
             self.assertFalse(store.has_image(first))
@@ -190,7 +190,7 @@ class ProjectWorkspaceCoverageTests(unittest.TestCase):
             third = str(store.reconcile_images(catalog, [self.record("third.png")])["third.png"]["image_id"])
             store.commit_save(third, clear_workspace=False, delete_image=True)
             self.assertFalse(store.has_image(third))
-            store.prune_catalog_images(catalog, set())
+            store.delete_catalog_images(catalog)
             self.assertEqual(store.project_images(catalog), [])
 
     def test_candidate_hydration_bulk_manual_and_export_contract(self):
@@ -471,7 +471,7 @@ class ProjectWorkspaceCoverageTests(unittest.TestCase):
                 with self.assertRaises(sqlite3.ProgrammingError):
                     store.delete_images([image_id])
             with self.assertRaises(sqlite3.ProgrammingError):
-                store.prune_catalog_images(catalog, {object()})
+                store.delete_catalog_images(object())
             with self.assertRaises(sqlite3.ProgrammingError):
                 store.commit_save(image_id, mtime_ns=1, size_bytes=object(), clear_workspace=False)
             self.assertTrue(store.has_image(image_id))
