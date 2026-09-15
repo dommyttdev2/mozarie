@@ -11,6 +11,7 @@ import io
 import sqlite3
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -34,37 +35,39 @@ def image_record(name: str = "image.png", size: int = 10, mtime: int = 20) -> Si
 
 
 class WorkspaceCoverageTests(unittest.TestCase):
-    def new_store(self, root: Path) -> tuple[WorkspaceStore, str, str]:
+    def new_store(self, root: Path) -> tuple[WorkspaceStore, str, str, str]:
         store = WorkspaceStore(root)
-        catalog = store.ensure_catalog()
-        image_id = str(store.reconcile_images(catalog, [image_record()])["image.png"]["image_id"])
-        return store, catalog, image_id
+        catalog = str(store.create_project("fixture")["id"])
+        source = store.ensure_project_source(catalog, kind="native-folder", display_name="fixture", identity=str(root.resolve()))
+        image_id = str(store.reconcile_images(catalog, [image_record()], source)["image.png"]["image_id"])
+        return store, catalog, source, image_id
 
     def test_workspace_simple_noops_and_manifest_ties(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            store, catalog, image_id = self.new_store(root)
+            store, catalog, source, image_id = self.new_store(root)
             self.assertEqual(store.reconcile_images(catalog, []), {})
-            self.assertIsNone(store.best_catalog_for_manifest([], catalog))
             self.assertEqual(store.image_state("missing"), (False, False))
             store.set_image_flags(image_id)
             store.delete_images([])
             store.clear_image_workspaces({})
             store.delete_manual([])
 
-            first = store.ensure_catalog()
-            second = store.ensure_catalog()
+            first = str(store.create_project("first")["id"])
+            second = str(store.create_project("second")["id"])
             for target, name in ((first, "one.png"), (second, "two.png")):
-                target_id = str(store.reconcile_images(target, [image_record(name) ])[name]["image_id"])
+                target_source = store.ensure_project_source(target, kind="browser-files", display_name=target, identity=f"browser:{target}")
+                target_id = str(store.reconcile_images(target, [image_record(name)], target_source)[name]["image_id"])
                 self.assertTrue(store.has_image(target_id))
-            self.assertIsNone(store.best_catalog_for_manifest([("one.png", "same"), ("two.png", "same")], catalog))
+            self.assertEqual(store.project_images(first)[0]["relativePath"], "one.png")
+            self.assertEqual(store.project_images(second)[0]["relativePath"], "two.png")
 
     def test_workspace_source_change_and_commit_variants(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            store, catalog, image_id = self.new_store(root)
+            store, catalog, source, image_id = self.new_store(root)
             store.set_image_flags(image_id, hidden=True, reviewed=True)
-            changed = store.reconcile_images(catalog, [image_record(size=11)])["image.png"]
+            changed = store.reconcile_images(catalog, [image_record(size=11)], source)["image.png"]
             self.assertTrue(changed["changed"])
             self.assertFalse(changed["reviewed"])
             store.commit_save(image_id, mtime_ns=22, size_bytes=12, candidate_revision=4, clear_workspace=True)
@@ -76,7 +79,7 @@ class WorkspaceCoverageTests(unittest.TestCase):
     def test_workspace_masks_hydration_and_manual_normalization(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            store, _catalog, image_id = self.new_store(root)
+            store, _catalog, _source, image_id = self.new_store(root)
             self.assertIsNone(store._decode_png_mask(None))
             self.assertEqual(store._decode_png_mask(png("L")).mode, "L")
             self.assertEqual(store._decode_png_mask(png("RGBA")).mode, "L")
@@ -110,7 +113,7 @@ class WorkspaceCoverageTests(unittest.TestCase):
         """SQLite triggers reproduce disk/constraint failures inside transactions."""
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            store, catalog, image_id = self.new_store(root)
+            store, catalog, _source, image_id = self.new_store(root)
             db = sqlite3.connect(store.path)
             try:
                 db.execute("CREATE TRIGGER fail_image_delete BEFORE DELETE ON images BEGIN SELECT RAISE(ABORT, 'blocked'); END")
@@ -129,7 +132,7 @@ class WorkspaceCoverageTests(unittest.TestCase):
             finally:
                 db.close()
             with self.assertRaises(sqlite3.DatabaseError):
-                store.delete_catalog(catalog)
+                store.delete_project(catalog)
             self.assertTrue(store.catalog_exists(catalog))
 
             db = sqlite3.connect(store.path)
@@ -166,7 +169,9 @@ class StateAndCatalogCoverageTests(unittest.TestCase):
         return self.state.set_root(str(self.root))[0]["id"]
 
     def test_state_gpu_and_import_guards(self) -> None:
-        self.state.active_import_count = 1
+        session_id = str(uuid.uuid4())
+        self.state.start_import_session(session_id, self.state.catalog_id, self.state.catalog_generation)
+        self.state.begin_import_transfer(session_id, self.state.catalog_id, self.state.catalog_generation)
         with self.assertRaises(ClientError) as context:
             self.state.update_settings({})
         self.assertEqual(context.exception.error_code, "job_running")
@@ -174,7 +179,7 @@ class StateAndCatalogCoverageTests(unittest.TestCase):
             self.state.reset_settings()
         with self.assertRaises(ClientError):
             self.state.diagnose_gpu_runtime()
-        self.state.end_import_transfer()
+        self.state.end_import_transfer(session_id, succeeded=False)
         self.assertEqual(self.state.active_import_count, 0)
         self.assertEqual(self.state.active_import_count, 0)
         with self.assertRaises(ClientError):
@@ -201,7 +206,7 @@ class StateAndCatalogCoverageTests(unittest.TestCase):
             self.state.batch_update_candidates(image_id, {"role": "bad", "operation": "bad"})
         self.assertFalse(self.state.delete_candidate(image_id, "missing"))
         with self.assertRaises(ClientError):
-            self.state.import_image_file_for_api(self.root / "missing", name="x.png", relative_path="x.png", client_key="")
+            self.state.import_image_file_for_api(self.root / "missing", name="x.png", relative_path="x.png", client_key="", intent="add")
 
     def test_catalog_candidate_and_session_branches(self) -> None:
         image_id = self.add_image()
