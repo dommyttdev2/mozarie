@@ -45,7 +45,7 @@
 11. [固定上限を使わない処理・保存・ブラウザー読込（DI-212〜214、WS-135〜137、SV-070〜075）](manual-verification/data-integrity.md)：SQLite・終了待機・入力ID、画像追加、保存、サムネイルと先読みの上限・解放を確認する。
 12. [ジョブ進捗とPJ切替の公開境界（DI-215〜216）](manual-verification/data-integrity.md)：進捗取得の待機と、PJ再開・元画像照合後の公開失敗を確認する。
 13. [元画像削除の確定・復旧・再試行（DI-217〜233）](manual-verification/data-integrity.md)：フィルター順の遷移、ネイティブ／ブラウザー元画像の完全削除、確認トークン、再起動後の復旧と隔離ファイル後処理を確認する。
-14. [ストリーミング保存・セッション復旧・大規模PJ照合（DI-234〜251）](manual-verification/data-integrity.md)：手描きレイヤーとブラウザー保存の再開、失われた応答、PJ読込時の変換状態照合、古い一覧の案内と作業DB検証を確認する。
+14. [ストリーミング保存・セッション復旧・大規模PJ照合（DI-234〜254）](manual-verification/data-integrity.md)：手描きレイヤーとブラウザー保存の再開、失われた応答、上書きbackup復旧、PJ読込時の変換状態照合、マスクZIPと作業DB検証を確認する。
 15. [更新アーカイブの空き容量と未作成展開先（SV-076）](manual-verification/save-release.md)：未作成の一時展開先でも既存親の空き容量を確認し、十分な容量がある場合だけ更新ZIPを展開する。
 16. [ブラウザーコピー保存後の元画像削除（SV-077）](manual-verification/save-release.md)：元画像を削除する前に復元用snapshotを取得できない場合、コピーを保持して削除・確定を開始しないことを確認する。
 17. [絶対パスの保存・モデル・フォルダー読込（SD-141〜142、WS-138）](manual-verification/settings-detection.md)：既存設定の一回限りの移行と、新規入力で相対パスを拒否することを確認する。

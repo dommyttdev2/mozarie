@@ -543,7 +543,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     raise ClientError("マスク種別が正しくありません。", "input_invalid")
                 if STATE.workspace_store.project(project_id) is None:
                     raise ClientError("プロジェクトが見つかりません。", "project_not_found")
-                with tempfile.NamedTemporaryFile(prefix="mozarie-masks-", suffix=".zip", delete=False) as output:
+                with tempfile.NamedTemporaryFile(dir=STATE.cache_dir, prefix="mozarie-masks-", suffix=".zip", delete=False) as output:
                     archive_path = Path(output.name)
                 try:
                     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:

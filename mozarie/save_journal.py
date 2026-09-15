@@ -25,13 +25,14 @@ class SaveJournal:
                 state TEXT NOT NULL, destination TEXT, staged TEXT, staged_mtime INTEGER,
                 staged_size INTEGER, staged_identity TEXT, destination_mtime INTEGER, destination_size INTEGER, quarantine TEXT, cleared INTEGER, stale INTEGER,
                 deleted INTEGER, catalog_generation INTEGER, destination_identity TEXT,
-                source_path TEXT, quarantine_mtime INTEGER, quarantine_size INTEGER, quarantine_identity TEXT,
+                source_path TEXT, source_identity TEXT, quarantine_mtime INTEGER, quarantine_size INTEGER, quarantine_identity TEXT,
+                replacement_mtime INTEGER, replacement_size INTEGER, replacement_identity TEXT,
                 recovery_decision TEXT, cleanup_note TEXT, updated_at INTEGER NOT NULL
             )""")
             columns = {row[1] for row in db.execute("PRAGMA table_info(saves)")}
-            for column in ("staged_identity", "destination_identity", "source_path", "quarantine_mtime", "quarantine_size", "quarantine_identity", "recovery_decision", "cleanup_note"):
+            for column in ("staged_identity", "destination_identity", "source_path", "source_identity", "quarantine_mtime", "quarantine_size", "quarantine_identity", "replacement_mtime", "replacement_size", "replacement_identity", "recovery_decision", "cleanup_note"):
                 if column not in columns:
-                    column_type = "INTEGER" if column in {"quarantine_mtime", "quarantine_size"} else "TEXT"
+                    column_type = "INTEGER" if column in {"quarantine_mtime", "quarantine_size", "replacement_mtime", "replacement_size"} else "TEXT"
                     db.execute(f"ALTER TABLE saves ADD COLUMN {column} {column_type}")
             # Older journals did not record which side of the workspace
             # transaction had won.  Do not infer it from diagnostic text.
@@ -104,10 +105,29 @@ class SaveJournal:
             db.execute("UPDATE saves SET source_path=?,quarantine=?,quarantine_mtime=?,quarantine_size=?,quarantine_identity=?,updated_at=? WHERE token=?",
                 (str(source), str(path), fingerprint[0], fingerprint[1], identity, time.time_ns(), token))
 
+    def replacement_backup(
+        self,
+        token: str,
+        source: Path,
+        backup: Path,
+        backup_fingerprint: tuple[int, int],
+        backup_identity: str | None,
+        source_identity: str | None,
+        replacement_fingerprint: tuple[int, int],
+        replacement_identity: str | None,
+    ) -> None:
+        """Record both sides before replacing a source with a staged render."""
+        with self._lock, self._connection() as db:
+            db.execute("""UPDATE saves SET source_path=?,source_identity=?,quarantine=?,quarantine_mtime=?,quarantine_size=?,quarantine_identity=?,
+                replacement_mtime=?,replacement_size=?,replacement_identity=?,updated_at=? WHERE token=?""", (
+                str(source), source_identity, str(backup), backup_fingerprint[0], backup_fingerprint[1], backup_identity,
+                replacement_fingerprint[0], replacement_fingerprint[1], replacement_identity, time.time_ns(), token,
+            ))
+
     def clear_quarantine(self, token: str) -> None:
         """Abandon a pre-rename quarantine intent that never moved its source."""
         with self._lock, self._connection() as db:
-            db.execute("""UPDATE saves SET state='published',source_path=NULL,quarantine=NULL,
+            db.execute("""UPDATE saves SET state='published',source_path=NULL,source_identity=NULL,quarantine=NULL,
                 quarantine_mtime=NULL,quarantine_size=NULL,quarantine_identity=NULL,updated_at=? WHERE token=?""",
                 (time.time_ns(), token))
 
@@ -401,6 +421,34 @@ class SaveJournal:
         return True, True
 
     @classmethod
+    def _replacement_owned(cls, row: dict[str, Any]) -> bool:
+        """Check that an overwrite still names the staged file this token owns."""
+        source_value = row["source_path"]
+        identity = row.get("replacement_identity")
+        if (not source_value or row.get("replacement_mtime") is None
+                or row.get("replacement_size") is None or identity is None):
+            return False
+        try:
+            stat = Path(str(source_value)).stat()
+        except OSError:
+            return False
+        return ((stat.st_mtime_ns, stat.st_size) == (row["replacement_mtime"], row["replacement_size"])
+                and cls.file_identity(Path(str(source_value)), stat) == identity)
+
+    @classmethod
+    def _original_source_owned(cls, row: dict[str, Any]) -> bool:
+        source_value = row["source_path"]
+        identity = row.get("source_identity")
+        if not source_value or identity is None:
+            return False
+        try:
+            stat = Path(str(source_value)).stat()
+        except OSError:
+            return False
+        return ((stat.st_mtime_ns, stat.st_size) == (row["quarantine_mtime"], row["quarantine_size"])
+                and cls.file_identity(Path(str(source_value)), stat) == identity)
+
+    @classmethod
     def _restore_quarantine(cls, row: dict[str, Any]) -> bool:
         """Put back a quarantined source without ever replacing a new source."""
         value = row["quarantine"]
@@ -424,7 +472,18 @@ class SaveJournal:
         if not quarantine_exists:
             return source_exists
         if source_exists:
-            return False
+            # A replacement backup may only restore over the exact staged
+            # source.  A new file at the original path belongs to somebody
+            # else and leaves both files for an explicit recovery decision.
+            if not cls._replacement_owned(row):
+                # The crash can precede os.replace.  The old source is still
+                # safe only when its original file identity survived.
+                return cls._original_source_owned(row) and cls._unlink(
+                    str(quarantine), row["quarantine_mtime"], row["quarantine_size"], row["quarantine_identity"],
+                )
+            identity = row["replacement_identity"]
+            if os.name != "nt" or identity is None or not cls._delete_windows_owned(source, str(identity)):
+                return False
         identity = row["quarantine_identity"]
         if os.name == "nt":
             return identity is not None and cls._rename_windows_owned(quarantine, source, str(identity))
@@ -457,9 +516,11 @@ class SaveJournal:
         except OSError:
             return False
         else:
-            # A source and its quarantine together is ambiguous.  Keep both
-            # for explicit recovery instead of destroying either side.
-            return False
+            # A source and its replacement backup together is expected only
+            # when the source still has this token's staged identity.  A new
+            # source is an external conflict and must survive recovery.
+            if not row.get("replacement_identity") or not cls._replacement_owned(row):
+                return False
         return not exists or cls._unlink(value, row["quarantine_mtime"], row["quarantine_size"], row["quarantine_identity"])
 
     @staticmethod

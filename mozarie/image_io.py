@@ -11,7 +11,7 @@ import zlib
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Callable
 
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
@@ -22,6 +22,7 @@ from .core import (
     safe_import_relative_path, torch_module, _read_save_suffix,
 )
 from .runtime import directml_devices, runtime_backend
+from .save_journal import SaveJournal
 
 
 _IMAGE_OPEN_LOCK = threading.RLock()
@@ -713,7 +714,12 @@ def _remove_incomplete_backup(backup_path: Path) -> None:
         LOGGER.warning("Incomplete save backup could not be removed: %s", backup_path)
 
 
-def _stage_record_replacement(record: ImageRecord, rendered_path: Path, expected_source_fingerprint: tuple[int, int]) -> SourceReplaceStage:
+def _stage_record_replacement(
+    record: ImageRecord,
+    rendered_path: Path,
+    expected_source_fingerprint: tuple[int, int],
+    backup_ready: Callable[[Path, tuple[int, int], str | None, str | None, tuple[int, int], str | None], None] | None = None,
+) -> SourceReplaceStage:
     """Replace a source while retaining a same-directory rollback copy."""
     original_record = replace(record)
     original_stat = record.path.stat()
@@ -728,10 +734,24 @@ def _stage_record_replacement(record: ImageRecord, rendered_path: Path, expected
             handle.flush()
             os.fsync(handle.fileno())
         _assert_source_stat_matches(record, expected_source_fingerprint)
+        if record.source_kind == "filesystem":
+            try:
+                os.utime(temporary_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            except OSError:
+                LOGGER.warning("Saved image timestamp could not be restored: %s", record.path)
         replaced = False
         try:
             shutil.copy2(record.path, backup_path)
             _assert_source_stat_matches(record, expected_source_fingerprint)
+            source_stat = record.path.stat()
+            backup_stat = backup_path.stat()
+            temporary_stat = temporary_path.stat()
+            if backup_ready is not None:
+                backup_ready(
+                    backup_path, (backup_stat.st_mtime_ns, backup_stat.st_size), SaveJournal.file_identity(backup_path, backup_stat),
+                    SaveJournal.file_identity(record.path, source_stat),
+                    (temporary_stat.st_mtime_ns, temporary_stat.st_size), SaveJournal.file_identity(temporary_path, temporary_stat),
+                )
             os.replace(temporary_path, record.path)
             replaced = True
         finally:
@@ -739,11 +759,6 @@ def _stage_record_replacement(record: ImageRecord, rendered_path: Path, expected
                 _remove_incomplete_backup(backup_path)
         temporary_path = None
         _sync_directory(record.path.parent)
-        if record.source_kind == "filesystem":
-            try:
-                os.utime(record.path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-            except OSError:
-                LOGGER.warning("Saved image timestamp could not be restored: %s", record.path)
         stat = record.path.stat()
         record.set_asset_fingerprint(stat.st_mtime_ns, stat.st_size)
         if record.source_kind == "filesystem":

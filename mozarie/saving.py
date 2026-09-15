@@ -615,7 +615,14 @@ class SavingMixin:
                         self.save_journal.published(save_token, destination_fingerprint, identity)
                     if source_action == "overwrite":
                         assert token_details.rendered_path is not None
-                        source_stage = _stage_record_replacement(record_snapshot, token_details.rendered_path, token_details.source_fingerprint)
+                        source_stage = _stage_record_replacement(
+                            record_snapshot, token_details.rendered_path, token_details.source_fingerprint,
+                            lambda backup, backup_fingerprint, backup_identity, source_identity, replacement_fingerprint, replacement_identity:
+                                self.save_journal.replacement_backup(
+                                    save_token, record_snapshot.path, backup, backup_fingerprint, backup_identity,
+                                    source_identity, replacement_fingerprint, replacement_identity,
+                                ),
+                        )
                     else:
                         self._assert_record_stat_matches(record_snapshot)
                     if source_action == "deleted":
@@ -698,8 +705,6 @@ class SavingMixin:
                         # A journal outage must not restore the source or
                         # cancel an output that the workspace already recorded.
                         raise
-                    if source_stage is not None:
-                        source_stage.rollback()
                     self.save_journal.phase(save_token, "cleanup_pending")
                     with self.lock:
                         self._discard_browser_save_token_unchecked(save_token)
@@ -753,8 +758,6 @@ class SavingMixin:
                     thumbnail_path.unlink(missing_ok=True)
                 if rendered_path is not None:
                     rendered_path.unlink(missing_ok=True)
-                if source_stage is not None:
-                    source_stage.finalize()
                 try: self.save_journal.finish(save_token, cleared, not cleared, deleted, response_generation)
                 except OSError: pass
                 # Keep the receipt authoritative while journal-owned cleanup

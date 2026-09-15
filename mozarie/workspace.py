@@ -1334,7 +1334,7 @@ class WorkspaceStore:
                     raise ValueError("source delete operation is missing")
                 if operation["state"] not in {"claimed", "renaming"}:
                     raise ValueError("source delete operation is not prepared")
-                for chunk in _chunks(image_ids):
+                for chunk in _chunks(db, image_ids):
                     db.execute(f"DELETE FROM images WHERE image_id IN ({','.join('?' for _ in chunk)})", chunk)
                 db.execute("UPDATE source_delete_operations SET state=?,result_json=?,updated_at=? WHERE token=?", (
                     str(result.get("state", "workspace_committed")), json.dumps(result, ensure_ascii=False), time.time_ns(), token,
