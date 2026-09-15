@@ -748,12 +748,12 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "red").save(native_path)
             state = self.new_state()
             native_id = state.set_root(str(root))[0]["id"]
-            state.set_image_flags(native_id, {"hidden": True, "reviewed": True})
             mask_path = state.cache_dir / native_id / "native.png"
             mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.new("L", (16, 16), 255).save(mask_path)
             state.candidates[native_id] = [Candidate("native", "penis", 0.9, mask_path)]
             self.commit_candidates(state, native_id)
+            state.set_image_flags(native_id, {"hidden": True, "reviewed": True})
 
             upload = io.BytesIO(); Image.new("RGB", (16, 16), "blue").save(upload, format="PNG")
             with tempfile.TemporaryDirectory() as staging_directory:
