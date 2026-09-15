@@ -2068,7 +2068,7 @@ class MozarieTests(unittest.TestCase):
             control = core_module.JobControl()
             state.job = core_module.Job(kind="detect", state="running", total=2, image_ids=(first_id, second_id))
 
-            def detect_image(_models, record, _confidence, _mode="standard", _targets=None):
+            def detect_image(_models, record, _confidence, _mode="standard", _targets=None, **_kwargs):
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(self._mask(16, 16)).save(mask_path)
@@ -2116,7 +2116,7 @@ class MozarieTests(unittest.TestCase):
                 def __exit__(self, *args):
                     return original_lock.__exit__(*args)
 
-            def detect_image(*_args):
+            def detect_image(*_args, **_kwargs):
                 nonlocal inject_cancel
                 Image.fromarray(self._mask(16, 16)).save(new_mask_path)
                 inject_cancel = True
@@ -2182,7 +2182,7 @@ class MozarieTests(unittest.TestCase):
             pending_path = state.cache_dir / image_id / ".mozarie-pending-new.png"
             final_path = state.cache_dir / image_id / "new.png"
 
-            def detect_image(*_args):
+            def detect_image(*_args, **_kwargs):
                 Image.fromarray(self._mask(16, 16)).save(pending_path)
                 return [Candidate("new", "penis", 0.9, pending_path)]
 
@@ -2225,7 +2225,7 @@ class MozarieTests(unittest.TestCase):
             base_models = object()
             seen_models: list[int] = []
 
-            def detect_image(models, record, _confidence, _mode="standard", _targets=None):
+            def detect_image(models, record, _confidence, _mode="standard", _targets=None, **_kwargs):
                 seen_models.append(id(models))
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2314,7 +2314,7 @@ class MozarieTests(unittest.TestCase):
                     first_completed.set()
                 return result
 
-            def detect_image(_models, record, _confidence, _mode="standard", _targets=None):
+            def detect_image(_models, record, _confidence, _mode="standard", _targets=None, **_kwargs):
                 if record is records[0]:
                     self.assertTrue(second_started.wait(2))
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
@@ -2370,7 +2370,7 @@ class MozarieTests(unittest.TestCase):
             started = threading.Event()
             release = threading.Event()
 
-            def detect_image(_models, record, _confidence, _mode="standard", _targets=None):
+            def detect_image(_models, record, _confidence, _mode="standard", _targets=None, **_kwargs):
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(self._mask(16, 16)).save(mask_path)
@@ -4134,7 +4134,7 @@ class MozarieTests(unittest.TestCase):
             state.images = {record.image_id: record}
             state.order = [record.image_id]
 
-            def detect_image(*_args):
+            def detect_image(*_args, **_kwargs):
                 self.assertFalse(state.inference_lock.locked())
                 return []
 
@@ -5719,7 +5719,7 @@ class MozarieTests(unittest.TestCase):
             stale = Candidate("stale", "penis", 0.9, state.cache_dir / image_id / "stale.png")
             stale.mask_path.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(self._mask(16, 16)).save(stale.mask_path)
-            def stale_detection(*_args):
+            def stale_detection(*_args, **_kwargs):
                 state.catalog_generation += 1
                 return [stale]
             with patch.object(state, "_ensure_models", return_value=[]), patch.object(state, "_detect_image", side_effect=stale_detection):
