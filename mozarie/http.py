@@ -95,6 +95,7 @@ _POST_OPERATION_LABELS = {
     "/api/save/render": "ブラウザー保存レンダー",
     "/api/save/commit": "ブラウザー保存確定",
     "/api/save/status": "ブラウザー保存状態確認",
+    "/api/save/ack": "ブラウザー保存確定受領",
     "/api/save/cancel": "ブラウザー保存取消",
     "/api/apply": "ファイル保存",
     "/api/job/pause": "バックグラウンド処理一時停止",
@@ -604,6 +605,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                             "size_bytes": size_bytes,
                         }
                         _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
+                        STATE.cleanup_browser_save_files()
                     finally:
                         staged_path.unlink(missing_ok=True)
                     response = {"imported": imported, "catalogId": STATE.catalog_id,
@@ -868,6 +870,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     output_format=str(payload.get("format", "original")),
                     keep_metadata=_read_bool(payload.get("keepMetadata", True), "メタ情報の保持"),
                 ))
+                STATE.cleanup_browser_save_files()
                 if copy_to_default:
                     self._json({
                         "output": str(rendered.output_path),
@@ -905,6 +908,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
                     str(payload.get("saveToken", "")), str(payload.get("sourceAction", "")),
                 )))
+            elif path == "/api/save/ack":
+                self._json(STATE.acknowledge_browser_save(
+                    str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
+                    str(payload.get("saveToken", "")), str(payload.get("sourceAction", "")),
+                ))
             elif path == "/api/save/cancel":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.cancel_browser_save(
                     str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),

@@ -1422,6 +1422,7 @@ async function initialise() {
     if (data.images.length) {
       setStatusKey("status.imagesLoaded", { count: state.images.length });
     }
+    if (typeof flushPendingBrowserSaveAcks === "function") void flushPendingBrowserSaveAcks();
   } catch (error) { showUserError(error); }
   void api("/api/projects?sort=updated_desc")
     .then((data) => retryProjectSourceCleanup(new Set((data.projects || []).map((project) => project.id))))

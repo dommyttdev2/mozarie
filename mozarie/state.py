@@ -104,6 +104,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.active_import_count = 0
         self._import_sessions: dict[str, dict[str, Any]] = {}
         self._manual_uploads: dict[str, dict[str, Any]] = {}
+        self._pending_manual_upload_cleanup: list[Path] = []
         self._cache_lock_handle: Any | None = None
         self._owns_process_cache = cache_dir is None
         if cache_dir is None:
@@ -435,6 +436,24 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self._manual_uploads.pop(session_id, None)
         LOGGER.info("手描きマスク転送を放棄: %s", reason)
 
+    def cleanup_manual_upload_files(self) -> None:
+        """Retry staging cleanup after a completed transaction without changing its result."""
+        with self.lock:
+            directories = self._pending_manual_upload_cleanup
+            self._pending_manual_upload_cleanup = []
+        retry: list[Path] = []
+        for directory in directories:
+            try:
+                shutil.rmtree(directory)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                LOGGER.warning("手描きマスク転送の確定済み一時データ削除を保留: %s", exc)
+                retry.append(directory)
+        if retry:
+            with self.lock:
+                self._pending_manual_upload_cleanup.extend(retry)
+
     @staticmethod
     def _release_manual_writer(session: dict[str, Any]) -> None:
         writer = session.get("writer")
@@ -479,6 +498,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 "writer": threading.Lock(), "abandon_reason": None,
             }
         LOGGER.info("手描きマスク転送を開始: レイヤー=%d件", len(requested))
+        self.cleanup_manual_upload_files()
         return {"sessionId": session_id}
 
     def manual_upload_layer_path(self, image_id: str, session_id: str, layer: str) -> Path:
@@ -550,20 +570,27 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 session["writing"] = None
                 self._release_manual_writer(session)
                 raise
+        save_succeeded = False
         try:
             self.save_manual_workspace(image_id, committed)
+            save_succeeded = True
         finally:
             with self.lock:
                 current = self._manual_uploads.get(session_id)
                 if current is session:
                     session["writing"] = None
                     try:
-                        reason = str(session["abandon_reason"]) if session["abandon_reason"] is not None else "確定"
-                        self._discard_manual_upload_unchecked(session_id, session, reason)
+                        if save_succeeded:
+                            self._manual_uploads.pop(session_id, None)
+                            self._pending_manual_upload_cleanup.append(directory)
+                        else:
+                            reason = str(session["abandon_reason"]) if session["abandon_reason"] is not None else "確定失敗"
+                            self._discard_manual_upload_unchecked(session_id, session, reason)
                     finally:
                         self._release_manual_writer(session)
                 else:
                     self._release_manual_writer(session)
+        self.cleanup_manual_upload_files()
         LOGGER.info("手描きマスク転送を完了: レイヤー=%d件 所要=%.2f秒", len(session["layers"]), time.monotonic() - session["started_at"])
 
     def cancel_manual_upload(self, image_id: str, session_id: str) -> None:

@@ -674,7 +674,8 @@ class CatalogMixin:
                 self.catalog_generation += 1
                 self._clear_browser_save_tokens_unchecked()
                 self._cancel_manual_uploads_unchecked("プロジェクトを保存しました")
-                return project
+            self.cleanup_browser_save_files()
+            return project
 
     def name_current_project(self, name: str, project_id: str = "", *, expected_project_id: str | None = None,
                              expected_catalog_generation: int | None = None) -> dict[str, Any]:
@@ -771,6 +772,7 @@ class CatalogMixin:
                 self.catalog_generation += 1
                 self._clear_browser_save_tokens_unchecked()
                 self._cancel_manual_uploads_unchecked("プロジェクトを再開しました")
+        self.cleanup_browser_save_files()
         return project
 
     def open_project(self, catalog_id: str, *, expected_project_id: str | None = None,
@@ -1688,17 +1690,25 @@ class CatalogMixin:
             self.browser_save_claims.discard(token)
 
     @staticmethod
-    def _unlink_browser_save_cleanup(paths: list[tuple[Path, tuple[int, int] | None]]) -> None:
+    def _unlink_browser_save_cleanup(paths: list[tuple[Path, tuple[int, int] | None]]) -> list[tuple[Path, tuple[int, int] | None]]:
         """Remove detached token files without touching a replacement at its path."""
+        retry: list[tuple[Path, tuple[int, int] | None]] = []
         for path, fingerprint in paths:
             if fingerprint is not None:
                 try:
                     stat = path.stat()
+                except FileNotFoundError:
+                    continue
                 except OSError:
+                    retry.append((path, fingerprint))
                     continue
                 if (stat.st_mtime_ns, stat.st_size) != fingerprint:
                     continue
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                retry.append((path, fingerprint))
+        return retry
 
     def _take_browser_save_cleanup_unchecked(self) -> list[tuple[Path, tuple[int, int] | None]]:
         paths = self._pending_browser_save_cleanup
@@ -1710,7 +1720,6 @@ class CatalogMixin:
             self._discard_browser_save_token_unchecked(token)
         self.browser_save_claims.clear()
         self.browser_save_receipts.clear()
-        self._unlink_browser_save_cleanup(self._take_browser_save_cleanup_unchecked())
 
     def _discard_browser_save_tokens_for_image_unchecked(self, image_id: str) -> None:
         for token, details in tuple(self.browser_save_tokens.items()):
@@ -1726,7 +1735,6 @@ class CatalogMixin:
         for token in pending:
             self._discard_browser_save_token_unchecked(token)
         LOGGER.info("ブラウザー保存を置換: 未確定=%d件", len(pending))
-        self._unlink_browser_save_cleanup(self._take_browser_save_cleanup_unchecked())
 
     def _prune_browser_save_receipts_for_image_unchecked(self, image_id: str) -> None:
         """Keep the latest committed retry receipt until this image is saved again."""
@@ -1741,7 +1749,11 @@ class CatalogMixin:
         """Remove files detached by an explicit cancel, commit, or catalogue change."""
         with self.lock:
             cleanup_paths = self._take_browser_save_cleanup_unchecked()
-        self._unlink_browser_save_cleanup(cleanup_paths)
+        retry = self._unlink_browser_save_cleanup(cleanup_paths)
+        if retry:
+            LOGGER.warning("ブラウザー保存の一時ファイル削除を保留: %d件", len(retry))
+            with self.lock:
+                self._pending_browser_save_cleanup.extend(retry)
 
     def _issue_browser_save_token_unchecked(
         self,

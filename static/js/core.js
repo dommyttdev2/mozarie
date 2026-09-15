@@ -462,6 +462,7 @@ async function resyncCatalog(epoch = state.catalogEpoch, signal = undefined) {
   const snapshot = await api("/api/images", { signal, resyncOnStale: false });
   if (!isCurrentCatalogEpoch(epoch)) return null;
   catalogResponse(snapshot);
+  if (typeof flushPendingBrowserSaveAcks === "function") void flushPendingBrowserSaveAcks();
   resetCatalog(snapshot.images || [], snapshot.root || "");
   applyProjectSnapshot(snapshot);
   state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(snapshot.sources) : [];
@@ -482,6 +483,7 @@ async function syncCatalogOnReturn() {
     const changed = (Number.isSafeInteger(snapshot.catalogGeneration) && snapshot.catalogGeneration !== knownGeneration)
       || (snapshot?.project?.id || null) !== knownProjectId;
     catalogResponse(snapshot);
+    if (typeof flushPendingBrowserSaveAcks === "function") void flushPendingBrowserSaveAcks();
     if (changed) {
       resetCatalog(snapshot.images || [], snapshot.root || "");
       state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(snapshot.sources) : [];

@@ -13,7 +13,7 @@ from PIL import Image
 from .core import (
     IO_CHUNK_BYTES, BrowserSaveReceipt,
     BrowserSaveRender, CandidateRole, ClientError,
-    ImageRecord, JobControl, safe_import_relative_path, _read_mosaic_divisor,
+    ImageRecord, JobControl, LOGGER, safe_import_relative_path, _read_mosaic_divisor,
     _read_save_suffix,
 )
 from .config import SettingsError, validate_output_directory_ready
@@ -380,7 +380,6 @@ class SavingMixin:
         if (source_mtime_ns is None) != (source_size_bytes is None) or (source_mtime_ns is not None and (source_mtime_ns < 0 or source_size_bytes < 0)):
             raise ClientError("保存後の元画像情報が正しくありません。", "input_invalid")
         rendered_path: Path | None = None
-        cleanup_paths: list[tuple[Path, tuple[int, int] | None]] = []
         mask_paths: list[Path] = []
         candidate_dirs: list[Path] = []
         thumbnail_paths: list[Path] = []
@@ -440,7 +439,6 @@ class SavingMixin:
                     catalog_invalid = token_details.catalog_generation != self.catalog_generation or record is None
                     if catalog_invalid:
                         self._discard_browser_save_token_unchecked(save_token)
-                        cleanup_paths = self._take_browser_save_cleanup_unchecked()
                     elif self._has_active_worker():
                         raise ClientError("バックグラウンド処理中は保存を完了できません。完了後にもう一度実行してください。", "operation_in_progress")
                     else:
@@ -455,7 +453,7 @@ class SavingMixin:
                         # failed commit can be retried safely.
 
                 if catalog_invalid:
-                    self._unlink_browser_save_cleanup(cleanup_paths)
+                    self.cleanup_browser_save_files()
                     raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
 
                 try:
@@ -474,8 +472,7 @@ class SavingMixin:
                 except ClientError:
                     with self.lock:
                         self._discard_browser_save_token_unchecked(save_token)
-                        cleanup_paths = self._take_browser_save_cleanup_unchecked()
-                    self._unlink_browser_save_cleanup(cleanup_paths)
+                    self.cleanup_browser_save_files()
                     raise
                 except OSError as exc:
                     raise ClientError("元画像を変更できませんでした。候補は保持しています。", "save_write_failed") from exc
@@ -574,6 +571,18 @@ class SavingMixin:
                 return {"state": "pending"}
         return {"state": "unknown"}
 
+    def acknowledge_browser_save(self, image_id: str, revision: int, save_token: str, source_action: str) -> dict[str, str]:
+        """Release a committed retry receipt after the browser received its result."""
+        with self.lock:
+            receipt = self.browser_save_receipts.get(save_token)
+            if receipt is None:
+                return {"state": "unknown"}
+            if receipt.image_id != image_id or receipt.candidate_revision != revision or receipt.source_action != source_action:
+                return {"state": "unknown"}
+            self.browser_save_receipts.pop(save_token, None)
+        LOGGER.info("ブラウザー保存の確定受領を確認")
+        return {"state": "acknowledged"}
+
     def cancel_browser_save(self, image_id: str, revision: int, save_token: str) -> dict[str, Any]:
         """Cancel a still-pending token and remove only its own new copy."""
         # Serialise claiming and cancellation with commit; once commit has
@@ -585,8 +594,7 @@ class SavingMixin:
                 if details is None or details.image_id != image_id or details.candidate_revision != revision:
                     return {"state": "unknown"}
                 self._discard_browser_save_token_unchecked(save_token)
-                cleanup_paths = self._take_browser_save_cleanup_unchecked()
-        self._unlink_browser_save_cleanup(cleanup_paths)
+        self.cleanup_browser_save_files()
         return {"state": "pending"}
 
 

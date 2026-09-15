@@ -846,11 +846,56 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
   }
 }
 
+const BROWSER_SAVE_ACK_STORAGE = "mozarie.browser-save-acks";
+let browserSaveAckFlush = Promise.resolve();
+
+function pendingBrowserSaveAcks() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(BROWSER_SAVE_ACK_STORAGE) || "[]");
+    return Array.isArray(saved) ? saved.filter((item) => item && typeof item.imageId === "string" && Number.isSafeInteger(item.candidateRevision)
+      && typeof item.saveToken === "string" && typeof item.sourceAction === "string") : [];
+  } catch { return []; }
+}
+
+function storePendingBrowserSaveAcks(entries) {
+  try { sessionStorage.setItem(BROWSER_SAVE_ACK_STORAGE, JSON.stringify(entries)); } catch {}
+}
+
+function queueBrowserSaveAck(payload) {
+  const pending = pendingBrowserSaveAcks().filter((item) => item.saveToken !== payload.saveToken);
+  pending.push({ imageId: payload.imageId, candidateRevision: payload.candidateRevision, saveToken: payload.saveToken, sourceAction: payload.sourceAction });
+  storePendingBrowserSaveAcks(pending);
+}
+
+async function flushPendingBrowserSaveAcks() {
+  const flush = async () => {
+    const pending = pendingBrowserSaveAcks();
+    const retry = [];
+    for (const payload of pending) {
+      try {
+        const result = await api("/api/save/ack", { method: "POST", body: JSON.stringify(payload), resyncOnStale: false });
+        if (result.state !== "acknowledged" && result.state !== "unknown") retry.push(payload);
+      } catch { retry.push(payload); }
+    }
+    const handled = new Set(pending.map((item) => item.saveToken));
+    storePendingBrowserSaveAcks([...retry, ...pendingBrowserSaveAcks().filter((item) => !handled.has(item.saveToken))]);
+  };
+  browserSaveAckFlush = browserSaveAckFlush.catch(() => {}).then(flush);
+  return browserSaveAckFlush;
+}
+
+async function acknowledgeBrowserSave(payload) {
+  queueBrowserSaveAck(payload);
+  await flushPendingBrowserSaveAcks();
+}
+
 async function commitBrowserSaveWithRetry(payload) {
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (attempt) await new Promise((resolve) => setTimeout(resolve, 150));
     try {
-      return await api("/api/save/commit", { method: "POST", body: JSON.stringify(payload) });
+      const committed = await api("/api/save/commit", { method: "POST", body: JSON.stringify(payload) });
+      await acknowledgeBrowserSave(payload);
+      return committed;
     } catch (error) {
       // A database write may have completed after the server started returning
       // an error. Retry the identical token once, then ask the server which
@@ -859,7 +904,10 @@ async function commitBrowserSaveWithRetry(payload) {
       if (!retryable || attempt) {
         if (!retryable) throw error;
         const status = await api("/api/save/status", { method: "POST", body: JSON.stringify(payload) }).catch(() => ({ state: "unknown" }));
-        if (status.state === "committed") return status;
+        if (status.state === "committed") {
+          await acknowledgeBrowserSave(payload);
+          return status;
+        }
         error.saveState = status.state || "unknown";
         throw error;
       }
