@@ -43,3 +43,4 @@
 9. [確認済みにして次への左一覧フィルター別遷移（WS-033）](manual-verification/workspace.md)：確認操作は次の一致画像だけへ進み、末尾・1件では現在画像とキャンバスを保持する。
 10. [確認済みにして次への整合性・異常時遷移（DI-161・181）](manual-verification/data-integrity.md)：削除だけは末尾で直前へ移り、非表示と確認操作は戻らないこと、409・通信断・遅延・Undo/Redoを確認する。
 11. [固定上限を使わない処理・保存・ブラウザー読込（DI-212〜214、WS-135〜137、SV-070〜075）](manual-verification/data-integrity.md)：SQLite・終了待機・入力ID、画像追加、保存、サムネイルと先読みの上限・解放を確認する。
+12. [ジョブ進捗とPJ切替の公開境界（DI-215〜216）](manual-verification/data-integrity.md)：進捗取得の待機と、PJ再開・元画像照合後の公開失敗を確認する。

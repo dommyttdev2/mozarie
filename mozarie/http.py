@@ -433,9 +433,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/project/history/"):
                 self._json(STATE.project_history_status(path.removeprefix("/api/project/history/")))
             elif path == "/api/job":
-                STATE.cleanup_expired_browser_save_tokens()
-                with STATE.lock:
-                    self._json(STATE.job.as_dict())
+                self._json(STATE.job_snapshot())
             elif path.startswith("/api/image/"):
                 self._send_image(path.removeprefix("/api/image/"), thumbnail=False, version=_request_version(parsed.query))
             elif path.startswith("/api/thumbnail/"):
@@ -847,13 +845,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"ok": started, "cancelled": not started})
             elif path == "/api/job/pause":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
-                                                   lambda: STATE.request_pause().as_dict()))
+                                                   STATE.request_pause))
             elif path == "/api/job/resume":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
-                                                   lambda: STATE.resume_job().as_dict()))
+                                                   STATE.resume_job))
             elif path == "/api/job/cancel":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
-                                                   lambda: STATE.request_cancel().as_dict()))
+                                                   STATE.request_cancel))
             elif path.startswith("/api/candidate/"):
                 image_id, candidate_id = _route_ids(path, "/api/candidate/")
                 revision = self._catalog_mutation(expected_project_id, expected_catalog_generation,

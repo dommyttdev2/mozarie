@@ -160,6 +160,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.reserved_output_paths: set[Path] = set()
         self.session_token = secrets.token_urlsafe(32)
         self.job = Job()
+        self._job_snapshot = self._copy_job_snapshot(self.job.as_dict())
         self.catalog_generation = 0
         self.job_generation = 0
         self.worker_thread: threading.Thread | None = None
@@ -215,15 +216,32 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         finally:
             self._request_catalog_expectation.value = previous
 
-    @contextmanager
-    def catalog_request(self, expected_project_id: str | None, expected_catalog_generation: int):
-        """Make one HTTP mutation verify its captured catalogue at commit points."""
-        previous = getattr(self._request_catalog_expectation, "value", None)
-        self._request_catalog_expectation.value = (expected_project_id, expected_catalog_generation)
-        try:
-            yield
-        finally:
-            self._request_catalog_expectation.value = previous
+    @staticmethod
+    def _copy_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+        """Return a response-owned copy with no mutable Job members."""
+        return {
+            **snapshot,
+            "params": dict(snapshot.get("params", {})),
+            "outputs": list(snapshot.get("outputs", [])),
+            "imageIds": list(snapshot.get("imageIds", [])),
+            "completedImageIds": list(snapshot.get("completedImageIds", [])),
+        }
+
+    def _publish_job_snapshot_unchecked(self) -> dict[str, Any]:
+        """Publish while ``lock`` protects the live Job object."""
+        self._job_snapshot = self._copy_job_snapshot(self.job.as_dict())
+        return self._job_snapshot
+
+    def job_snapshot(self) -> dict[str, Any]:
+        """Return progress promptly even while a worker owns the state lock."""
+        if self.lock.acquire(blocking=False):
+            try:
+                snapshot = self._publish_job_snapshot_unchecked()
+            finally:
+                self.lock.release()
+        else:
+            snapshot = self._job_snapshot
+        return self._copy_job_snapshot(snapshot)
 
     def update_settings(self, update: dict[str, Any]) -> dict[str, Any]:
         """Persist user-selected options and release only model objects that changed."""

@@ -218,9 +218,17 @@ class CatalogMixin:
                          publish_read_only: bool = False,
                          publish_source_mismatches: dict[str, bool] | None = None,
                          publish_sources: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+        new_ids = {record.image_id for record in records}
         with self.lock:
             previous_ids = tuple(self.images)
-        locks = [(image_id, self.image_io_lock(image_id)) for image_id in previous_ids]
+            lock_ids = set(previous_ids) | new_ids
+            locks = []
+            for image_id in sorted(lock_ids):
+                image_lock = self._image_io_locks.get(image_id)
+                if image_lock is None:
+                    image_lock = threading.RLock()
+                    self._image_io_locks[image_id] = image_lock
+                locks.append((image_id, image_lock))
         with ExitStack() as stack:
             for _image_id, image_lock in sorted(locks):
                 stack.enter_context(image_lock)
@@ -292,14 +300,18 @@ class CatalogMixin:
                     raise
                 self._clear_browser_save_tokens_unchecked()
                 self.job = Job()
+                self._publish_job_snapshot_unchecked()
                 self.catalog_generation += 1
                 session = self._detach_session_unchecked()
-                self._image_io_locks.clear()
             self._clear_cache()
             if prehydrated is None:
                 # Cache cleanup intentionally happens before masks are materialised.
                 self._restore_workspace_candidates(records)
             self._release_detached_session(session)
+            with self.lock:
+                for image_id, image_lock in locks:
+                    if image_id not in new_ids and self._image_io_locks.get(image_id) is image_lock:
+                        self._image_io_locks.pop(image_id, None)
         self.cleanup_expired_browser_save_tokens()
         return self.list_images()
 
@@ -795,20 +807,24 @@ class CatalogMixin:
                 records.extend(source_records)
             records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path, record.image_id))
             prehydrated = self._stage_workspace_candidates(records)
-            reconciled_sources, project = self.workspace_store.reconcile_project_open(catalog_id, staged_sources, resume=resume)
-            records = []
-            staged_source_mismatches = {}
-            for source_id, root, source_records in staged_sources:
-                accepted, mismatches = self._apply_source_state(source_records, reconciled_sources[source_id], source_id, root)
-                records.extend(accepted)
-                staged_source_mismatches.update(mismatches)
-            records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path, record.image_id))
-            images = self._replace_catalog(
-                native_roots[0], records, prehydrated=prehydrated,
-                publish_catalog_id=catalog_id, publish_read_only=project["status"] == "completed",
-                publish_source_mismatches=staged_source_mismatches,
-                publish_sources=sources,
-            )
+            reconciled_sources, project, rollback = self.workspace_store.reconcile_project_open(catalog_id, staged_sources, resume=resume)
+            try:
+                records = []
+                staged_source_mismatches = {}
+                for source_id, root, source_records in staged_sources:
+                    accepted, mismatches = self._apply_source_state(source_records, reconciled_sources[source_id], source_id, root)
+                    records.extend(accepted)
+                    staged_source_mismatches.update(mismatches)
+                records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path, record.image_id))
+                images = self._replace_catalog(
+                    native_roots[0], records, prehydrated=prehydrated,
+                    publish_catalog_id=catalog_id, publish_read_only=project["status"] == "completed",
+                    publish_source_mismatches=staged_source_mismatches,
+                    publish_sources=sources,
+                )
+            except Exception:
+                self.workspace_store.rollback_project_open(catalog_id, rollback)
+                raise
             # Browser sources may still need a user-granted handle.  Native
             # images are shown immediately and the UI can add the rest.
             needs_source = any(

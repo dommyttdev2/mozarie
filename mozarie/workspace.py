@@ -1000,13 +1000,20 @@ class WorkspaceStore:
             if (row := existing.get(str(record.relative_path))) is not None
         }
 
-    def reconcile_project_open(self, catalog_id: str, sources: list[tuple[str, Path, list[Any]]], *, resume: bool) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, Any]]:
-        """Commit every staged native source and an optional resume as one transaction."""
+    def reconcile_project_open(self, catalog_id: str, sources: list[tuple[str, Path, list[Any]]], *, resume: bool) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, Any], dict[str, Any]]:
+        """Commit every staged native source and retain a guarded rollback state."""
         results: dict[str, dict[str, dict[str, Any]]] = {}
         now = time.time_ns()
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                catalog = db.execute("SELECT source_root,status,updated_at FROM catalogs WHERE catalog_id=?", (catalog_id,)).fetchone()
+                if catalog is None:
+                    raise ValueError("project is missing")
+                rollback = {
+                    "source_root": catalog["source_root"], "status": str(catalog["status"]),
+                    "updated_at": int(catalog["updated_at"]), "applied_at": now, "transforms": [],
+                }
                 for source_id, root, records in sources:
                     db.execute("UPDATE catalogs SET source_root=?,updated_at=? WHERE catalog_id=?", (str(root.resolve()), now, catalog_id))
                     existing = self._source_rows(db, catalog_id, source_id)
@@ -1019,6 +1026,11 @@ class WorkspaceStore:
                         changed = (int(row["size_bytes"]) != record.size_bytes or int(row["mtime_ns"]) != record.mtime_ns
                                    or int(row["width"]) != width or int(row["height"]) != height)
                         if changed:
+                            if row["transform_revision"] is not None:
+                                rollback["transforms"].append((
+                                    str(row["image_id"]), int(row["transform_source_flip_horizontal"]),
+                                    int(row["transform_source_flip_vertical"]), int(row["transform_revision"]),
+                                ))
                             db.execute("UPDATE image_transforms SET source_flip_horizontal=0,source_flip_vertical=0,revision=revision+1 WHERE image_id=?", (row["image_id"],))
                             row = db.execute("""SELECT images.*,transform.flip_horizontal AS transform_flip_horizontal,
                                 transform.flip_vertical AS transform_flip_vertical,transform.source_flip_horizontal AS transform_source_flip_horizontal,
@@ -1041,7 +1053,31 @@ class WorkspaceStore:
             except Exception:
                 db.execute("ROLLBACK")
                 raise
-        return results, project
+        return results, project, rollback
+
+    def rollback_project_open(self, catalog_id: str, rollback: dict[str, Any]) -> None:
+        """Undo a just-published open only while no later durable write intervened."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = db.execute(
+                    "UPDATE catalogs SET source_root=?,status=?,updated_at=? WHERE catalog_id=? AND updated_at=?",
+                    (rollback["source_root"], rollback["status"], rollback["updated_at"], catalog_id, rollback["applied_at"]),
+                )
+                if not cursor.rowcount:
+                    raise RuntimeError("project open rollback was superseded")
+                for image_id, source_horizontal, source_vertical, revision in rollback["transforms"]:
+                    cursor = db.execute(
+                        """UPDATE image_transforms SET source_flip_horizontal=?,source_flip_vertical=?,revision=?
+                           WHERE image_id=? AND revision=?""",
+                        (source_horizontal, source_vertical, revision, image_id, revision + 1),
+                    )
+                    if not cursor.rowcount:
+                        raise RuntimeError("project transform rollback was superseded")
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
 
     def source_image_metadata(self, source_id: str) -> dict[str, tuple[int, int, int, int]]:
         """Return the fingerprint needed to skip image decoding during a reopen."""

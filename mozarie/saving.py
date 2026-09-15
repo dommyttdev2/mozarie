@@ -551,9 +551,6 @@ class SavingMixin:
                     response_generation = self.catalog_generation
                     self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, response_generation, time.monotonic())
                     rendered_path = token_details.rendered_path
-                    response_generation = self.catalog_generation
-                    self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, response_generation, time.monotonic())
-                    rendered_path = token_details.rendered_path
                     if deleted:
                         self._discard_browser_save_tokens_for_image_unchecked(image_id)
                 if source_action == "overwrite" or deleted:
