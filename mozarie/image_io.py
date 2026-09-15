@@ -595,6 +595,13 @@ def output_format_matches_source(record: ImageRecord, output_format: str) -> boo
 
 def render_output(record: ImageRecord, mask: np.ndarray | None, block_size: int, output_format: str, keep_metadata: bool) -> tuple[bytes, str, str]:
     """Render canonical mosaic plus desired flip to the explicit output format."""
+    try:
+        return _render_output(record, mask, block_size, output_format, keep_metadata)
+    except (MemoryError, OSError) as exc:
+        raise ClientError("画像を保存用に変換できません。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
+
+
+def _render_output(record: ImageRecord, mask: np.ndarray | None, block_size: int, output_format: str, keep_metadata: bool) -> tuple[bytes, str, str]:
     suffix, image_format, mime = _output_spec(record, output_format)
     if output_format == "jpg" and keep_metadata:
         raise ClientError("JPG形式ではメタ情報を保持できません。", "input_invalid")
