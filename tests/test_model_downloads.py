@@ -77,11 +77,12 @@ class ModelDownloadTests(unittest.TestCase):
         self.assertFalse(entry.destination(root).exists())
 
     def test_partial_hash_check_reports_checking_and_verifying_progress(self) -> None:
-        payload = b"a" * (2 * 1024 * 1024 + 3)
+        payload = b"a" * (128 * 1024 + 3)
         entry = self.entry(payload)
         root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
         temporary = entry.destination(root).with_name(".file.onnx.part")
-        temporary.parent.mkdir(parents=True); temporary.write_bytes(payload[:1024 * 1024])
+        partial_size = 64 * 1024
+        temporary.parent.mkdir(parents=True); temporary.write_bytes(payload[:partial_size])
         updates: list[dict] = []
         original_set = manager._set
 
@@ -89,22 +90,22 @@ class ModelDownloadTests(unittest.TestCase):
             updates.append(changes); original_set(**changes)
 
         with patch.object(manager, "_set", side_effect=observe), \
-                patch("mozarie.model_downloads.build_opener", return_value=_Opener(_Response(payload[1024 * 1024:], content_length=str(len(payload) - 1024 * 1024), status=206, content_range=f"bytes {1024 * 1024}-{len(payload) - 1}/{len(payload)}"))):
+                patch("mozarie.model_downloads.build_opener", return_value=_Opener(_Response(payload[partial_size:], content_length=str(len(payload) - partial_size), status=206, content_range=f"bytes {partial_size}-{len(payload) - 1}/{len(payload)}"))):
             manager._download(entry)
-        self.assertTrue(any(update.get("phase") == "checking" and update.get("received") == 1024 * 1024 for update in updates))
+        self.assertTrue(any(update.get("phase") == "checking" and update.get("received") == partial_size for update in updates))
         self.assertTrue(any(update.get("phase") == "verifying" and update.get("received") == len(payload) for update in updates))
 
     def test_cancelling_during_partial_hash_check_keeps_the_resume_file(self) -> None:
-        payload = b"a" * (2 * 1024 * 1024 + 3)
+        payload = b"a" * (128 * 1024 + 3)
         entry = self.entry(payload)
         root = Path(tempfile.mkdtemp()); manager = ModelDownloadManager(root)
         temporary = entry.destination(root).with_name(".file.onnx.part")
-        temporary.parent.mkdir(parents=True); temporary.write_bytes(payload[:2 * 1024 * 1024])
+        temporary.parent.mkdir(parents=True); temporary.write_bytes(payload[:128 * 1024])
         original_set = manager._set
 
         def cancel_after_first_hash_chunk(**changes):
             original_set(**changes)
-            if changes.get("phase") == "checking" and changes.get("received") == 1024 * 1024:
+            if changes.get("phase") == "checking" and changes.get("received") == 128 * 1024:
                 manager._cancel.set()
 
         with patch.object(manager, "_set", side_effect=cancel_after_first_hash_chunk):
