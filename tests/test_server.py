@@ -2268,7 +2268,7 @@ class MozarieTests(unittest.TestCase):
         state.request_cancel()
         self.assertTrue(state.job_control.cancel_requested.is_set())
 
-    def test_detection_parallelism_is_limited_to_one_through_four(self):
+    def test_detection_parallelism_accepts_one_or_more_workers(self):
         self.assertEqual(core_module._read_detection_parallelism(1), 1)
         self.assertEqual(core_module._read_detection_parallelism(4), 4)
         self.assertEqual(core_module._read_detection_parallelism(5), 5)

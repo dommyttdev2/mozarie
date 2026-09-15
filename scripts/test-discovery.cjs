@@ -13,11 +13,19 @@ function frontendTestFiles(directory = testDirectory, prefix = "tests") {
     if (entry.isDirectory()) files.push(...frontendTestFiles(path.join(directory, entry.name), relativePath));
     else if (entry.isFile() && /^test_.*\.cjs$/.test(entry.name)) files.push(relativePath);
   }
-  return files.sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+  return files
+    .filter((file) => file !== "tests/test_gallery_performance_e2e.cjs")
+    .sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
+}
+
+function frontendPerformanceTestFiles() {
+  const file = "tests/test_gallery_performance_e2e.cjs";
+  if (!fs.existsSync(path.join(root, file))) throw new Error(`missing frontend performance test: ${file}`);
+  return [file];
 }
 
 function frontendTestArguments(files = frontendTestFiles()) {
   return ["--test", "--test-reporter=./scripts/strict-tap-reporter.cjs", "--test-concurrency=4", ...files];
 }
 
-module.exports = { frontendTestArguments, frontendTestFiles };
+module.exports = { frontendPerformanceTestFiles, frontendTestArguments, frontendTestFiles };

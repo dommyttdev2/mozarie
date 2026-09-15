@@ -100,7 +100,7 @@ Review each model's source terms and licenses and the [third-party notices and m
 
 ## Use
 
-Set one to four workers for automatic detection on GPU or CPU. A single-image job uses one worker.
+Set one or more workers for automatic detection on GPU or CPU. The number of selected images is the effective upper limit. DirectML uses one effective worker.
 
 1. Load images or a folder.
 2. Run automatic detection for the current image or all images.

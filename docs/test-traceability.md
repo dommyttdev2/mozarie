@@ -17,7 +17,7 @@
 | SV-073 | 保存応答が一つの版とtokenを返す | `tests.test_http_live_endpoints.LiveHttpEndpointTests.test_live_browser_save_render_streams_a_stable_image_response` | 遅延応答中の別タブ更新・削除、実ブラウザーのダウンロードと一時ファイル解放 |
 | SV-076 | 未作成の展開先で更新ZIPを展開できる | `tests.test_updater_extract_regression.UpdaterExtractRegressionTests.test_extract_archive_allows_a_missing_destination_directory` | 実リリースZIP、実ドライブの空き容量不足と更新前バックアップ |
 | SV-077 | source snapshot失敗時にコピーを残し削除・確定を開始しない | `tests/test_save_source_snapshot_contract.cjs` | File System Access APIでの実ファイル、画面の`source_restore_failed`案内 |
-| ED-128 | 候補編集操作が候補ビューのロック中に無効になる | `tests/test_candidate_mutation_lock_contract.cjs` | 読み込み中・保存中・処理中の実画面表示と、完了後の操作再開 |
+| ED-128 | 候補編集操作が候補ビューのロック中に無効になる | `tests/test_import_picker_e2e.cjs` | 読み込み中・保存中・処理中の実画面表示と、完了後の操作再開 |
 | DI-237 | receiptとcleanup状態を永続化し、再試行で回収する | `tests.test_save_recovery.SaveRecoveryTests.test_workspace_receipt_is_durable`、`tests.test_save_recovery.SaveRecoveryTests.test_startup_compacts_only_cancelled_rows` | 応答喪失、タブ終了、再起動後の画面復帰とCMD記録 |
 | DI-239 | ack失敗時もreceiptを保持し、再ackで回収する | `tests.test_save_recovery.SaveRecoveryTests.test_receipt_ack_retries_after_workspace_delete_failure`、`tests.test_save_recovery.SaveRecoveryTests.test_ack_keeps_receipt_when_commit_cleanup_is_pending` | 複数タブ、commit/ack応答喪失、再起動後のstatusと画面の再送 |
 | DI-253 | browser・背景overwriteのbackupをreceipt境界で安全に復旧する | `tests.test_save_recovery.SaveRecoveryTests.test_replacement_backup_restores_an_owned_overwrite_without_receipt`、`tests.test_save_recovery.SaveRecoveryTests.test_replacement_backup_discards_an_owned_backup_after_receipt`、`tests.test_save_recovery.SaveRecoveryTests.test_replacement_backup_preserves_an_externally_replaced_source`、`tests.test_server.MozarieTests.test_background_overwrite_database_failure_restores_the_journaled_source`、`tests.test_server.MozarieTests.test_background_overwrite_receipt_recovers_its_journaled_backup_at_startup`、`tests.test_server.MozarieTests.test_background_overwrite_reports_a_pending_journal_restore`、`tests.test_server.MozarieTests.test_background_overwrite_commit_decision_failure_keeps_the_live_record_current` | 実ブラウザー・単体・一括保存、強制終了、共有・権限・I/Oエラーと外部衝突の解消 |
@@ -30,6 +30,7 @@
 | WS-116 | 読込・カタログ切替中の新規フォルダー読込を拒否し、先行状態を保持する | `tests.test_server.MozarieTests.test_same_root_reload_rejects_while_import_is_preparing` | 実ブラウザーでの同時操作の案内 |
 | WS-117 | 高位操作は正規化ルート、status/error_code、所要だけを記録し、ID・本文・token・headerを記録しない | `tests.test_http_import_regression.FolderLoadLoggingContractTests.test_handler_logs_normalized_routes_without_request_secrets` | 全高位操作をCMDで実行した際の表示 |
 | WS-118 | pause/resume/cancelを含む処理状態は操作面と対象数を保ち、画像単位の正常処理はINFOへ出さない | `tests/test_import_picker_e2e.cjs`、`tests.test_http_import_regression.FolderLoadLoggingContractTests.test_per_image_success_logs_are_suppressed_but_failures_are_safe_warnings` | 実モデルの開始・停止、CMDの進捗表示 |
+| WS-135 | ブラウザー追加は設定値と対象数だけで実効worker数を決め、全入力を完了する | `tests/test_import_picker_e2e.cjs` | 実ブラウザーのNetwork表示と実ファイルの読込 |
 | ED-129 | 画像外で始めた各編集操作を拒否し、画像内開始後の通常ブラシ移動を端へ丸める | `tests/test_app_core_detection_coverage.cjs` | 実ブラウザーの余白、拡大率、比較表示での全編集操作 |
 | ED-130 | 無名作業の履歴復元を直列に保存し、部分成功を含む失敗後は強制再選択で再同期する | `tests/test_editor_masks_behavior.cjs` | 実ブラウザーと実サーバー通信での表示・再同期順 |
 

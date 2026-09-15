@@ -2,7 +2,7 @@
 
 const childProcess = require("node:child_process");
 const path = require("node:path");
-const { frontendTestArguments, frontendTestFiles } = require("./test-discovery.cjs");
+const { frontendPerformanceTestFiles, frontendTestArguments, frontendTestFiles } = require("./test-discovery.cjs");
 
 const root = path.resolve(__dirname, "..");
 function run(files = frontendTestFiles()) {
@@ -14,6 +14,9 @@ function run(files = frontendTestFiles()) {
   process.exitCode = result.status || 0;
 }
 
-if (require.main === module) run();
+if (require.main === module) {
+  run();
+  if (!process.exitCode) run(frontendPerformanceTestFiles());
+}
 
 module.exports = { frontendTestFiles, run };

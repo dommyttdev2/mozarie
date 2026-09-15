@@ -445,6 +445,12 @@ function startFixtureServer() {
       response.end(JSON.stringify({ catalogId: "fixture-catalog", imageIds: {}, images: [], workspace: true }));
       return;
     }
+    if ((requestPath === "/api/import/start" || requestPath === "/api/import/finish") && request.method === "POST") {
+      for await (const _chunk of request) { /* consume session state */ }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ ok: true }));
+      return;
+    }
     if (requestPath.startsWith("/api/project/history/")) {
       for await (const _chunk of request) { /* consume an optional undo request */ }
       response.writeHead(200, { "Content-Type": "application/json" });
@@ -972,18 +978,37 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     await page.waitForFunction(() => state.candidates.find((item) => item.id === "candidate-blink-apply")?.expandPx === 2);
     assert.equal(scenario.candidateUpdates.length, batchPaddingUpdates + 1, "batch padding makes one API request");
     assert.deepEqual(await page.evaluate(() => state.candidates.map((candidate) => [candidate.id, candidate.expandPx || 0])), [["candidate-blink-apply", 2], ["candidate-blink-exclude", 0]], "batch padding changes only candidates in its selected role");
-    await page.evaluate(() => { state.projectReadOnly = true; renderCandidates(); });
-    assert.equal(await row.locator(".candidate-padding-button").isDisabled(), true, "padding is disabled for a read-only completed project");
-    assert.equal(await excludeRow.locator(".candidate-forced").isDisabled(), true, "the visible automatic exclusion force control is disabled for a read-only completed project");
-    assert.equal(await excludeRow.locator(".candidate-toggle").isDisabled(), true, "automatic exclusion ON/OFF is disabled for a read-only completed project");
-    assert.equal(await excludeRow.locator(".candidate-delete").isDisabled(), true, "automatic exclusion deletion is disabled for a read-only completed project");
-    await page.evaluate(() => { state.projectReadOnly = false; state.candidateBatchPending.add(state.currentId); renderCandidates(); });
-    assert.equal(await row.locator(".candidate-padding-button").isDisabled(), true, "padding is disabled during a candidate batch mutation");
-    await page.evaluate(() => { state.candidateBatchPending.clear(); state.importing = true; renderCandidates(); });
-    assert.equal(await row.locator(".candidate-padding-button").isDisabled(), true, "padding is disabled during import");
-    await page.evaluate(() => { state.importing = false; state.saving = true; renderCandidates(); });
-    assert.equal(await row.locator(".candidate-padding-button").isDisabled(), true, "padding is disabled while the editor is busy");
-    await page.evaluate(() => { state.saving = false; renderCandidates(); });
+    await page.evaluate(() => {
+      state.manualMaskPresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true;
+      state.manualExclusionEraseEnabled = true; state.manualExclusionForced = true;
+      addCtx.fillRect(0, 0, 3, 3); exclusionCtx.fillRect(4, 0, 3, 3); exclusionEraseCtx.fillRect(5, 0, 1, 3);
+      renderCandidates();
+    });
+    const candidateStateBeforeLocks = await page.evaluate(() => state.candidates.map(({ id, enabled, forced, expandPx }) => ({ id, enabled, forced, expandPx })));
+    for (const lock of ["projectReadOnly", "candidateBatch", "importing", "saving", "busyJob", "sourceDimensionsChanged", "pendingImage"]) {
+      const controls = await page.evaluate((lockState) => {
+        state.projectReadOnly = false; state.candidateBatchPending.clear(); state.importing = false; state.saving = false;
+        state.job = { kind: "idle", state: "idle" }; state.pendingImageId = null;
+        currentRecord().sourceDimensionsChanged = false;
+        if (lockState === "projectReadOnly") state.projectReadOnly = true;
+        if (lockState === "candidateBatch") state.candidateBatchPending.add(state.currentId);
+        if (lockState === "importing") state.importing = true;
+        if (lockState === "saving") state.saving = true;
+        if (lockState === "busyJob") state.job = { kind: "detect", state: "running" };
+        if (lockState === "sourceDimensionsChanged") currentRecord().sourceDimensionsChanged = true;
+        if (lockState === "pendingImage") state.pendingImageId = state.currentId;
+        renderCandidates();
+        return [...document.querySelectorAll(".candidate-row .candidate-toggle, .candidate-row .candidate-forced, .candidate-row .candidate-padding-button, .candidate-row .candidate-delete")].map((button) => button.disabled);
+      }, lock);
+      assert.ok(controls.length >= 14 && controls.every(Boolean), `${lock} disables every rendered candidate mutation control`);
+    }
+    await page.evaluate(() => {
+      state.projectReadOnly = false; state.candidateBatchPending.clear(); state.importing = false; state.saving = false;
+      state.job = { kind: "idle", state: "idle" }; state.pendingImageId = null; currentRecord().sourceDimensionsChanged = false;
+      renderCandidates();
+    });
+    assert.equal(await page.locator(".candidate-row .candidate-toggle, .candidate-row .candidate-forced, .candidate-row .candidate-padding-button, .candidate-row .candidate-delete").evaluateAll((buttons) => buttons.every((button) => !button.disabled)), true, "candidate mutations become available after every lock clears");
+    assert.deepEqual(await page.evaluate(() => state.candidates.map(({ id, enabled, forced, expandPx }) => ({ id, enabled, forced, expandPx }))), candidateStateBeforeLocks, "candidate lock transitions do not change candidate values");
     await excludeRow.locator(".candidate-display-toggle").click();
     await page.waitForFunction(() => state.blinkModes.get("candidate-blink-exclude") === "normal");
     await excludeRow.locator(".candidate-effective-toggle").click();
@@ -2645,56 +2670,79 @@ async function main() {
     assert.equal(await initialPage.locator("#connectionStatus").isHidden(), true, "clearStatus hides the header notice again");
     await stopCoveredPage(initialPage, true);
 
-    // This is an actual browser catalogue load and control interaction.  It
-    // protects the window renderer from quietly reverting to a full-DOM list.
-    if (!browserCoverage) {
-      setCatalog(Array.from({ length: 20000 }, (_, index) => ({
-        id: `performance-${index}`,
-        relativePath: `set-${String(index % 40).padStart(2, "0")}/image-${String(index).padStart(5, "0")}.png`,
-        sourceKind: "fixture", width: 100, height: 80,
-        candidateCount: 0, enabledCandidateCount: 0, reviewed: index % 2 === 0,
-      })));
-      const performancePage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
-      await performancePage.addInitScript(() => {
-        window.showOpenFilePicker = async () => [];
-        window.showDirectoryPicker = async () => ({ async *values() {} });
+    const parallelismPage = await newCoveredPage(browser);
+    await parallelismPage.addInitScript(() => {
+      window.showOpenFilePicker = async () => [];
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+      const nativeFetch = window.fetch.bind(window);
+      window.__importUploadRegistry = null;
+      window.fetch = (input, init) => {
+        const registry = window.__importUploadRegistry;
+        const url = new URL(typeof input === "string" ? input : input.url, location.href);
+        if (!registry || url.pathname !== "/api/import/file") return nativeFetch(input, init);
+        registry.started += 1;
+        registry.active += 1;
+        registry.peak = Math.max(registry.peak, registry.active);
+        return new Promise((resolve) => registry.pending.push(() => {
+          registry.active -= 1;
+          registry.completed += 1;
+          resolve(new Response(JSON.stringify({ imported: [], catalogId: "fixture-import-catalog", provisional: false }), {
+            headers: { "Content-Type": "application/json" },
+          }));
+        }));
+      };
+    });
+    try {
+      await parallelismPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      await parallelismPage.evaluate(() => {
+        window.__importUploadRegistry = {
+          active: 0, peak: 0, started: 0, completed: 0, pending: [],
+          releaseNext() { this.pending.shift()?.(); },
+          releaseAll() { this.pending.splice(0).forEach((release) => release()); },
+        };
+        state.settings.importing.parallelism = 11;
+        void importFiles(Array.from({ length: 12 }, (_, index) => new File(["fixture"], `parallel-${index}.png`, { type: "image/png" })));
       });
-      try {
-        const loadStart = performance.now();
-        await performancePage.goto(fixtureUrl, { waitUntil: "networkidle" });
-        const loadElapsed = performance.now() - loadStart;
-        const mounted = await performancePage.locator(".gallery-item, .overview-item").count();
-        assert.ok(loadElapsed <= 1500, `20k catalogue becomes interactive within 1.5s (actual ${loadElapsed.toFixed(1)}ms)`);
-        assert.ok(mounted < 2000, `20k catalogue keeps mounted cards below 2000 (actual ${mounted})`);
-        const timings = [];
-        for (let index = 0; index < 10; index += 1) {
-          let started = performance.now();
-          await performancePage.locator("#overviewButton").click();
-          await performancePage.waitForFunction(() => !document.querySelector("#overviewPane").hidden);
-          timings.push(performance.now() - started);
-          started = performance.now();
-          await performancePage.locator("#closeOverviewButton").click();
-          await performancePage.waitForFunction(() => document.querySelector("#overviewPane").hidden);
-          timings.push(performance.now() - started);
-          started = performance.now();
-          const filter = index % 2 ? "reviewed" : "unreviewed";
-          await performancePage.locator("#galleryFilterButton").click();
-          for (const input of await performancePage.locator("[data-gallery-filter]:checked").all()) await input.uncheck();
-          await performancePage.locator(`[data-gallery-filter="${filter}"]`).check();
-          await performancePage.waitForFunction((value) => state.galleryFilter instanceof Set && state.galleryFilter.size === 1 && state.galleryFilter.has(value), filter);
-          await performancePage.locator("#galleryFilterButton").click();
-          timings.push(performance.now() - started);
-        }
-        const p95 = [...timings].sort((left, right) => left - right)[Math.ceil(timings.length * 0.95) - 1];
-        assert.ok(p95 <= 250, `gallery switch and filter p95 is within 250ms (actual ${p95.toFixed(1)}ms)`);
-        console.log(`browser performance: 20k initial=${loadElapsed.toFixed(1)}ms mounted=${mounted} switch-filter-p95=${p95.toFixed(1)}ms`);
-      } finally {
-        await stopCoveredPage(performancePage, true);
-        resetScenario();
-      }
+      await parallelismPage.waitForFunction(() => window.__importUploadRegistry.started === 11 && window.__importUploadRegistry.active === 11);
+      assert.deepEqual(await parallelismPage.evaluate(() => {
+        const { active, peak, started, completed } = window.__importUploadRegistry;
+        return { active, peak, started, completed };
+      }), { active: 11, peak: 11, started: 11, completed: 0 }, "twelve browser inputs dispatch exactly eleven configured uploads before one finishes");
+      assert.equal(await parallelismPage.evaluate(() => state.importSession?.parallelism), 11, "the browser import session reports its eleven-worker effective limit");
+      await parallelismPage.evaluate(() => window.__importUploadRegistry.releaseNext());
+      await parallelismPage.waitForFunction(() => window.__importUploadRegistry.started === 12 && window.__importUploadRegistry.active === 11);
+      assert.deepEqual(await parallelismPage.evaluate(() => {
+        const { active, peak, started, completed } = window.__importUploadRegistry;
+        return { active, peak, started, completed };
+      }), { active: 11, peak: 11, started: 12, completed: 1 }, "releasing one upload dispatches the twelfth input without exceeding eleven workers");
+      await parallelismPage.evaluate(() => window.__importUploadRegistry.releaseAll());
+      await parallelismPage.waitForFunction(() => !state.importing && state.importSession === null);
+      assert.deepEqual(await parallelismPage.evaluate(() => {
+        const { active, peak, started, completed } = window.__importUploadRegistry;
+        return { active, peak, started, completed };
+      }), { active: 0, peak: 11, started: 12, completed: 12 }, "every selected browser input completes after the upload gate releases");
+      await parallelismPage.evaluate(() => { window.__importUploadRegistry = null; });
+    } finally {
+      await parallelismPage.evaluate(() => { window.__importUploadRegistry = null; }).catch(() => {});
+      await stopCoveredPage(parallelismPage, true);
     }
     const page = await newCoveredPage(browser);
     await page.addInitScript(() => {
+      const nativeSetInterval = window.setInterval.bind(window);
+      const nativeClearInterval = window.clearInterval.bind(window);
+      window.__modelPollTimers = null;
+      window.setInterval = (callback, delay, ...args) => {
+        const registry = window.__modelPollTimers;
+        if (!registry) return nativeSetInterval(callback, delay, ...args);
+        const id = ++registry.nextId;
+        registry.pending.set(id, () => callback(...args));
+        return id;
+      };
+      window.clearInterval = (id) => {
+        const registry = window.__modelPollTimers;
+        if (registry?.pending.delete(id)) return;
+        nativeClearInterval(id);
+      };
       window.showOpenFilePicker = async () => { window.__openFilesCalled = true; return []; };
       window.__ledgerPickers = { directory: 0 };
       window.showDirectoryPicker = async () => {
@@ -2727,7 +2775,6 @@ async function main() {
     page.on("console", (message) => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
-
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
     // Keep the manifest presence check on an isolated page.  Do not use
     // HTMLElement.click() or synthetic input/change events here: those do not
@@ -2944,16 +2991,36 @@ async function main() {
     assert.ok(modelDownloadPolls() >= 2, "download progress is polled while a job is active");
     await page.locator("#modelDownloadClose").click();
     failModelDownloadStatus(true);
+    await page.evaluate(() => {
+      window.__modelPollTimers = {
+        nextId: 0,
+        executed: 0,
+        pending: new Map(),
+        runNext() {
+          const next = this.pending.entries().next().value;
+          if (!next) return false;
+          this.executed += 1;
+          next[1]();
+          return true;
+        },
+      };
+    });
     await page.locator('[data-model-download="sam"]').click();
     await page.locator("#modelDownloadStart").click();
+    await page.waitForFunction(() => window.__modelPollTimers.pending.size === 1);
+    const pollsBeforeFailure = modelDownloadPolls();
+    assert.equal(await page.evaluate(() => window.__modelPollTimers.runNext()), true, "the fixture executes the scheduled model-download poll once");
     await page.waitForFunction(() => document.querySelector("#errorDialog").open);
     assert.equal(await page.locator("#modelDownloadCancel").isHidden(), true, "a download status error hides the unavailable cancel action");
     assert.equal(await page.locator("#modelDownloadClose").isDisabled(), false, "a download status error lets the user close the modal");
-    const pollsAfterFailure = modelDownloadPolls();
-    // This deliberately samples one polling interval: only elapsed time can
-    // prove that an already-failed job does not schedule another poll.
-    await page.waitForTimeout(500);
-    assert.equal(modelDownloadPolls(), pollsAfterFailure, "a download status error stops further polling");
+    const stoppedPoll = await page.evaluate(() => ({
+      pending: window.__modelPollTimers.pending.size,
+      executed: window.__modelPollTimers.executed,
+      nextExecuted: window.__modelPollTimers.runNext(),
+    }));
+    assert.deepEqual(stoppedPoll, { pending: 0, executed: 1, nextExecuted: false }, "a download status error clears the fixture poll timer before another callback can execute");
+    assert.equal(modelDownloadPolls(), pollsBeforeFailure + 1, "no model-download poll runs after the failed status response");
+    await page.evaluate(() => { window.__modelPollTimers = null; });
     await page.locator("#errorDialogClose").click();
     await page.locator("#modelDownloadClose").click();
     failModelDownloadStatus(false); resetModelDownload();
