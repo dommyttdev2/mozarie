@@ -285,6 +285,13 @@ function startFixtureServer() {
       response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ state: token?.state || "unknown", cleared: token?.state === "committed", stale: false }));
       return;
     }
+    if (requestPath === "/api/save/ack" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const token = saveTokens.get(payload.saveToken);
+      if (token?.state === "committed") token.state = "acknowledged";
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ state: token ? token.state : "unknown" }));
+      return;
+    }
     if (requestPath === "/api/save/cancel" && request.method === "POST") {
       let body = ""; for await (const chunk of request) body += chunk;
       const payload = JSON.parse(body); const token = saveTokens.get(payload.saveToken); if (token) token.state = "cancelled";
@@ -477,7 +484,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); saveTokens.clear(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -4041,6 +4048,7 @@ async function main() {
     try {
       await browserSavePage.goto(fixtureUrl, { waitUntil: "networkidle" });
       const folderRequestCount = folderRequests.length;
+      const expectedFolderEpoch = await browserSavePage.evaluate(() => state.serverCatalogGeneration);
       await browserSavePage.locator("#pickFolder").click();
       await browserSavePage.locator("#folderPath").fill("G:\\selected-folder");
       await browserSavePage.locator("#loadFolderButton").click();
@@ -4048,7 +4056,7 @@ async function main() {
       // root instead of that unchanged count: folder preflight is async.
       await browserSavePage.waitForFunction(() => state.reviewRoot === "g:\\selected-folder");
       assert.equal(folderRequests.length, folderRequestCount + 1, "folder selection sends exactly one new request");
-      assert.deepEqual(folderRequests.at(-1), { path: "G:\\selected-folder" }, "folder selection posts the typed path and reloads the catalogue");
+      assert.deepEqual(folderRequests.at(-1), { path: "G:\\selected-folder", expectedProjectId: null, expectedCatalogGeneration: expectedFolderEpoch }, "folder selection posts the typed absolute path with its captured catalog epoch");
       await browserSavePage.locator('.gallery-item[data-id="sample"]').click();
       await browserSavePage.waitForFunction(() => state.currentId === "sample" && state.currentImage);
       await browserSavePage.locator("#brushTool").click();
