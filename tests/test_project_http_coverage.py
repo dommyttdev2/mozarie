@@ -149,13 +149,14 @@ class ProjectHttpCoverageTests(unittest.TestCase):
                 self.assertEqual(mask.size, (12, 8))
                 self.assertEqual(mask.getextrema(), (0, 0))
 
-        archive_dir = self.root / "archives"
-        archive_dir.mkdir()
         native_temp = tempfile.NamedTemporaryFile
+        archive_paths: list[Path] = []
 
         def archive_file(*args, **kwargs):
-            kwargs["dir"] = archive_dir
-            return native_temp(*args, **kwargs)
+            self.assertEqual(Path(kwargs["dir"]), self.state.cache_dir)
+            output = native_temp(*args, **kwargs)
+            archive_paths.append(Path(output.name))
+            return output
 
         with patch.object(http_module.tempfile, "NamedTemporaryFile", side_effect=archive_file):
             for kind in ("mosaic", "exclude"):
@@ -172,11 +173,13 @@ class ProjectHttpCoverageTests(unittest.TestCase):
         # The final response byte reaches the client just before the handler's
         # ``finally`` block unlinks the archive.  Wait only for that server
         # cleanup boundary rather than accepting a leaked temporary ZIP.
+        self.assertTrue(archive_paths)
+        self.assertTrue(all(path.parent == self.state.cache_dir for path in archive_paths))
         for _ in range(50):
-            if not list(archive_dir.iterdir()):
+            if not list(self.state.cache_dir.glob("mozarie-masks-*.zip")):
                 break
             time.sleep(.01)
-        self.assertEqual(list(archive_dir.iterdir()), [])
+        self.assertEqual(list(self.state.cache_dir.glob("mozarie-masks-*.zip")), [])
 
         status, _headers, body = self.request("GET", f"/api/project/mask/{image_id}/invalid")
         self.assertEqual(status, 400)
@@ -187,6 +190,16 @@ class ProjectHttpCoverageTests(unittest.TestCase):
         status, _headers, body = self.request("GET", "/api/project/mask/missing/mosaic")
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body)["error_code"], "image_not_found")
+
+    def test_startup_removes_a_stale_mask_zip_from_a_process_cache(self) -> None:
+        stale_cache = self.root / "process-stale"
+        stale_cache.mkdir()
+        stale_zip = stale_cache / "mozarie-masks-stale.zip"; stale_zip.write_bytes(b"stale")
+        old = time.time() - 61
+        __import__("os").utime(stale_cache, (old, old))
+        with patch.object(state_module, "CACHE_BASE_DIR", self.root):
+            StudioState._cleanup_stale_process_caches()
+        self.assertFalse(stale_cache.exists())
 
     def test_project_history_mismatch_and_malformed_routes(self) -> None:
         project_id, image_id = self.create_and_load()

@@ -3,6 +3,8 @@ import unittest
 import sys
 import types
 import gc
+import os
+import shutil
 import sqlite3
 import threading
 import ctypes
@@ -32,6 +34,22 @@ class _AckOwner:
 
 
 class SaveRecoveryTests(unittest.TestCase):
+    def _replacement_backup(self, root: Path, token: str) -> tuple[SaveJournal, Path, Path]:
+        source = root / "source.png"; backup = root / ".source.png.mozarie-backup-token"; staged = root / "rendered.stage"
+        source.write_bytes(b"original")
+        source_stat = source.stat(); source_identity = SaveJournal.file_identity(source, source_stat)
+        shutil.copy2(source, backup)
+        backup_stat = backup.stat(); backup_identity = SaveJournal.file_identity(backup, backup_stat)
+        staged.write_bytes(b"rendered")
+        os.utime(staged, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+        replacement_stat = staged.stat(); replacement_identity = SaveJournal.file_identity(staged, replacement_stat)
+        staged.replace(source)
+        journal = SaveJournal(root)
+        journal.reserve(token, "image", 1, None, staged)
+        journal.replacement_backup(token, source, backup, (backup_stat.st_mtime_ns, backup_stat.st_size), backup_identity,
+                                   source_identity, (replacement_stat.st_mtime_ns, replacement_stat.st_size), replacement_identity)
+        return journal, source, backup
+
     def test_workspace_receipt_is_durable(self):
         with tempfile.TemporaryDirectory() as raw:
             store = WorkspaceStore(Path(raw))
@@ -43,6 +61,34 @@ class SaveRecoveryTests(unittest.TestCase):
             self.assertEqual(store.browser_save_receipt("save-token")["catalogGeneration"], 9)
             self.assertTrue(store.acknowledge_browser_save_receipt("save-token"))
             self.assertIsNone(store.browser_save_receipt("save-token"))
+
+    @unittest.skipUnless(os.name == "nt", "Windows overwrite recovery contract")
+    def test_replacement_backup_restores_an_owned_overwrite_without_receipt(self):
+        with tempfile.TemporaryDirectory() as raw:
+            journal, source, backup = self._replacement_backup(Path(raw), "rollback")
+            self.assertTrue(journal.recover_token("rollback"))
+            self.assertEqual(source.read_bytes(), b"original")
+            self.assertFalse(backup.exists())
+            self.assertEqual(journal.row("rollback")["state"], "cancelled")
+
+    @unittest.skipUnless(os.name == "nt", "Windows overwrite recovery contract")
+    def test_replacement_backup_discards_an_owned_backup_after_receipt(self):
+        with tempfile.TemporaryDirectory() as raw:
+            journal, source, backup = self._replacement_backup(Path(raw), "commit")
+            self.assertTrue(journal.recover_token("commit", lambda _token: receipt("commit")))
+            self.assertEqual(source.read_bytes(), b"rendered")
+            self.assertFalse(backup.exists())
+            self.assertEqual(journal.row("commit")["state"], "committed")
+
+    @unittest.skipUnless(os.name == "nt", "Windows overwrite recovery contract")
+    def test_replacement_backup_preserves_an_externally_replaced_source(self):
+        with tempfile.TemporaryDirectory() as raw:
+            journal, source, backup = self._replacement_backup(Path(raw), "external")
+            source.write_bytes(b"external")
+            self.assertFalse(journal.recover_token("external"))
+            self.assertEqual(source.read_bytes(), b"external")
+            self.assertTrue(backup.exists())
+            self.assertEqual(journal.row("external")["state"], "cleanup_pending")
 
     def test_cleanup_keeps_an_unowned_final(self):
         with tempfile.TemporaryDirectory() as raw:

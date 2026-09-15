@@ -48,6 +48,17 @@ class WorkspaceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "effective mask"):
                 store.save_manual(image_id, {"add": "x"}, lambda value: b"png" if value else None)
 
+    def test_commit_source_delete_removes_claimed_images(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store)
+            records = [SimpleNamespace(relative_path=f"{index}.png", size_bytes=1, mtime_ns=1, width=4, height=4) for index in range(2)]
+            image_ids = [str(item["image_id"]) for item in store.reconcile_images(catalog, records).values()]
+            store.prepare_source_delete("delete-token", catalog, None, 1, image_ids, [], [])
+            store.update_source_delete_operation("delete-token", "claimed", {}, expected_states={"prepared"})
+            store.commit_source_delete("delete-token", image_ids, {"state": "workspace_committed"})
+            self.assertEqual(store.project_images(catalog), [])
+            self.assertEqual(store.source_delete_operation("delete-token")["state"], "workspace_committed")
+
     def test_hydrate_candidates_reads_metadata_without_decoding_masks(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

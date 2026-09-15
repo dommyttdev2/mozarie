@@ -499,7 +499,6 @@ class SavingMixin:
         mask_paths: list[Path] = []
         candidate_dirs: list[Path] = []
         thumbnail_paths: list[Path] = []
-        source_stage = None
         quarantine_path: Path | None = None
         published_output: tuple[Path, tuple[int, int], str | None] | None = None
         source_delete_pending = False
@@ -615,7 +614,7 @@ class SavingMixin:
                         self.save_journal.published(save_token, destination_fingerprint, identity)
                     if source_action == "overwrite":
                         assert token_details.rendered_path is not None
-                        source_stage = _stage_record_replacement(
+                        _stage_record_replacement(
                             record_snapshot, token_details.rendered_path, token_details.source_fingerprint,
                             lambda backup, backup_fingerprint, backup_identity, source_identity, replacement_fingerprint, replacement_identity:
                                 self.save_journal.replacement_backup(

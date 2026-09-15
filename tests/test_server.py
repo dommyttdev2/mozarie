@@ -6496,10 +6496,10 @@ class MozarieTests(unittest.TestCase):
             commit_result = {}
             original_replace = saving_module._stage_record_replacement
 
-            def delayed_replace(record, rendered_path, fingerprint):
+            def delayed_replace(record, rendered_path, fingerprint, backup_ready=None):
                 fingerprint_started.set()
                 self.assertTrue(release.wait(2))
-                return original_replace(record, rendered_path, fingerprint)
+                return original_replace(record, rendered_path, fingerprint, backup_ready)
 
             with patch.object(saving_module, "_stage_record_replacement", side_effect=delayed_replace):
                 commit = threading.Thread(
@@ -6980,8 +6980,8 @@ class MozarieTests(unittest.TestCase):
             claimed = threading.Event(); release = threading.Event(); outcome = {}
             original_replace = saving_module._stage_record_replacement
 
-            def block_after_claim(record, rendered_path, fingerprint):
-                claimed.set(); self.assertTrue(release.wait(2)); return original_replace(record, rendered_path, fingerprint)
+            def block_after_claim(record, rendered_path, fingerprint, backup_ready=None):
+                claimed.set(); self.assertTrue(release.wait(2)); return original_replace(record, rendered_path, fingerprint, backup_ready)
 
             def commit():
                 try:
