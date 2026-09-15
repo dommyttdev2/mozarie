@@ -22,8 +22,7 @@ import numpy as np
 from PIL import Image, UnidentifiedImageError
 
 from .core import (
-    IMAGE_SUFFIXES, IO_CHUNK_BYTES, MAX_BODY_BYTES, PNG_SIGNATURE,
-    SAVE_TOKEN_TTL_SECONDS,
+    IMAGE_SUFFIXES, IO_CHUNK_BYTES, PNG_SIGNATURE,
     BrowserSaveToken, ClientError, ImageRecord, Job, LOGGER, StaleMaskError,
     safe_import_relative_path, torch_module,
 )
@@ -303,6 +302,7 @@ class CatalogMixin:
                 self.job = Job()
                 self._publish_job_snapshot_unchecked()
                 self.catalog_generation += 1
+                self._cancel_manual_uploads_unchecked("画像一覧を切り替えました")
                 session = self._detach_session_unchecked()
             self._clear_cache()
             if prehydrated is None:
@@ -313,7 +313,7 @@ class CatalogMixin:
                 for image_id, image_lock in locks:
                     if image_id not in new_ids and self._image_io_locks.get(image_id) is image_lock:
                         self._image_io_locks.pop(image_id, None)
-        self.cleanup_expired_browser_save_tokens()
+        self.cleanup_browser_save_files()
         return self.list_images()
 
     def _has_active_worker(self) -> bool:
@@ -672,6 +672,8 @@ class CatalogMixin:
                 self.catalog_sources = self.workspace_store.project_sources(catalog_id)
                 self.projectless_manual_drafts.clear()
                 self.catalog_generation += 1
+                self._clear_browser_save_tokens_unchecked()
+                self._cancel_manual_uploads_unchecked("プロジェクトを保存しました")
                 return project
 
     def name_current_project(self, name: str, project_id: str = "", *, expected_project_id: str | None = None,
@@ -749,7 +751,7 @@ class CatalogMixin:
                 except ValueError as exc:
                     raise ClientError("プロジェクトが見つかりません。", "project_not_found") from exc
             if active:
-                self.cleanup_expired_browser_save_tokens()
+                self.cleanup_browser_save_files()
             for image_id in image_ids:
                 try:
                     shutil.rmtree(self.cache_dir / image_id, ignore_errors=True)
@@ -767,6 +769,8 @@ class CatalogMixin:
             if self.catalog_id == catalog_id and self.project_read_only:
                 self.project_read_only = False
                 self.catalog_generation += 1
+                self._clear_browser_save_tokens_unchecked()
+                self._cancel_manual_uploads_unchecked("プロジェクトを再開しました")
         return project
 
     def open_project(self, catalog_id: str, *, expected_project_id: str | None = None,
@@ -1055,6 +1059,7 @@ class CatalogMixin:
         self.source_roots = {}
         self.catalog_sources = []
         self.catalog_generation += 1
+        self._cancel_manual_uploads_unchecked("画像一覧を閉じました")
         session = self._detach_session_unchecked()
         self._image_io_locks.clear()
         return catalog_id, session
@@ -1095,7 +1100,7 @@ class CatalogMixin:
                         self.catalog_sources = [dict(source) for source in publish_sources or []]
                 self._clear_cache()
                 self._release_detached_session(session)
-        self.cleanup_expired_browser_save_tokens()
+        self.cleanup_browser_save_files()
         return catalog_id
 
     def detach_catalog(self) -> str | None:
@@ -1574,6 +1579,7 @@ class CatalogMixin:
                         self.workspace_id = None
                         self.catalog_sources = []
                     self._clear_browser_save_tokens_unchecked()
+                    self._cancel_manual_uploads_unchecked("画像を削除しました")
                 snapshot = self.catalog_snapshot()
                 self._delete_mask_files(mask_paths, [self.cache_dir / record.image_id for record in records])
                 thumbnail_dir = self.cache_dir / "thumbnails"
@@ -1593,7 +1599,7 @@ class CatalogMixin:
                             except OSError:
                                 break
                             parent = parent.parent
-        self.cleanup_expired_browser_save_tokens()
+        self.cleanup_browser_save_files()
         for image_id in removed_ids:
             self.invalidate_sam_image(image_id)
         return {"images": snapshot["images"], "removedImageIds": removed_ids,
@@ -1614,6 +1620,10 @@ class CatalogMixin:
                 control = self.job_control
                 self._clear_browser_save_tokens_unchecked()
                 self.browser_save_receipts.clear()
+                self._cancel_manual_uploads_unchecked("アプリを終了しました")
+                for session in self._import_sessions.values():
+                    LOGGER.info("ブラウザー画像読込を放棄: アプリを終了しました bytes=%d 送信成功=%d件 送信失敗=%d件", session["bytes"], session["succeeded"], session["failed"])
+                self._import_sessions.clear()
                 if control is not None:
                     control.cancel_requested.set()
                     control.pause_requested.clear()
@@ -1637,7 +1647,7 @@ class CatalogMixin:
                 self._release_directory_lock(cache_lock)
                 if self._owns_process_cache:
                     shutil.rmtree(self.cache_dir, ignore_errors=True)
-        self.cleanup_expired_browser_save_tokens()
+        self.cleanup_browser_save_files()
 
     def _touch_candidates(self, image_id: str) -> int:
         revision = self.candidate_revisions.get(image_id, 0) + 1
@@ -1699,41 +1709,27 @@ class CatalogMixin:
         for token in tuple(self.browser_save_tokens):
             self._discard_browser_save_token_unchecked(token)
         self.browser_save_claims.clear()
+        self.browser_save_receipts.clear()
+        self._unlink_browser_save_cleanup(self._take_browser_save_cleanup_unchecked())
 
     def _discard_browser_save_tokens_for_image_unchecked(self, image_id: str) -> None:
         for token, details in tuple(self.browser_save_tokens.items()):
             if details.image_id == image_id:
                 self._discard_browser_save_token_unchecked(token)
 
-    def _discard_expired_browser_save_tokens_unchecked(self) -> None:
-        cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
-        for token, details in tuple(self.browser_save_tokens.items()):
-            if token not in self.browser_save_claims and details.issued_at < cutoff:
-                self._discard_browser_save_token_unchecked(token)
+    def _discard_browser_save_receipts_for_image_unchecked(self, image_id: str) -> None:
         for token, receipt in tuple(self.browser_save_receipts.items()):
-            if receipt.completed_at < cutoff:
+            if receipt.image_id == image_id:
                 self.browser_save_receipts.pop(token, None)
 
     def _has_active_browser_save_for_image_unchecked(self, image_id: str) -> bool:
-        cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
-        return any(
-            details.image_id == image_id
-            and (token in self.browser_save_claims or details.issued_at >= cutoff)
-            for token, details in self.browser_save_tokens.items()
-        )
+        return any(details.image_id == image_id for details in self.browser_save_tokens.values())
 
-    def cleanup_expired_browser_save_tokens(self) -> None:
-        """Cheap polling-path expiry: detach under lock, unlink afterwards."""
-        cutoff = time.monotonic() - SAVE_TOKEN_TTL_SECONDS
+    def cleanup_browser_save_files(self) -> None:
+        """Remove files detached by an explicit cancel, commit, or catalogue change."""
         with self.lock:
-            for token, details in tuple(self.browser_save_tokens.items()):
-                if token not in self.browser_save_claims and details.issued_at < cutoff:
-                    self._discard_browser_save_token_unchecked(token)
-            for token, receipt in tuple(self.browser_save_receipts.items()):
-                if receipt.completed_at < cutoff:
-                    self.browser_save_receipts.pop(token, None)
-            expired_paths = self._take_browser_save_cleanup_unchecked()
-        self._unlink_browser_save_cleanup(expired_paths)
+            cleanup_paths = self._take_browser_save_cleanup_unchecked()
+        self._unlink_browser_save_cleanup(cleanup_paths)
 
     def _issue_browser_save_token_unchecked(
         self,
@@ -1749,14 +1745,13 @@ class CatalogMixin:
         output_format: str = "original", keep_metadata: bool = True,
     ) -> str:
         self._assert_request_catalog_expectation()
-        self._discard_expired_browser_save_tokens_unchecked()
+        self._discard_browser_save_receipts_for_image_unchecked(record.image_id)
         token = secrets.token_urlsafe(32)
         self.browser_save_tokens[token] = BrowserSaveToken(
             image_id=record.image_id,
             candidate_revision=revision,
             source_fingerprint=source_fingerprint,
             catalog_generation=catalog_generation,
-            issued_at=time.monotonic(),
             rendered_path=rendered_path,
             output_path=output_path,
             output_fingerprint=output_fingerprint,
@@ -2035,6 +2030,10 @@ class CatalogMixin:
                         # Publishing their generation lets another tab reject a
                         # request captured before this visible catalogue change.
                         self.catalog_generation += 1
+                        self._clear_browser_save_tokens_unchecked()
+                        self._cancel_manual_uploads_unchecked("ブラウザー画像を追加しました")
+                    if created_projectless_id:
+                        self.workspace_store.set_active_projectless_catalog(created_projectless_id)
                     images = self.list_images() if include_images else []
                     for path in set(replaced_session_paths):
                         try:
@@ -2346,13 +2345,16 @@ class CatalogMixin:
     @staticmethod
     def _decode_workspace_mask(value: Any) -> bytes | None:
         if value is None or value == "": return None
-        if not isinstance(value, str) or not value.startswith("data:image/png;base64,"):
-            raise ClientError("手描きマスクが正しくありません。", "input_invalid")
-        try:
-            raw = base64.b64decode(value.split(",", 1)[1], validate=True)
-        except (ValueError, binascii.Error) as exc:
-            raise ClientError("手描きマスクが正しくありません。", "input_invalid") from exc
-        if len(raw) > MAX_BODY_BYTES or not raw.startswith(PNG_SIGNATURE):
+        if isinstance(value, bytes):
+            raw = value
+        else:
+            if not isinstance(value, str) or not value.startswith("data:image/png;base64,"):
+                raise ClientError("手描きマスクが正しくありません。", "input_invalid")
+            try:
+                raw = base64.b64decode(value.split(",", 1)[1], validate=True)
+            except (ValueError, binascii.Error) as exc:
+                raise ClientError("手描きマスクが正しくありません。", "input_invalid") from exc
+        if not raw.startswith(PNG_SIGNATURE):
             raise ClientError("手描きマスクが正しくありません。", "input_invalid")
         # Only dirty layers reach this decoder during an incremental save, so
         # validating here preserves the old API contract without reopening the

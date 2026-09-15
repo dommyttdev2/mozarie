@@ -588,6 +588,7 @@ async function importFiles(files) {
   try {
     await flushAllImageMutations();
     await flushAllWorkspaceMutations();
+    await startImportServerSession(session);
     session.total = supportedFiles.length; session.completed = 0; session.paused = false; session.cancelled = false;
     showProcessing({ kind: "import", state: "running", total: session.total, completed: 0, current: "" });
     session.requestedParallelism = importParallelism();
@@ -712,14 +713,14 @@ function beginImportSession({ allowDuringCatalogTransition = false } = {}) {
     setStatusKey("status.importUnavailable");
     return null;
   }
-  const session = { id: newClientKey(), epoch: state.catalogTransition?.epoch || beginCatalogEpoch(), expectedProjectId: state.project?.id || "", expectedCatalogGeneration: state.serverCatalogGeneration, paused: false, cancelled: false, failed: false, completed: 0, total: 0, catalogId: null, sourceId: null, sourceKind: "browser-files", importIntent: "add" };
+  const session = { id: newClientKey(), epoch: state.catalogTransition?.epoch || beginCatalogEpoch(), expectedProjectId: state.project?.id || "", expectedCatalogGeneration: state.serverCatalogGeneration, paused: false, cancelled: false, failed: false, completed: 0, total: 0, catalogId: null, sourceId: null, sourceKind: "browser-files", importIntent: "add", serverStarted: false };
   state.importing = true; state.importSession = session;
   updateActionButtons();
   return session;
 }
 
 async function finishImportServerSession(session) {
-  if (!session?.id || !Number.isSafeInteger(session.expectedCatalogGeneration)) return;
+  if (!session?.serverStarted || !Number.isSafeInteger(session.expectedCatalogGeneration)) return;
   try {
     await api("/api/import/finish", { method: "POST", body: JSON.stringify({
       sessionId: session.id,
@@ -729,9 +730,17 @@ async function finishImportServerSession(session) {
       failed: Boolean(session.failed),
       cancelled: Boolean(session.cancelled),
     }) });
-  } catch {
-    // The next claimed import expires an abandoned batch after its short TTL.
-  }
+  } catch { /* A later explicit start replaces an inactive unfinished batch. */ }
+}
+
+async function startImportServerSession(session) {
+  if (!session?.id || !Number.isSafeInteger(session.expectedCatalogGeneration)) return;
+  await api("/api/import/start", { method: "POST", body: JSON.stringify({
+    sessionId: session.id,
+    expectedProjectId: session.expectedProjectId,
+    expectedCatalogGeneration: session.expectedCatalogGeneration,
+  }) });
+  session.serverStarted = true;
 }
 
 function remapImportedImageIds(imageIds) {

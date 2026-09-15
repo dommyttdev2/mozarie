@@ -17,6 +17,7 @@ from typing import Any
 
 from .core import (
     APP_DIR, CACHE_BASE_DIR, DEFAULT_COLORS, LOGGER, SESSION_BASE_DIR,
+    THUMBNAIL_WORKERS,
     BrowserSaveReceipt, BrowserSaveToken, Candidate, ClientError, ImageRecord,
     InferenceGate, Job, JobControl, torch_module,
 )
@@ -29,16 +30,6 @@ from .detection import DetectionMixin
 from .jobs import JobsMixin
 from .model_downloads import ModelDownloadManager
 from .workspace import WorkspaceOpenError, WorkspaceStore
-
-
-_IMPORT_SESSION_TTL_SECONDS = 30.0
-
-
-def _is_canonical_uuid(value: str) -> bool:
-    try:
-        return str(uuid.UUID(value)) == value
-    except (ValueError, AttributeError, TypeError):
-        return False
 
 
 def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
@@ -112,6 +103,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.shutdown_requested = threading.Event()
         self.active_import_count = 0
         self._import_sessions: dict[str, dict[str, Any]] = {}
+        self._manual_uploads: dict[str, dict[str, Any]] = {}
         self._cache_lock_handle: Any | None = None
         self._owns_process_cache = cache_dir is None
         if cache_dir is None:
@@ -141,19 +133,13 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         # mutation still uses ``lock``; never acquire an image lock while that
         # global lock is held.
         self._image_io_locks: dict[str, threading.RLock] = {}
-        # Thumbnail work is single-flight per visible asset.  There is no
-        # process-wide worker ceiling: unrelated visible requests may proceed
-        # with the browser's actual demand.
-        self._thumbnail_locks_guard = threading.Lock()
-        self._thumbnail_locks: dict[str, tuple[threading.Lock, int]] = {}
+        self.thumbnail_gate = threading.BoundedSemaphore(THUMBNAIL_WORKERS)
+        self.import_staging_gate = threading.BoundedSemaphore(10)
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
         # A claimed token is being committed outside ``lock``.  Expiry polling
         # must leave its already-written copy alone until the commit finishes.
         self.browser_save_claims: set[str] = set()
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
-        # Source deletion is deliberately not undoable.  Keep completed
-        # receipts for this process so a browser can repeat the same request
-        # after its response was lost without deleting a later catalogue item.
         self.source_delete_receipts: dict[str, dict[str, Any]] = {}
         self._pending_browser_save_cleanup: list[tuple[Path, tuple[int, int] | None]] = []
         self.output_destination_lock = threading.Lock()
@@ -189,23 +175,9 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.workspace_store.shutdown()
 
     @contextmanager
-    def thumbnail_generation_lock(self, key: str):
-        """Serialize one thumbnail path without retaining a global worker cap."""
-        with self._thumbnail_locks_guard:
-            lock, waiters = self._thumbnail_locks.get(key, (threading.Lock(), 0))
-            self._thumbnail_locks[key] = (lock, waiters + 1)
-        try:
-            with lock:
-                yield
-        finally:
-            with self._thumbnail_locks_guard:
-                current = self._thumbnail_locks.get(key)
-                if current is None or current[0] is not lock:
-                    return
-                if current[1] <= 1:
-                    self._thumbnail_locks.pop(key, None)
-                else:
-                    self._thumbnail_locks[key] = (lock, current[1] - 1)
+    def thumbnail_generation_lock(self, _key: str):
+        with self.thumbnail_gate:
+            yield
 
     def set_image_flags_bulk(self, payload: dict[str, Any]) -> dict[str, dict[str, bool]]:
         """Keep durable bulk flags and a concurrent catalog publication in one state epoch."""
@@ -223,7 +195,6 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
 
     @staticmethod
     def _copy_job_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
-        """Return a response-owned copy with no mutable Job members."""
         return {
             **snapshot,
             "params": dict(snapshot.get("params", {})),
@@ -233,12 +204,10 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         }
 
     def _publish_job_snapshot_unchecked(self) -> dict[str, Any]:
-        """Publish while ``lock`` protects the live Job object."""
         self._job_snapshot = self._copy_job_snapshot(self.job.as_dict())
         return self._job_snapshot
 
     def job_snapshot(self) -> dict[str, Any]:
-        """Return progress promptly even while a worker owns the state lock."""
         if self.lock.acquire(blocking=False):
             try:
                 snapshot = self._publish_job_snapshot_unchecked()
@@ -342,61 +311,58 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 self._release_gpu_cache(provider="gpu", gpu_device=int(previous_models.get("gpu_device", 0)))
             return self.settings
 
-    def _cleanup_import_sessions_unchecked(self) -> None:
-        cutoff = time.monotonic() - _IMPORT_SESSION_TTL_SECONDS
-        self._import_sessions = {
-            session_id: session for session_id, session in self._import_sessions.items()
-            if session["active"] or session["touched"] >= cutoff
-        }
+    @staticmethod
+    def _valid_import_session_id(session_id: str) -> bool:
+        try:
+            return str(uuid.UUID(session_id)) == session_id
+        except (TypeError, ValueError, AttributeError):
+            return False
 
-    def begin_import_transfer(
-        self,
-        session_id: str,
-        expected_project_id: str | None,
-        expected_catalog_generation: int,
-        requested_parallelism: int,
-        target_count: int,
-    ) -> None:
-        """Claim one browser import batch without serialising its file I/O."""
-        if (not isinstance(session_id, str) or not _is_canonical_uuid(session_id)
-                or isinstance(requested_parallelism, bool) or not isinstance(requested_parallelism, int) or requested_parallelism < 1
-                or isinstance(target_count, bool) or not isinstance(target_count, int) or target_count < 1):
+    def start_import_session(self, session_id: str, expected_project_id: str | None, expected_catalog_generation: int) -> dict[str, int | bool]:
+        """Open one browser import explicitly; a later inactive batch is abandoned by the next start."""
+        if not self._valid_import_session_id(session_id):
             raise ClientError("画像追加セッションが正しくありません。", "input_invalid")
         with self.import_lock:
             with self.lock:
-                self._cleanup_import_sessions_unchecked()
+                if self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+                    raise ClientError("処理中は画像を追加できません。", "operation_in_progress")
+                self._assert_catalog_expectation(expected_project_id, expected_catalog_generation)
+                current = self._import_sessions.get(session_id)
+                if current is not None:
+                    if current["project_id"] != expected_project_id or current["generation"] != expected_catalog_generation:
+                        raise ClientError("画像追加セッションが更新されています。", "stale_catalog")
+                    return {"ok": True, "catalogGeneration": self.catalog_generation}
+                for stale_id, stale in tuple(self._import_sessions.items()):
+                    if stale["active"]:
+                        raise ClientError("別の画像追加が完了するまでお待ちください。", "operation_in_progress")
+                    LOGGER.info("ブラウザー画像読込を放棄: bytes=%d 送信成功=%d件 送信失敗=%d件 所要=%.2f秒", stale["bytes"], stale["succeeded"], stale["failed"], time.monotonic() - stale["started_at"])
+                    del self._import_sessions[stale_id]
+                self._import_sessions[session_id] = {
+                    "project_id": expected_project_id, "generation": expected_catalog_generation,
+                    "last_generation": expected_catalog_generation, "active": 0, "finish_requested": False,
+                    "succeeded": 0, "failed": 0, "bytes": 0, "started_at": time.monotonic(), "outcome": {},
+                }
+                LOGGER.info("ブラウザー画像読込を開始")
+                return {"ok": True, "catalogGeneration": self.catalog_generation}
+
+    def begin_import_transfer(self, session_id: str, expected_project_id: str | None, expected_catalog_generation: int) -> None:
+        """Claim one browser import batch without serialising its file I/O."""
+        if not self._valid_import_session_id(session_id):
+            raise ClientError("画像追加セッションが正しくありません。", "input_invalid")
+        with self.import_lock:
+            with self.lock:
                 if self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                     raise ClientError("処理中は画像を追加できません。", "operation_in_progress")
                 session = self._import_sessions.get(session_id)
                 if session is None:
-                    if self._import_sessions:
-                        raise ClientError("別の画像追加が完了するまでお待ちください。", "operation_in_progress")
-                    self._assert_catalog_expectation(expected_project_id, expected_catalog_generation)
-                    effective_parallelism = min(requested_parallelism, target_count)
-                    session = {"project_id": expected_project_id, "generation": expected_catalog_generation,
-                               "last_generation": expected_catalog_generation, "active": 0, "finish_requested": False,
-                               "succeeded": 0, "failed": 0, "started_at": time.monotonic(), "outcome": {}, "touched": time.monotonic(),
-                               "requested_parallelism": requested_parallelism, "effective_parallelism": effective_parallelism,
-                               "target_count": target_count}
-                    self._import_sessions[session_id] = session
-                    LOGGER.info("ブラウザー画像読込を開始: 対象=%d件 要求並列=%d 実効並列=%d", target_count, requested_parallelism, effective_parallelism)
-                elif session["project_id"] != expected_project_id or session["generation"] != expected_catalog_generation:
+                    raise ClientError("画像追加セッションを開始し直してください。", "operation_in_progress")
+                if session["project_id"] != expected_project_id or session["generation"] != expected_catalog_generation:
                     raise ClientError("画像追加セッションが更新されています。", "stale_catalog")
-                elif (session["requested_parallelism"] != requested_parallelism
-                      or session["target_count"] != target_count):
-                    raise ClientError("画像追加セッションの並列数が一致しません。", "input_invalid")
                 elif session["finish_requested"]:
                     raise ClientError("画像追加セッションは完了しています。", "operation_in_progress")
                 elif self.catalog_id != expected_project_id or (session["active"] == 0 and self.catalog_generation != session["last_generation"]):
                     raise ClientError("プロジェクト一覧が更新されました。もう一度操作してください。", "stale_catalog")
-                elif session["active"] >= session["effective_parallelism"]:
-                    # The browser starts no more than its advertised worker
-                    # count. A mismatched or stale client must not turn the
-                    # informational value in CMD into an unbounded server
-                    # transfer count.
-                    raise ClientError("画像追加の同時処理数を超えています。", "operation_in_progress")
                 session["active"] += 1
-                session["touched"] = time.monotonic()
                 self.active_import_count += 1
 
     def import_session_is_current(self, session_id: str | None, expected_project_id: str | None,
@@ -406,6 +372,12 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                     and session["generation"] == expected_catalog_generation
                     and self.catalog_id == expected_project_id
                     and self.catalog_generation >= expected_catalog_generation)
+
+    def record_import_transfer_bytes(self, session_id: str, byte_count: int) -> None:
+        with self.lock:
+            session = self._import_sessions.get(session_id)
+            if session is not None and byte_count >= 0:
+                session["bytes"] += byte_count
 
     def end_import_transfer(self, session_id: str, *, succeeded: bool) -> None:
         with self.import_lock:
@@ -418,7 +390,6 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                     session["succeeded" if succeeded else "failed"] += 1
                     if not session["active"]:
                         session["last_generation"] = self.catalog_generation
-                    session["touched"] = time.monotonic()
                     if session["finish_requested"] and not session["active"]:
                         self._log_import_session_finished(session)
                         del self._import_sessions[session_id]
@@ -427,20 +398,16 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
     def _log_import_session_finished(session: dict[str, Any]) -> None:
         outcome = session.get("outcome", {})
         LOGGER.info(
-            "ブラウザー画像読込を完了: 対象=%d件 要求並列=%d 実効並列=%d 送信成功=%d件 送信失敗=%d件 完了=%d件 失敗=%s 取消=%s 所要=%.2f秒",
-            session["target_count"], session["requested_parallelism"], session["effective_parallelism"],
-            session["succeeded"], session["failed"], int(outcome.get("completed", session["succeeded"])),
+            "ブラウザー画像読込を完了: bytes=%d 送信成功=%d件 送信失敗=%d件 完了=%d件 失敗=%s 取消=%s 所要=%.2f秒",
+            session["bytes"], session["succeeded"], session["failed"], int(outcome.get("completed", session["succeeded"])),
             bool(outcome.get("failed", False)), bool(outcome.get("cancelled", False)), time.monotonic() - session["started_at"],
         )
 
     def finish_import_session(self, session_id: str, owner_project_id: str | None,
                               owner_catalog_generation: int, outcome: dict[str, Any] | None = None) -> dict[str, int | bool]:
         """Release a batch by its immutable starting owner, even after a view switch."""
-        if not _is_canonical_uuid(session_id):
-            raise ClientError("画像追加セッションが正しくありません。", "input_invalid")
         with self.import_lock:
             with self.lock:
-                self._cleanup_import_sessions_unchecked()
                 session = self._import_sessions.get(session_id)
                 if session is None:
                     return {"ok": True, "catalogGeneration": self.catalog_generation}
@@ -448,12 +415,109 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                     raise ClientError("画像追加セッションが更新されています。", "stale_catalog")
                 session["finish_requested"] = True
                 session["outcome"] = outcome or {}
-                session["touched"] = time.monotonic()
                 if session["active"]:
                     return {"ok": True, "pending": True, "catalogGeneration": self.catalog_generation}
                 self._log_import_session_finished(session)
                 del self._import_sessions[session_id]
                 return {"ok": True, "catalogGeneration": self.catalog_generation}
+
+    def cancel_import_session(self, session_id: str, owner_project_id: str | None,
+                              owner_catalog_generation: int) -> dict[str, int | bool]:
+        return self.finish_import_session(session_id, owner_project_id, owner_catalog_generation, {
+            "completed": 0, "failed": False, "cancelled": True,
+        })
+
+    @staticmethod
+    def _valid_manual_layer(value: Any) -> bool:
+        return value in {"add", "exclusion", "exclusionErase"}
+
+    def begin_manual_upload(self, image_id: str, session_id: str, dirty_layers: Any) -> dict[str, str]:
+        """Start a small, explicit transaction for streamed hand-drawn PNG layers."""
+        if not self._valid_import_session_id(session_id):
+            raise ClientError("手描き保存セッションが正しくありません。", "input_invalid")
+        if not isinstance(dirty_layers, list) or not dirty_layers or any(not self._valid_manual_layer(layer) for layer in dirty_layers):
+            raise ClientError("手描き保存のレイヤーが正しくありません。", "input_invalid")
+        requested = set(dirty_layers)
+        with self.lock:
+            self._assert_request_catalog_expectation()
+            self._assert_catalog_mutable()
+            self._assert_image_editable(image_id)
+            if image_id not in self.images:
+                raise ClientError("画像が見つかりません。", "image_not_found")
+            existing = self._manual_uploads.pop(session_id, None)
+            if existing is not None:
+                shutil.rmtree(existing["directory"], ignore_errors=True)
+            directory = self.cache_dir / "manual-staging" / session_id
+            directory.mkdir(parents=True, exist_ok=False)
+            self._manual_uploads[session_id] = {
+                "image_id": image_id, "catalog_id": self.catalog_id, "catalog_generation": self.catalog_generation,
+                "layers": requested, "uploaded": set(), "directory": directory, "started_at": time.monotonic(),
+            }
+        LOGGER.info("手描きマスク転送を開始: レイヤー=%d件", len(requested))
+        return {"sessionId": session_id}
+
+    def manual_upload_layer_path(self, image_id: str, session_id: str, layer: str) -> Path:
+        if not self._valid_import_session_id(session_id) or not self._valid_manual_layer(layer):
+            raise ClientError("手描き保存セッションが正しくありません。", "input_invalid")
+        with self.lock:
+            session = self._manual_uploads.get(session_id)
+            if (session is None or session["image_id"] != image_id or layer not in session["layers"]
+                    or session["catalog_id"] != self.catalog_id or session["catalog_generation"] != self.catalog_generation):
+                raise ClientError("手描き保存を開始し直してください。", "stale_catalog")
+            return session["directory"] / f"{layer}.png"
+
+    def finish_manual_upload_layer(self, image_id: str, session_id: str, layer: str, byte_count: int) -> None:
+        with self.lock:
+            session = self._manual_uploads.get(session_id)
+            if session is None or session["image_id"] != image_id or layer not in session["layers"]:
+                raise ClientError("手描き保存を開始し直してください。", "stale_catalog")
+            session["uploaded"].add(layer)
+        LOGGER.info("手描きマスク転送: レイヤー=%s bytes=%d", layer, byte_count)
+
+    def commit_manual_upload(self, image_id: str, session_id: str, payload: dict[str, Any]) -> None:
+        if not self._valid_import_session_id(session_id):
+            raise ClientError("手描き保存セッションが正しくありません。", "input_invalid")
+        with self.lock:
+            session = self._manual_uploads.get(session_id)
+            if (session is None or session["image_id"] != image_id or session["catalog_id"] != self.catalog_id
+                    or session["catalog_generation"] != self.catalog_generation):
+                raise ClientError("手描き保存を開始し直してください。", "stale_catalog")
+            empty_layers = payload.get("emptyLayers", [])
+            if not isinstance(empty_layers, list) or any(layer not in session["layers"] for layer in empty_layers):
+                raise ClientError("手描き保存のレイヤーが正しくありません。", "input_invalid")
+            empty = set(empty_layers)
+            if session["layers"] != session["uploaded"] | empty:
+                raise ClientError("手描きマスクを最後まで受信していません。", "input_invalid")
+            directory = session["directory"]
+            committed = dict(payload)
+            committed["dirtyLayers"] = sorted(session["layers"])
+            for layer in session["layers"]:
+                committed[layer] = "" if layer in empty else (directory / f"{layer}.png").read_bytes()
+        try:
+            self.save_manual_workspace(image_id, committed)
+        finally:
+            with self.lock:
+                self._manual_uploads.pop(session_id, None)
+            shutil.rmtree(directory, ignore_errors=True)
+        LOGGER.info("手描きマスク転送を完了: レイヤー=%d件 所要=%.2f秒", len(session["layers"]), time.monotonic() - session["started_at"])
+
+    def cancel_manual_upload(self, image_id: str, session_id: str) -> None:
+        with self.lock:
+            session = self._manual_uploads.get(session_id)
+            if session is None or session["image_id"] != image_id:
+                return
+            self._manual_uploads.pop(session_id, None)
+            directory = session["directory"]
+        shutil.rmtree(directory, ignore_errors=True)
+        LOGGER.info("手描きマスク転送を取消: 所要=%.2f秒", time.monotonic() - session["started_at"])
+
+    def _cancel_manual_uploads_unchecked(self, reason: str) -> None:
+        """Call while ``lock`` is held when a catalogue transition invalidates staged layers."""
+        for session in self._manual_uploads.values():
+            shutil.rmtree(session["directory"], ignore_errors=True)
+        if self._manual_uploads:
+            LOGGER.info("手描きマスク転送を放棄: %s 件数=%d", reason, len(self._manual_uploads))
+        self._manual_uploads.clear()
 
     def settings_status(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
         """Report configured model files without loading model data."""

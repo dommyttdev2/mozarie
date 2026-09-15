@@ -17,7 +17,7 @@ import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .core import (
-    APP_DIR, IO_CHUNK_BYTES, LOGGER, MAX_BODY_BYTES, PNG_SIGNATURE,
+    APP_DIR, IO_CHUNK_BYTES, LOGGER, PNG_SIGNATURE,
     ClientError, ImageRecord, oriented_image_size,
     safe_import_relative_path, torch_module, _read_save_suffix,
 )
@@ -485,8 +485,6 @@ def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:
         raw = base64.b64decode(data_url.split(",", 1)[1], validate=True)
     except (IndexError, binascii.Error) as exc:
         raise ClientError("編集マスクを読み込めません。", "input_invalid") from exc
-    if len(raw) > MAX_BODY_BYTES:
-        raise ClientError("編集マスクが大きすぎます。", "input_invalid")
     try:
         with open_image(io.BytesIO(raw)) as image:
             if image.format != "PNG":

@@ -83,9 +83,8 @@ DEFAULT_COLORS = {
 DEFAULT_DETECTION_CONFIDENCE = 0.50
 SECONDARY_MIN_CONFIDENCE = 0.50
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-MAX_BODY_BYTES = 80 * 1024 * 1024
 IO_CHUNK_BYTES = 1024 * 1024
-SAVE_TOKEN_TTL_SECONDS = 10 * 60
+THUMBNAIL_WORKERS = 4
 LOGGER = logging.getLogger(__name__)
 PUBLIC_ERROR_PARAMS: dict[str, frozenset[str]] = {
     "gpu_out_of_memory": frozenset({"parallelism"}),
@@ -202,7 +201,6 @@ class BrowserSaveToken:
     candidate_revision: int
     source_fingerprint: tuple[int, int]
     catalog_generation: int
-    issued_at: float
     rendered_path: Path | None
     # Only a newly-created Mozarie copy is cancellable.  Existing source files
     # are never represented here.
@@ -223,7 +221,7 @@ class BrowserSaveToken:
 class BrowserSaveRender:
     """Rendered output and the opaque confirmation token for one browser save."""
 
-    output: bytes | None
+    output: bytes
     record: ImageRecord
     candidate_revision: int
     save_token: str
@@ -232,11 +230,6 @@ class BrowserSaveRender:
     output_format: str = "original"
     mime_type: str = "application/octet-stream"
     extension: str = ""
-    # Browser responses are streamed from this file when a render has already
-    # been staged.  It is intentionally separate from ``output_path``: that
-    # path belongs to an explicit copy-save destination.
-    response_path: Path | None = None
-    response_path_is_temporary: bool = False
 
     def __iter__(self):
         yield self.output
@@ -256,7 +249,6 @@ class BrowserSaveReceipt:
     stale: bool
     deleted: bool
     catalog_generation: int
-    completed_at: float
 
 
 @dataclass

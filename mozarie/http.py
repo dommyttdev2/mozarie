@@ -19,7 +19,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 from PIL import Image, ImageOps
 
 from .core import (
-    APP_DIR, IO_CHUNK_BYTES, LOGGER, MAX_BODY_BYTES, PNG_SIGNATURE, STATIC_DIR,
+    APP_DIR, IO_CHUNK_BYTES, LOGGER, PNG_SIGNATURE, STATIC_DIR,
     ClientError, ForbiddenClientError, ImageRecord, StaleMaskError,
     read_detection_confidence, _read_detection_parallelism, _read_mosaic_divisor,
     _read_save_suffix, _read_target_classes, public_error_params,
@@ -57,7 +57,9 @@ def _is_api_path(path: str) -> bool:
 
 
 _POST_OPERATION_LABELS = {
+    "/api/import/start": "ブラウザー画像の読み込み開始",
     "/api/import/finish": "ブラウザー画像の読み込み確定",
+    "/api/import/cancel": "ブラウザー画像の読み込み取消",
     "/api/folder": "フォルダー読み込み",
     "/api/projects": "プロジェクト作成",
     "/api/project/name": "プロジェクト名変更",
@@ -292,10 +294,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
         raw_length = lengths[0]
         if not raw_length or not raw_length.isascii() or not raw_length.isdecimal():
             self._reject_unread_request(ClientError("リクエストサイズが不正です。", "input_invalid"))
-        if len(raw_length) > len(str(MAX_BODY_BYTES)):
+        try:
+            content_length = int(raw_length)
+        except ValueError:
             self._reject_unread_request(ClientError("リクエストサイズが正しくありません。", "input_invalid"))
-        content_length = int(raw_length)
-        if content_length > MAX_BODY_BYTES or (required and content_length <= 0):
+        if required and content_length <= 0:
             self._reject_unread_request(ClientError("リクエストサイズが正しくありません。", "input_invalid"))
         return content_length
 
@@ -534,15 +537,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 source_kind = self.headers.get("X-Mozarie-Source-Kind", "browser-files")
                 import_intent = self.headers.get("X-Mozarie-Import-Intent", "")
                 import_session_id = self.headers.get("X-Mozarie-Import-Session", "")
-                requested_parallelism = self.headers.get("X-Mozarie-Import-Parallelism", "")
-                target_count = self.headers.get("X-Mozarie-Import-Target-Count", "")
                 raw_mtime = self.headers.get("X-Mozarie-File-Mtime", "0")
                 raw_size = self.headers.get("X-Mozarie-File-Size", "0")
                 if (source_identity and not _is_canonical_uuid(source_identity)
                         or source_kind not in {"browser-files", "browser-directory"}
                         or import_intent not in {"add", "restore"}
-                        or not raw_mtime.isdigit() or not raw_size.isdigit()
-                        or not requested_parallelism.isdigit() or not target_count.isdigit()):
+                        or not raw_mtime.isdigit() or not raw_size.isdigit()):
                     self._reject_unread_request(ClientError("画像の更新情報が正しくありません。", "input_invalid"))
                 try:
                     mtime_ns = int(raw_mtime) * 1_000_000
@@ -554,10 +554,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 except ClientError as exc:
                     self._reject_unread_request(exc)
                 try:
-                    STATE.begin_import_transfer(
-                        import_session_id, expected_project_id, expected_catalog_generation,
-                        int(requested_parallelism), int(target_count),
-                    )
+                    STATE.begin_import_transfer(import_session_id, expected_project_id, expected_catalog_generation)
                 except ClientError as exc:
                     self._reject_unread_request(exc)
                 except Exception:
@@ -566,9 +563,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 response = None
                 succeeded = False
                 try:
-                    staged_path = self._read_binary_body_to_file(content_length)
-                    requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
-                    try:
+                    with STATE.import_staging_gate:
+                        staged_path = self._read_binary_body_to_file(content_length)
+                        STATE.record_import_transfer_bytes(import_session_id, content_length)
+                        requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
+                        try:
                             # Keep implicit API callers from splitting a
                             # parallel empty-catalog upload across IDs. This
                             # lock only verifies that the browser is still
@@ -601,12 +600,31 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     STATE.end_import_transfer(import_session_id, succeeded=succeeded)
                 self._json(response)
                 return
+            manual_parts = path.split("/")
+            if len(manual_parts) == 8 and manual_parts[1:4] == ["api", "workspace", "manual"] and manual_parts[5] == "layer":
+                image_id, session_id, layer = manual_parts[4], manual_parts[6], manual_parts[7]
+                self._require_binary_import_request()
+                content_length = self._request_body_length(required=True)
+                try:
+                    expected_project_id, expected_catalog_generation = self._catalog_expectation()
+                    target = self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                    lambda: STATE.manual_upload_layer_path(image_id, session_id, layer))
+                except ClientError as exc:
+                    self._reject_unread_request(exc)
+                self._read_binary_body_to_path(target, content_length)
+                self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                       lambda: STATE.finish_manual_upload_layer(image_id, session_id, layer, content_length))
+                self._json({"ok": True})
+                return
             self._require_json_request()
             payload = self._read_json_body()
             expected_project_id, expected_catalog_generation = self._catalog_expectation(payload)
             if operation is not None and (details := _operation_log_details(path, payload)):
                 LOGGER.info("操作対象: %s [%s]%s", operation[0], operation[1], details)
-            if path == "/api/import/finish":
+            if path == "/api/import/start":
+                self._json(STATE.start_import_session(str(payload.get("sessionId", "")), expected_project_id,
+                                                      expected_catalog_generation))
+            elif path == "/api/import/finish":
                 completed = payload.get("completed", 0)
                 if isinstance(completed, bool) or not isinstance(completed, int) or completed < 0:
                     raise ClientError("画像追加の完了件数が正しくありません。", "input_invalid")
@@ -618,6 +636,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                                                             "failed": bool(payload.get("failed", False)),
                                                             "cancelled": bool(payload.get("cancelled", False)),
                                                         }))
+            elif path == "/api/import/cancel":
+                self._json(STATE.cancel_import_session(str(payload.get("sessionId", "")), expected_project_id,
+                                                        expected_catalog_generation))
             elif path == "/api/folder":
                 _result, snapshot = self._catalog_transition_snapshot(
                     lambda: STATE.set_root(str(payload.get("path", "")), expected_project_id=expected_project_id,
@@ -692,6 +713,20 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/workspace/images":
                 self._json({"flags": self._catalog_mutation(expected_project_id, expected_catalog_generation,
                                                               lambda: STATE.set_image_flags_bulk(payload))})
+            elif path.startswith("/api/workspace/manual/") and path.endswith("/begin"):
+                image_id = path.removeprefix("/api/workspace/manual/").removesuffix("/begin").rstrip("/")
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.begin_manual_upload(image_id, str(payload.get("sessionId", "")), payload.get("dirtyLayers"))))
+            elif path.startswith("/api/workspace/manual/") and path.endswith("/commit"):
+                image_id = path.removeprefix("/api/workspace/manual/").removesuffix("/commit").rstrip("/")
+                self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                       lambda: STATE.commit_manual_upload(image_id, str(payload.get("sessionId", "")), payload))
+                self._json({"ok": True})
+            elif path.startswith("/api/workspace/manual/") and path.endswith("/cancel"):
+                image_id = path.removeprefix("/api/workspace/manual/").removesuffix("/cancel").rstrip("/")
+                self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                       lambda: STATE.cancel_manual_upload(image_id, str(payload.get("sessionId", ""))))
+                self._json({"ok": True})
             elif path.startswith("/api/workspace/manual/"):
                 self._catalog_mutation(expected_project_id, expected_catalog_generation,
                                        lambda: STATE.save_manual_workspace(path.removeprefix("/api/workspace/manual/"), payload))
@@ -975,11 +1010,26 @@ class MosaicHandler(BaseHTTPRequestHandler):
         if content_length is None:
             content_length = self._request_body_length(required=True)
         try:
-            raw = self.rfile.read(content_length)
-            if len(raw) != content_length:
-                self._reject_unread_request(ClientError("リクエストを最後まで読み込めません。", "input_invalid"))
-            payload = json.loads(raw.decode("utf-8"))
-        except ValueError as exc:
+            remaining = content_length
+            # JSON operations are normally small, but keep framing safe even
+            # when a catalogue has a long image list.  Large mask PNGs use the
+            # binary transaction route and never pass through this parser.
+            with tempfile.SpooledTemporaryFile(max_size=IO_CHUNK_BYTES, mode="w+b") as staged:
+                while remaining:
+                    chunk = self.rfile.read(min(IO_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        self._reject_unread_request(ClientError("リクエストを最後まで読み込めません。", "input_invalid"))
+                    staged.write(chunk)
+                    remaining -= len(chunk)
+                staged.seek(0)
+                text = io.TextIOWrapper(staged, encoding="utf-8")
+                try:
+                    payload = json.load(text)
+                finally:
+                    text.detach()
+        except ClientError:
+            raise
+        except (UnicodeDecodeError, ValueError) as exc:
             raise ClientError("JSONを読み込めません。", "input_invalid") from exc
         if not isinstance(payload, dict):
             raise ClientError("JSONオブジェクトが必要です。", "input_invalid")
@@ -1007,6 +1057,29 @@ class MosaicHandler(BaseHTTPRequestHandler):
             result = temporary_path
             temporary_path = None
             return result
+        except Exception:
+            self.close_connection = True
+            raise
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
+    def _read_binary_body_to_path(self, target: Path, content_length: int) -> None:
+        """Stream one framed binary body to its private transaction directory."""
+        temporary_path: Path | None = None
+        remaining = content_length
+        try:
+            with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".upload.tmp", delete=False) as handle:
+                temporary_path = Path(handle.name)
+                while remaining:
+                    chunk = self.rfile.read(min(IO_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        self._reject_unread_request(ClientError("手描きマスクを最後まで読み込めません。", "image_read_failed"))
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+                handle.flush()
+            temporary_path.replace(target)
+            temporary_path = None
         except Exception:
             self.close_connection = True
             raise

@@ -386,6 +386,42 @@ function workspaceDraftPayload(draft) {
   return payload;
 }
 
+async function uploadManualLayer(imageId, sessionId, layer, dataUrl) {
+  const blob = await fetch(dataUrl).then((response) => response.blob());
+  const response = await fetch(`/api/workspace/manual/${encodeURIComponent(imageId)}/layer/${encodeURIComponent(sessionId)}/${layer}`, {
+    method: "POST",
+    headers: catalogRequestHeaders({ "Content-Type": "application/octet-stream" }),
+    body: blob,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw responseError(response, data);
+  applyCatalogGeneration(data);
+}
+
+async function saveWorkspaceDraft(imageId, draft) {
+  if (!draft) return api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, { method: "DELETE" });
+  const payload = workspaceDraftPayload(draft);
+  const dirtyLayers = Array.isArray(payload.dirtyLayers) ? payload.dirtyLayers : [];
+  if (!dirtyLayers.length) return api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, { method: "POST", body: JSON.stringify(payload) });
+  const sessionId = crypto.randomUUID();
+  await api(`/api/workspace/manual/${encodeURIComponent(imageId)}/begin`, { method: "POST", body: JSON.stringify({ sessionId, dirtyLayers }) });
+  try {
+    const emptyLayers = [];
+    for (const layer of dirtyLayers) {
+      const value = draft[layer] || "";
+      if (!value) { emptyLayers.push(layer); continue; }
+      await uploadManualLayer(imageId, sessionId, layer, value);
+    }
+    delete payload.add; delete payload.exclusion; delete payload.exclusionErase;
+    payload.emptyLayers = emptyLayers;
+    payload.sessionId = sessionId;
+    return await api(`/api/workspace/manual/${encodeURIComponent(imageId)}/commit`, { method: "POST", body: JSON.stringify(payload) });
+  } catch (error) {
+    await api(`/api/workspace/manual/${encodeURIComponent(imageId)}/cancel`, { method: "POST", body: JSON.stringify({ sessionId }) }).catch(() => {});
+    throw error;
+  }
+}
+
 function queueWorkspaceDraft(imageId, immediate = false) {
   if (!imageId || !state.images.some((image) => image.id === imageId)) return Promise.resolve();
   const previousTimer = state.workspaceDraftTimers.get(imageId);
@@ -393,11 +429,7 @@ function queueWorkspaceDraft(imageId, immediate = false) {
   const write = () => {
     state.workspaceDraftTimers.delete(imageId);
     const draft = state.drafts.get(imageId);
-    const payload = workspaceDraftPayload(draft);
-    const request = draft
-      ? { method: "POST", body: JSON.stringify(payload) }
-      : { method: "DELETE" };
-    const persisted = queueWorkspaceMutation(imageId, () => api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, request));
+    const persisted = queueWorkspaceMutation(imageId, () => saveWorkspaceDraft(imageId, draft));
     return persisted.then((result) => {
       if (draft && state.drafts.get(imageId) === draft) {
         draft.dirtyLayers = [];

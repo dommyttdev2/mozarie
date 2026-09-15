@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 from .core import (
-    IO_CHUNK_BYTES, SAVE_TOKEN_TTL_SECONDS, BrowserSaveReceipt,
+    IO_CHUNK_BYTES, BrowserSaveReceipt,
     BrowserSaveRender, CandidateRole, ClientError,
     ImageRecord, JobControl, safe_import_relative_path, _read_mosaic_divisor,
     _read_save_suffix,
@@ -386,7 +386,6 @@ class SavingMixin:
         thumbnail_paths: list[Path] = []
         source_stage = None
         quarantine_path: Path | None = None
-        expired_token = False
 
         def token_allows_action(details: BrowserSaveToken) -> bool:
             if details.no_effect:
@@ -438,14 +437,8 @@ class SavingMixin:
                         raise ClientError("形式変換はコピー保存で行ってください。", "input_invalid")
                     if not token_allows_action(token_details):
                         raise ClientError("保存確認トークンと元画像の処理が一致しません。保存をやり直してください。", "save_state_changed")
-                    if token_details.issued_at < time.monotonic() - SAVE_TOKEN_TTL_SECONDS:
-                        self._discard_browser_save_token_unchecked(save_token)
-                        cleanup_paths = self._take_browser_save_cleanup_unchecked()
-                        expired_token = True
                     catalog_invalid = token_details.catalog_generation != self.catalog_generation or record is None
-                    if expired_token:
-                        pass
-                    elif catalog_invalid:
+                    if catalog_invalid:
                         self._discard_browser_save_token_unchecked(save_token)
                         cleanup_paths = self._take_browser_save_cleanup_unchecked()
                     elif self._has_active_worker():
@@ -462,9 +455,6 @@ class SavingMixin:
                         # source I/O; retain its token until the DB commit so a
                         # failed commit can be retried safely.
 
-                if expired_token:
-                    self._unlink_browser_save_cleanup(cleanup_paths)
-                    raise ClientError("保存確認トークンが無効または期限切れです。保存をやり直してください。", "save_state_changed")
                 if catalog_invalid:
                     self._unlink_browser_save_cleanup(cleanup_paths)
                     raise ClientError("画像一覧が変更されました。保存をやり直してください。", "save_state_changed")
@@ -549,7 +539,7 @@ class SavingMixin:
                         self.catalog_generation += 1
                     self.browser_save_tokens.pop(save_token, None)
                     response_generation = self.catalog_generation
-                    self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, response_generation, time.monotonic())
+                    self.browser_save_receipts[save_token] = BrowserSaveReceipt(image_id, revision, source_action, cleared, not cleared, deleted, response_generation)
                     rendered_path = token_details.rendered_path
                     if deleted:
                         self._discard_browser_save_tokens_for_image_unchecked(image_id)
@@ -557,8 +547,6 @@ class SavingMixin:
                     thumbnail_paths = list((self.cache_dir / "thumbnails").glob(f"{image_id}-*.jpg"))
                 if mask_paths:
                     self._delete_mask_files(mask_paths, candidate_dirs)
-                if deleted:
-                    self.cleanup_expired_browser_save_tokens()
                 for thumbnail_path in thumbnail_paths:
                     thumbnail_path.unlink(missing_ok=True)
                 if rendered_path is not None:
