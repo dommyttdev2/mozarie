@@ -76,7 +76,7 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
         with patch("mozarie.http.Path.is_file", return_value=True), patch(
             "mozarie.http.subprocess.run", return_value=invalid
         ):
-            with self.assertRaisesRegex(ClientError, "選択結果"):
+            with self.assertRaisesRegex(ClientError, "failed"):
                 http_module._run_native_picker("x", {}, failed_message="failed", busy_message="busy", state=state)
 
     def test_unexpected_request_faults_preserve_gpu_recovery_contract_for_each_verb(self) -> None:
@@ -86,6 +86,7 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
             failures.append((error, status))
 
         state = Mock()
+        state.catalog_request.return_value = contextlib.nullcontext()
         state.recover_gpu_oom_for_request.return_value = ClientError("GPU", "gpu_oom")
         state.catalog_snapshot.side_effect = RuntimeError("GPU out of memory")
         get_handler = handler(); get_handler.path = "/api/images"
@@ -99,6 +100,7 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
         post_handler = handler(); post_handler.path = "/api/boundary"
         post_handler._require_json_request = lambda: None
         post_handler._read_json_body = lambda: {"imageId": "image"}
+        post_handler._catalog_expectation = lambda _payload=None: (None, 0)
         post_handler._client_error = capture
         with patch.object(http_module, "STATE", state):
             post_handler.do_POST()
@@ -106,6 +108,7 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
         state.remove_image_from_catalog.side_effect = RuntimeError("database fault")
         delete_handler = handler(); delete_handler.path = "/api/catalog/image/image"
         delete_handler._require_mutation_request = lambda: None
+        delete_handler._catalog_expectation = lambda _payload=None: (None, 0)
         delete_handler._client_error = capture
         with patch.object(http_module, "STATE", state):
             delete_handler.do_DELETE()
@@ -114,13 +117,15 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
 
     def test_project_delete_uses_a_single_delete_api_route(self) -> None:
         state = Mock()
-        request = handler(); request.path = "/api/project/project-id"; request._require_mutation_request = lambda: None; request._json = Mock()
+        state.import_lock = threading.RLock()
+        state.catalog_snapshot.return_value = {"catalogGeneration": 4}
+        request = handler(headers={"X-Mozarie-Expected-Project-Id": "", "X-Mozarie-Expected-Catalog-Generation": "0"}); request.path = "/api/project/project-id"; request._require_mutation_request = lambda: None; request._json = Mock()
         with patch.object(http_module, "STATE", state):
             request.do_DELETE()
-        state.delete_project.assert_called_once_with("project-id")
-        request._json.assert_called_once_with({"deleted": True})
+        state.delete_project.assert_called_once_with("project-id", expected_project_id=None, expected_catalog_generation=0)
+        request._json.assert_called_once_with({"deleted": True, "catalogGeneration": 4})
 
-        missing = handler(); missing.path = "/api/project/"; missing._require_mutation_request = lambda: None
+        missing = handler(); missing.path = "/api/project/"; missing._require_mutation_request = lambda: None; missing._catalog_expectation = lambda _payload=None: (None, 0)
         errors: list[tuple[object, object]] = []; missing._client_error = lambda error, status, *_args: errors.append((error, status))
         with patch.object(http_module, "STATE", state):
             missing.do_DELETE()
@@ -140,7 +145,9 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
         request._json = lambda payload, *_args, **_kwargs: emitted.append(payload)
         request._binary = lambda *_args, **_kwargs: emitted.append("binary")
         request._client_error = lambda error, *_args, **_kwargs: emitted.append(error)
+        request._catalog_expectation = lambda _payload=None: (None, 0)
         state = Mock()
+        state.catalog_request.return_value = contextlib.nullcontext()
         state.settings = {"detection": {"threshold": 0.5, "parallelism": 1}}
         state.model_downloads.start.side_effect = ModelDownloadError("unavailable")
         state.render_browser_save.return_value = BrowserSaveRender(
@@ -188,6 +195,7 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
             state = SimpleNamespace(
                 cache_dir=root / "cache", images=ChangingImages(), lock=threading.RLock(),
                 thumbnail_gate=threading.RLock(), image_io_lock=lambda _id: contextlib.nullcontext(),
+                thumbnail_generation_lock=lambda _id: contextlib.nullcontext(),
                 image_snapshot=lambda _id: record, _assert_record_stat_matches=lambda _record: None,
                 asset_version=lambda _record: "v1",
             )
@@ -239,22 +247,24 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
             request.do_GET()
 
         post_state = Mock()
+        post_state.catalog_request.return_value = contextlib.nullcontext()
         post_state.add_boundary_candidate.side_effect = RuntimeError("GPU memory")
         post_state.recover_gpu_oom_for_request.return_value = ClientError("GPU", "gpu_oom")
-        request = handler(); request.path = "/api/boundary"; request._require_json_request = lambda: None; request._read_json_body = lambda: {"imageId": "image"}; request._client_error = capture
+        request = handler(); request.path = "/api/boundary"; request._require_json_request = lambda: None; request._read_json_body = lambda: {"imageId": "image"}; request._catalog_expectation = lambda _payload=None: (None, 0); request._client_error = capture
         with patch.object(http_module, "STATE", post_state):
             request.do_POST()
 
         delete_state = Mock()
+        delete_state.catalog_request.return_value = contextlib.nullcontext()
         delete_state.remove_image_from_catalog.side_effect = RuntimeError("GPU memory")
         delete_state.recover_gpu_oom_for_request.return_value = ClientError("GPU", "gpu_oom")
-        request = handler(); request.path = "/api/catalog/image/image"; request._require_mutation_request = lambda: None; request._client_error = capture
+        request = handler(); request.path = "/api/catalog/image/image"; request._require_mutation_request = lambda: None; request._catalog_expectation = lambda _payload=None: (None, 0); request._client_error = capture
         with patch.object(http_module, "STATE", delete_state):
             request.do_DELETE()
 
         request = handler(); request.path = "/api/catalog/image/image"; request._require_mutation_request = lambda: (_ for _ in ()).throw(http_module.ForbiddenClientError("no", "session_expired")); request._client_error = capture
         request.do_DELETE()
-        request = handler(); request.path = "/api/candidate/image"; request._require_mutation_request = lambda: None; request._client_error = capture
+        request = handler(); request.path = "/api/candidate/image"; request._require_mutation_request = lambda: None; request._catalog_expectation = lambda _payload=None: (None, 0); request._client_error = capture
         with patch.object(http_module, "STATE", Mock()):
             request.do_DELETE()
         self.assertEqual([status for _error, status in emitted], [http_module.HTTPStatus.INTERNAL_SERVER_ERROR, http_module.HTTPStatus.BAD_REQUEST, http_module.HTTPStatus.BAD_REQUEST, http_module.HTTPStatus.FORBIDDEN, http_module.HTTPStatus.BAD_REQUEST])
@@ -291,7 +301,7 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory); source = root / "source.png"; Image.new("RGB", (8, 8), "white").save(source)
             record = ImageRecord("image", source, "source.png", 8, 8, source.stat().st_mtime_ns, source.stat().st_size)
-            base_state = dict(cache_dir=root / "cache", lock=threading.RLock(), thumbnail_gate=threading.RLock(), image_io_lock=lambda _id: contextlib.nullcontext(), image_snapshot=lambda _id: record, _assert_record_stat_matches=lambda _record: None, asset_version=lambda _record: "v1")
+            base_state = dict(cache_dir=root / "cache", lock=threading.RLock(), thumbnail_gate=threading.RLock(), thumbnail_generation_lock=lambda _id: contextlib.nullcontext(), image_io_lock=lambda _id: contextlib.nullcontext(), image_snapshot=lambda _id: record, _assert_record_stat_matches=lambda _record: None, asset_version=lambda _record: "v1")
             stale = SimpleNamespace(**base_state, images={})
             with patch.object(http_module, "STATE", stale), self.assertRaises(ClientError):
                 handler()._send_image("image", thumbnail=True, version="v1")
