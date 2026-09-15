@@ -625,9 +625,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
                                                     lambda: STATE.manual_upload_layer_path(image_id, session_id, layer))
                 except ClientError as exc:
                     self._reject_unread_request(exc)
-                self._read_binary_body_to_path(target, content_length)
-                self._catalog_mutation(expected_project_id, expected_catalog_generation,
-                                       lambda: STATE.finish_manual_upload_layer(image_id, session_id, layer, content_length))
+                try:
+                    self._read_binary_body_to_path(target, content_length)
+                    self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                           lambda: STATE.finish_manual_upload_layer(image_id, session_id, layer, content_length))
+                except Exception:
+                    STATE.abort_manual_upload_layer(image_id, session_id, layer)
+                    raise
                 self._json({"ok": True})
                 _log_operation_finished(operation, operation_started_at)
                 return

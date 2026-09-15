@@ -425,6 +425,22 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
     def _valid_manual_layer(value: Any) -> bool:
         return value in {"add", "exclusion", "exclusionErase"}
 
+    def _discard_manual_upload_unchecked(self, session_id: str, session: dict[str, Any], reason: str) -> None:
+        """Delete a non-writing manual transaction while retaining it if Windows refuses cleanup."""
+        try:
+            shutil.rmtree(session["directory"])
+        except OSError as exc:
+            LOGGER.error("手描きマスク転送を片付けられません: %s", exc)
+            raise ClientError("手描きマスクの一時データを片付けられません。もう一度実行してください。", "workspace_write_failed") from exc
+        self._manual_uploads.pop(session_id, None)
+        LOGGER.info("手描きマスク転送を放棄: %s", reason)
+
+    @staticmethod
+    def _release_manual_writer(session: dict[str, Any]) -> None:
+        writer = session.get("writer")
+        if writer is not None and writer.locked():
+            writer.release()
+
     def begin_manual_upload(self, image_id: str, session_id: str, dirty_layers: Any) -> dict[str, str]:
         """Start a small, explicit transaction for streamed hand-drawn PNG layers."""
         if not self._valid_import_session_id(session_id):
@@ -443,16 +459,24 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 if stale["image_id"] == image_id and stale["catalog_id"] == self.catalog_id
                 and stale["catalog_generation"] == self.catalog_generation
             ]
-            for stale_id, stale in stale_sessions:
-                self._manual_uploads.pop(stale_id, None)
-                shutil.rmtree(stale["directory"], ignore_errors=True)
-            if stale_sessions:
-                LOGGER.info("手描きマスク転送を放棄: 次の保存で置換 件数=%d", len(stale_sessions))
+            claimed: list[dict[str, Any]] = []
+            for _stale_id, stale in stale_sessions:
+                writer = stale["writer"]
+                if not writer.acquire(blocking=False):
+                    for claimed_session in claimed: self._release_manual_writer(claimed_session)
+                    raise ClientError("手描きマスクを転送中です。完了後にもう一度実行してください。", "operation_in_progress")
+                claimed.append(stale)
+            try:
+                for stale_id, stale in stale_sessions:
+                    self._discard_manual_upload_unchecked(stale_id, stale, "次の保存で置換")
+            finally:
+                for claimed_session in claimed: self._release_manual_writer(claimed_session)
             directory = self.cache_dir / "manual-staging" / session_id
             directory.mkdir(parents=True, exist_ok=False)
             self._manual_uploads[session_id] = {
                 "image_id": image_id, "catalog_id": self.catalog_id, "catalog_generation": self.catalog_generation,
                 "layers": requested, "uploaded": set(), "directory": directory, "started_at": time.monotonic(), "writing": None,
+                "writer": threading.Lock(), "abandon_reason": None,
             }
         LOGGER.info("手描きマスク転送を開始: レイヤー=%d件", len(requested))
         return {"sessionId": session_id}
@@ -465,7 +489,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if (session is None or session["image_id"] != image_id or layer not in session["layers"]
                     or session["catalog_id"] != self.catalog_id or session["catalog_generation"] != self.catalog_generation):
                 raise ClientError("手描き保存を開始し直してください。", "stale_catalog")
-            if session["writing"] is not None:
+            if not session["writer"].acquire(blocking=False):
                 raise ClientError("手描きマスクを転送中です。完了後にもう一度実行してください。", "operation_in_progress")
             session["writing"] = layer
             return session["directory"] / f"{layer}.png"
@@ -475,9 +499,29 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             session = self._manual_uploads.get(session_id)
             if session is None or session["image_id"] != image_id or layer not in session["layers"] or session["writing"] != layer:
                 raise ClientError("手描き保存を開始し直してください。", "stale_catalog")
-            session["uploaded"].add(layer)
-            session["writing"] = None
+            try:
+                if session["abandon_reason"] is not None:
+                    self._discard_manual_upload_unchecked(session_id, session, str(session["abandon_reason"]))
+                    raise ClientError("画像一覧が更新されました。もう一度操作してください。", "stale_catalog")
+                session["uploaded"].add(layer)
+                session["writing"] = None
+            finally:
+                self._release_manual_writer(session)
         LOGGER.info("手描きマスク転送: レイヤー=%s bytes=%d", layer, byte_count)
+
+    def abort_manual_upload_layer(self, image_id: str, session_id: str, layer: str) -> None:
+        """Release a writer claim after a disconnected or failed binary body."""
+        with self.lock:
+            session = self._manual_uploads.get(session_id)
+            if session is None or session["image_id"] != image_id or session["writing"] != layer:
+                return
+            try:
+                if session["abandon_reason"] is not None:
+                    self._discard_manual_upload_unchecked(session_id, session, str(session["abandon_reason"]))
+                else:
+                    session["writing"] = None
+            finally:
+                self._release_manual_writer(session)
 
     def commit_manual_upload(self, image_id: str, session_id: str, payload: dict[str, Any]) -> None:
         if not self._valid_import_session_id(session_id):
@@ -487,23 +531,39 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if (session is None or session["image_id"] != image_id or session["catalog_id"] != self.catalog_id
                     or session["catalog_generation"] != self.catalog_generation):
                 raise ClientError("手描き保存を開始し直してください。", "stale_catalog")
-            empty_layers = payload.get("emptyLayers", [])
-            if not isinstance(empty_layers, list) or any(layer not in session["layers"] for layer in empty_layers):
-                raise ClientError("手描き保存のレイヤーが正しくありません。", "input_invalid")
-            empty = set(empty_layers)
-            if session["layers"] != session["uploaded"] | empty:
-                raise ClientError("手描きマスクを最後まで受信していません。", "input_invalid")
-            directory = session["directory"]
-            committed = dict(payload)
-            committed["dirtyLayers"] = sorted(session["layers"])
-            for layer in session["layers"]:
-                committed[layer] = "" if layer in empty else (directory / f"{layer}.png").read_bytes()
+            if not session["writer"].acquire(blocking=False):
+                raise ClientError("手描きマスクを転送中です。完了後にもう一度実行してください。", "operation_in_progress")
+            try:
+                session["writing"] = "commit"
+                empty_layers = payload.get("emptyLayers", [])
+                if not isinstance(empty_layers, list) or any(layer not in session["layers"] for layer in empty_layers):
+                    raise ClientError("手描き保存のレイヤーが正しくありません。", "input_invalid")
+                empty = set(empty_layers)
+                if session["layers"] != session["uploaded"] | empty:
+                    raise ClientError("手描きマスクを最後まで受信していません。", "input_invalid")
+                directory = session["directory"]
+                committed = dict(payload)
+                committed["dirtyLayers"] = sorted(session["layers"])
+                for layer in session["layers"]:
+                    committed[layer] = "" if layer in empty else (directory / f"{layer}.png").read_bytes()
+            except Exception:
+                session["writing"] = None
+                self._release_manual_writer(session)
+                raise
         try:
             self.save_manual_workspace(image_id, committed)
         finally:
             with self.lock:
-                self._manual_uploads.pop(session_id, None)
-            shutil.rmtree(directory, ignore_errors=True)
+                current = self._manual_uploads.get(session_id)
+                if current is session:
+                    session["writing"] = None
+                    try:
+                        reason = str(session["abandon_reason"]) if session["abandon_reason"] is not None else "確定"
+                        self._discard_manual_upload_unchecked(session_id, session, reason)
+                    finally:
+                        self._release_manual_writer(session)
+                else:
+                    self._release_manual_writer(session)
         LOGGER.info("手描きマスク転送を完了: レイヤー=%d件 所要=%.2f秒", len(session["layers"]), time.monotonic() - session["started_at"])
 
     def cancel_manual_upload(self, image_id: str, session_id: str) -> None:
@@ -511,18 +571,23 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             session = self._manual_uploads.get(session_id)
             if session is None or session["image_id"] != image_id:
                 return
-            self._manual_uploads.pop(session_id, None)
-            directory = session["directory"]
-        shutil.rmtree(directory, ignore_errors=True)
-        LOGGER.info("手描きマスク転送を取消: 所要=%.2f秒", time.monotonic() - session["started_at"])
+            if not session["writer"].acquire(blocking=False):
+                raise ClientError("手描きマスクを転送中です。完了後にもう一度実行してください。", "operation_in_progress")
+            try:
+                self._discard_manual_upload_unchecked(session_id, session, "取消")
+            finally:
+                self._release_manual_writer(session)
 
     def _cancel_manual_uploads_unchecked(self, reason: str) -> None:
         """Call while ``lock`` is held when a catalogue transition invalidates staged layers."""
-        for session in self._manual_uploads.values():
-            shutil.rmtree(session["directory"], ignore_errors=True)
-        if self._manual_uploads:
-            LOGGER.info("手描きマスク転送を放棄: %s 件数=%d", reason, len(self._manual_uploads))
-        self._manual_uploads.clear()
+        for session_id, session in tuple(self._manual_uploads.items()):
+            if not session["writer"].acquire(blocking=False):
+                session["abandon_reason"] = reason
+                continue
+            try:
+                self._discard_manual_upload_unchecked(session_id, session, reason)
+            finally:
+                self._release_manual_writer(session)
 
     def settings_status(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
         """Report configured model files without loading model data."""

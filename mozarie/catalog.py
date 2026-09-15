@@ -1728,6 +1728,12 @@ class CatalogMixin:
         LOGGER.info("ブラウザー保存を置換: 未確定=%d件", len(pending))
         self._unlink_browser_save_cleanup(self._take_browser_save_cleanup_unchecked())
 
+    def _prune_browser_save_receipts_for_image_unchecked(self, image_id: str) -> None:
+        """Keep the latest committed retry receipt until this image is saved again."""
+        receipts = [token for token, receipt in self.browser_save_receipts.items() if receipt.image_id == image_id]
+        for token in receipts[:-1]:
+            self.browser_save_receipts.pop(token, None)
+
     def _has_active_browser_save_for_image_unchecked(self, image_id: str) -> bool:
         return any(details.image_id == image_id for details in self.browser_save_tokens.values())
 
@@ -1752,6 +1758,7 @@ class CatalogMixin:
     ) -> str:
         self._assert_request_catalog_expectation()
         self._replace_browser_save_tokens_for_image_unchecked(record.image_id)
+        self._prune_browser_save_receipts_for_image_unchecked(record.image_id)
         token = secrets.token_urlsafe(32)
         self.browser_save_tokens[token] = BrowserSaveToken(
             image_id=record.image_id,
