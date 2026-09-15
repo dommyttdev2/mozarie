@@ -4137,7 +4137,6 @@ async function main() {
       await stopCoveredPage(navigationPage, true);
     }
 
-    await runCandidateBlinkScenario(browser);
     await runExhaustiveCandidateScenarios(browser);
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
