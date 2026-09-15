@@ -1596,6 +1596,20 @@ class WorkspaceStore:
             return None
         return dict(receipt) if isinstance(receipt, dict) else None
 
+    def apply_save_receipts(self) -> list[dict[str, Any]]:
+        """Return only short-lived background apply receipts awaiting cleanup."""
+        with self._lock, self._connect() as db:
+            rows = db.execute("SELECT receipt_json FROM browser_save_receipts").fetchall()
+        receipts: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                receipt = json.loads(str(row["receipt_json"]))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(receipt, dict) and receipt.get("kind") == "apply" and isinstance(receipt.get("token"), str):
+                receipts.append(receipt)
+        return receipts
+
     def acknowledge_browser_save_receipt(self, token: str) -> bool:
         with self._lock, self._connect() as db:
             result = db.execute("DELETE FROM browser_save_receipts WHERE token=?", (token,))

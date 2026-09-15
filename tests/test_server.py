@@ -56,6 +56,7 @@ from mozarie.image_io import (  # noqa: E402
     _default_output_destination, render_with_mask,
 )
 from mozarie.http import MosaicHandler, _read_mosaic_divisor, _read_detection_parallelism, _read_save_suffix  # noqa: E402
+from mozarie.save_journal import SaveJournal  # noqa: E402
 from mozarie.state import DetectionModels, StudioState  # noqa: E402
 from server import _open_browser, _schedule_browser_open  # noqa: E402
 
@@ -7806,6 +7807,86 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             self.assertTrue(mask_path.is_file())
             self.assertEqual(list(output.rglob("*.png")), [])
             self.assertEqual(state._candidate_revision(image_id), revision)
+
+    def test_background_overwrite_database_failure_restores_the_journaled_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            original = source.read_bytes()
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id)
+            state.job = core_module.Job(started_at=time.time(), kind="apply", state="running", total=1, image_ids=(image_id,))
+
+            with patch.object(state.workspace_store, "commit_save", side_effect=OSError("database locked")):
+                state._apply_worker([record], 100, {image_id: self._mask(16, 16)})
+
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(source.read_bytes(), original)
+            db = sqlite3.connect(state.save_journal.path)
+            try:
+                rows = db.execute("SELECT state,source_path,quarantine FROM saves").fetchall()
+            finally:
+                db.close()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][0], "cancelled")
+            self.assertTrue(rows[0][1])
+            self.assertTrue(rows[0][2])
+
+    def test_background_overwrite_reports_a_pending_journal_restore(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id)
+            state.job = core_module.Job(started_at=time.time(), kind="apply", state="running", total=1, image_ids=(image_id,))
+
+            with patch.object(SaveJournal, "_restore_quarantine", return_value=False), \
+                    patch.object(state.workspace_store, "commit_save", side_effect=OSError("database locked")):
+                state._apply_worker([record], 100, {image_id: self._mask(16, 16)})
+
+            self.assertEqual(state.job.state, "error")
+            self.assertIn("復元を保留", state.job.error)
+            stat = source.stat()
+            self.assertEqual(record.asset_fingerprint(), (stat.st_mtime_ns, stat.st_size))
+            self.assertIn(image_id, state.source_mismatches)
+            db = sqlite3.connect(state.save_journal.path)
+            try:
+                self.assertEqual(db.execute("SELECT state FROM saves").fetchone()[0], "cleanup_pending")
+            finally:
+                db.close()
+
+    def test_background_overwrite_receipt_recovers_its_journaled_backup_at_startup(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            state._touch_candidates(image_id)
+            state.job = core_module.Job(started_at=time.time(), kind="apply", state="running", total=1, image_ids=(image_id,))
+
+            with patch.object(state.save_journal, "recover_token", return_value=False):
+                state._apply_worker([record], 100, {image_id: self._mask(16, 16)})
+
+            receipts = state.workspace_store.apply_save_receipts()
+            self.assertEqual(len(receipts), 1)
+            receipt = receipts[0]; token = str(receipt["token"])
+            row = state.save_journal.row(token)
+            self.assertEqual(row["state"], "pending")
+            self.assertEqual(row["recovery_decision"], "commit")
+            self.assertTrue(Path(str(row["quarantine"])).exists())
+            state.shutdown()
+            recovered = self.new_state()
+            self.assertFalse(Path(str(row["quarantine"])).exists())
+            self.assertIsNone(recovered.save_journal.row(token))
+            self.assertEqual(recovered.workspace_store.apply_save_receipts(), [])
 
     def test_detection_configuration_and_model_loading_error_paths(self):
         state = self.new_state()

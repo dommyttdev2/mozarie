@@ -89,6 +89,12 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.workspace_store = WorkspaceStore(APP_DIR / "data")
         self.save_journal = SaveJournal(APP_DIR / "data")
         self.save_journal.recover(self.workspace_store.browser_save_receipt)
+        # The pass above resolves file ownership.  Background apply receipts
+        # have no browser ACK, so compact them only after that succeeds.
+        for receipt in self.workspace_store.apply_save_receipts():
+            token = str(receipt["token"])
+            if self.save_journal.recover_token(token, lambda _token, receipt=receipt: receipt) and self.save_journal.acknowledge(token):
+                self.workspace_store.acknowledge_browser_save_receipt(token)
         # ``catalog_id`` is the public named-project identity.  An unnamed
         # screen uses ``workspace_id`` too, but that internal catalog never
         # appears in the projects list or request expectations.
