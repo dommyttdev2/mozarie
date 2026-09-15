@@ -1058,7 +1058,7 @@ async function runHandleOverwriteCase() {
 
 async function runHandleOverwriteChangedDuringRenderCase() {
   let writes = 0;
-  let sourceFile = { name: "source.png", size: 12, lastModified: 34 };
+  let sourceFile = { name: "source.png", size: 12, lastModified: 34, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } };
   const sourceHandle = {
     async getFile() { return sourceFile; },
     async createWritable() {
