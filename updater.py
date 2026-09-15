@@ -356,6 +356,10 @@ def _safe_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
     name = info.filename
     if not name or "\x00" in name or "\\" in name:
         raise UpdateError(tr("archive_invalid_path"))
+    raw_parts = name.split("/")
+    segments = raw_parts[:-1] if info.is_dir() else raw_parts
+    if (info.is_dir() and raw_parts[-1] != "") or any(part in {"", ".", ".."} for part in segments):
+        raise UpdateError(tr("archive_invalid_path"))
     path = PurePosixPath(name)
     if path.is_absolute() or any(part in {"", ".", ".."} or ":" in part for part in path.parts):
         raise UpdateError(tr("archive_invalid_path"))
