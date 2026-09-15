@@ -410,7 +410,7 @@ class UpdaterTests(unittest.TestCase):
                 contents.pop(f"wrapper/{name}")
                 contents[f"wrapper/{name}/child"] = "not a required file"
                 write_archive(archive, contents)
-                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_missing_app"))):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_unexpected_file"))):
                     updater.extract_archive(archive, root / "out")
 
     def test_safe_extract_rejects_required_directory_files(self):
@@ -424,7 +424,7 @@ class UpdaterTests(unittest.TestCase):
                         contents.pop(path)
                 contents[f"wrapper/{name}"] = "not a required directory"
                 write_archive(archive, contents)
-                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_missing_app"))):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_unexpected_file"))):
                     updater.extract_archive(archive, root / "out")
 
     def test_safe_extract_rejects_missing_version(self):
