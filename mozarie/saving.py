@@ -264,46 +264,47 @@ class SavingMixin:
                 exclude_union: np.ndarray | None = None
                 forced_exclude_union: np.ndarray | None = None
                 add_mask, exclusion_mask, exclusion_erase_mask = draft_masks
-                for candidate in candidates:
-                    try:
-                        self.materialize_candidate_mask(candidate, image_id)
-                        with open_image(candidate.mask_path) as mask_image:
-                            candidate_mask = expand_mask(np.asarray(mask_image.convert("L"), dtype=np.uint8), candidate.expand_px)
-                    except FileNotFoundError as exc:
-                        with self.lock:
-                            if self.images.get(image_id) is not None:
-                                self._commit_candidate_snapshot(
-                                    image_id,
-                                    [item for item in self.candidates.get(image_id, []) if item.candidate_id != candidate.candidate_id],
-                                    replace=True,
-                                )
-                        raise ClientError("候補が変更されました。保存をやり直してください。", "save_state_changed") from exc
-                    except (MemoryError, OSError) as exc:
-                        raise ClientError("保存用の検出マスクを読み込めません。使用可能なメモリを確認してください。", "image_read_failed") from exc
-                    if candidate_mask.shape != shape:
-                        raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
-                    if candidate.role == CandidateRole.APPLY:
-                        apply_union = union_mask(apply_union, candidate_mask)
+                try:
+                    for candidate in candidates:
+                        try:
+                            self.materialize_candidate_mask(candidate, image_id)
+                            with open_image(candidate.mask_path) as mask_image:
+                                candidate_mask = expand_mask(np.asarray(mask_image.convert("L"), dtype=np.uint8), candidate.expand_px)
+                        except FileNotFoundError as exc:
+                            with self.lock:
+                                if self.images.get(image_id) is not None:
+                                    self._commit_candidate_snapshot(
+                                        image_id,
+                                        [item for item in self.candidates.get(image_id, []) if item.candidate_id != candidate.candidate_id],
+                                        replace=True,
+                                    )
+                            raise ClientError("候補が変更されました。保存をやり直してください。", "save_state_changed") from exc
+                        if candidate_mask.shape != shape:
+                            raise RuntimeError("検出マスクのサイズが元画像と一致しません。")
+                        if candidate.role == CandidateRole.APPLY:
+                            apply_union = union_mask(apply_union, candidate_mask)
+                        else:
+                            exclude_union = union_mask(exclude_union, candidate_mask)
+                            if candidate.forced:
+                                forced_exclude_union = union_mask(forced_exclude_union, candidate_mask)
+                    mask = compose_masks(
+                        shape, [apply_union] if apply_union is not None else [], [exclude_union] if exclude_union is not None else [], add_mask, exclusion_mask,
+                        [forced_exclude_union] if forced_exclude_union is not None else [], manual_exclude_forced, exclusion_erase_mask,
+                    )
+                    no_effect = (mask is None or not np.any(mask)) and output_format_matches_source(record, output_format) and keep_metadata and \
+                        record.flip_horizontal == record.source_flip_horizontal and record.flip_vertical == record.source_flip_vertical
+                    source_fingerprint = record.asset_fingerprint()
+                    # Saving every listed image means an image without a mosaic is
+                    # copied as-is.  An overwrite deliberately becomes a commit
+                    # with ``keep`` instead of touching its source file.
+                    if no_effect:
+                        output = read_stable_source_bytes(record, source_fingerprint) if copy_to_default else None
+                        output_suffix = record.path.suffix.lower()
+                        _output_mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(output_suffix, "application/octet-stream")
                     else:
-                        exclude_union = union_mask(exclude_union, candidate_mask)
-                        if candidate.forced:
-                            forced_exclude_union = union_mask(forced_exclude_union, candidate_mask)
-                mask = compose_masks(
-                    shape, [apply_union] if apply_union is not None else [], [exclude_union] if exclude_union is not None else [], add_mask, exclusion_mask,
-                    [forced_exclude_union] if forced_exclude_union is not None else [], manual_exclude_forced, exclusion_erase_mask,
-                )
-                no_effect = (mask is None or not np.any(mask)) and output_format_matches_source(record, output_format) and keep_metadata and \
-                    record.flip_horizontal == record.source_flip_horizontal and record.flip_vertical == record.source_flip_vertical
-                source_fingerprint = record.asset_fingerprint()
-                # Saving every listed image means an image without a mosaic is
-                # copied as-is.  An overwrite deliberately becomes a commit
-                # with ``keep`` instead of touching its source file.
-                if no_effect:
-                    output = read_stable_source_bytes(record, source_fingerprint) if copy_to_default else None
-                    output_suffix = record.path.suffix.lower()
-                    _output_mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(output_suffix, "application/octet-stream")
-                else:
-                    output, output_suffix, _output_mime = render_output(record, mask, calculate_block_size(record.width, record.height, divisor), output_format, keep_metadata)
+                        output, output_suffix, _output_mime = render_output(record, mask, calculate_block_size(record.width, record.height, divisor), output_format, keep_metadata)
+                except (MemoryError, OSError) as exc:
+                    raise ClientError("保存用の画像またはマスクを処理できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
                 if copy_to_default:
                     if not configured_output_directory.is_dir():
                         raise ClientError("保存先フォルダを使用できません。設定で変更してください。", "output_folder_unavailable")

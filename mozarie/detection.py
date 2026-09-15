@@ -918,32 +918,44 @@ class DetectionMixin:
                 self._assert_request_catalog_expectation()
             self._assert_record_stat_matches(record)
         polygon_mask: np.ndarray | None = None
-        if "points" in payload:
-            roi, point, polygon_mask = read_polygon_boundary_request(payload, record.width, record.height)
-        else:
-            roi, point = read_boundary_request(payload, record.width, record.height)
+        try:
+            if "points" in payload:
+                roi, point, polygon_mask = read_polygon_boundary_request(payload, record.width, record.height)
+            else:
+                roi, point = read_boundary_request(payload, record.width, record.height)
+        except (MemoryError, OSError) as exc:
+            raise ClientError("境界候補の範囲を処理できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
         with self.image_io_lock(image_id):
             self._assert_record_stat_matches(record)
-            image, _source, _info = canonical_image(record)
-            rgb = np.asarray(image.convert("RGB")).copy()
+            try:
+                image, _source, _info = canonical_image(record)
+                rgb = np.asarray(image.convert("RGB")).copy()
+            except (MemoryError, OSError) as exc:
+                raise ClientError("境界候補用の画像を読み込めません。使用可能なメモリを確認してください。", "image_read_failed") from exc
         with self.inference_lock:
             with self.lock:
                 if self.job.state in {"running", "pausing"} or self._has_active_worker():
                     raise ClientError("既存の処理が完了してから境界を検出してください。", "operation_in_progress")
             with self.sam_lock:
-                predictor = self._sam_predictor_for(record, rgb)
-                masks, scores, _logits = predictor.predict(
-                    point_coords=np.asarray([point], dtype=np.float32),
-                    point_labels=np.asarray([1], dtype=np.int32),
-                    box=np.asarray(roi, dtype=np.float32),
-                    multimask_output=True,
-                )
-        mask, confidence = select_best_sam_mask(masks, scores)
-        clipped = clip_mask_to_roi(mask, roi)
-        if polygon_mask is not None:
-            clipped = np.where(polygon_mask > 0, clipped, 0).astype(np.uint8)
-        if not np.any(clipped):
-            raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。", "outline_not_found")
+                try:
+                    predictor = self._sam_predictor_for(record, rgb)
+                    masks, scores, _logits = predictor.predict(
+                        point_coords=np.asarray([point], dtype=np.float32),
+                        point_labels=np.asarray([1], dtype=np.int32),
+                        box=np.asarray(roi, dtype=np.float32),
+                        multimask_output=True,
+                    )
+                except (MemoryError, OSError) as exc:
+                    raise ClientError("境界候補を検出できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
+        try:
+            mask, confidence = select_best_sam_mask(masks, scores)
+            clipped = clip_mask_to_roi(mask, roi)
+            if polygon_mask is not None:
+                clipped = np.where(polygon_mask > 0, clipped, 0).astype(np.uint8)
+            if not np.any(clipped):
+                raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。", "outline_not_found")
+        except (MemoryError, OSError) as exc:
+            raise ClientError("境界候補のマスクを処理できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
 
         with self.lock:
             if self.images.get(image_id) is not record:
@@ -952,63 +964,69 @@ class DetectionMixin:
 
         # Keep the selected SAM shape as APPLY. Hand/fluid removal is represented
         # by an independently toggleable EXCLUDE candidate just as in auto detect.
-        boundary_segment = {
-            "class_name": "penis",
-            "confidence": confidence,
-            "mask": clipped.copy(),
-            "source": "boundary",
-        }
+        try:
+            boundary_segment = {
+                "class_name": "penis",
+                "confidence": confidence,
+                "mask": clipped.copy(),
+                "source": "boundary",
+            }
+        except (MemoryError, OSError) as exc:
+            raise ClientError("境界候補のマスクを処理できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
         with self.inference_lock:
             with self.lock:
                 if self.job.state in {"running", "pausing"} or self._has_active_worker():
                     raise ClientError("既存の処理が完了してから境界を検出してください。", "operation_in_progress")
-            hand_mask = np.zeros(rgb.shape[:2], dtype=np.uint8)
-            hand_boxes = self._hand_boxes_over_apply(
-                [box for box in (padded_hand_box(box, rgb.shape[:2]) for box in self._boundary_hand_boxes(rgb)) if box is not None],
-                [clipped],
-            )
-            if hand_boxes and self.settings["models"].get("hand_segmentation_enabled"):
-                with self.hand_segmentation_lock:
-                    specialist = self._hand_segmentation_predictor_for(record, rgb)
-                    for box in hand_boxes:
-                        masks, _scores, _ = specialist.predict(
-                            point_coords=None, point_labels=None, box=np.asarray(box, dtype=np.float32), multimask_output=False,
-                        )
-                        confirmed = accepted_specialist_hand_mask(masks, rgb.shape[:2], box)
-                        if confirmed is not None:
-                            hand_mask = np.maximum(hand_mask, confirmed)
-            if np.any(hand_mask):
-                boundary_segment["image_exclusions"] = {"hand": hand_mask}
-            boundary_segment = self._finalize_exclusions(rgb, [boundary_segment])[0]
-            candidate_id = uuid.uuid4().hex
-            default_padding = min(int(self.settings["detection"]["default_candidate_padding_px"]), int(np.ceil(np.hypot(record.width - 1, record.height - 1))))
-            default_exclude_padding = min(int(self.settings["detection"]["default_exclude_candidate_padding_px"]), int(np.ceil(np.hypot(record.width - 1, record.height - 1))))
-            created = [Candidate(
-                candidate_id=candidate_id,
-                label_token="boundary_polygon" if polygon_mask is not None else "boundary",
-                confidence=confidence,
-                mask_path=self.cache_dir / record.image_id / f"{candidate_id}.png",
-                color="#ffffff", source="boundary", origin="boundary", expand_px=default_padding,
-            )]
-            masks = [np.asarray(clipped, dtype=np.uint8)]
-            exclusions = {
-                **dict(boundary_segment.get("image_exclusions", {})),
-                **dict(boundary_segment.get("exclusions", {})),
-            }
-            for exclusion_kind, exclusion_mask in exclusions.items():
-                if not np.any(exclusion_mask):
-                    continue
-                exclusion_source = f"{exclusion_kind}_exclusion"
-                exclusion_id = uuid.uuid4().hex
-                created.append(Candidate(
-                    candidate_id=exclusion_id, label_token=exclusion_kind, confidence=None,
-                    mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png", color="#4ac3df",
-                    source=exclusion_source, origin="boundary", role=CandidateRole.EXCLUDE,
-                    enabled=True,
-                    forced=self.settings["detection"].get("exclude_forced_default", True),
-                    expand_px=default_exclude_padding,
-                ))
-                masks.append(np.asarray(exclusion_mask, dtype=np.uint8))
+            try:
+                hand_mask = np.zeros(rgb.shape[:2], dtype=np.uint8)
+                hand_boxes = self._hand_boxes_over_apply(
+                    [box for box in (padded_hand_box(box, rgb.shape[:2]) for box in self._boundary_hand_boxes(rgb)) if box is not None],
+                    [clipped],
+                )
+                if hand_boxes and self.settings["models"].get("hand_segmentation_enabled"):
+                    with self.hand_segmentation_lock:
+                        specialist = self._hand_segmentation_predictor_for(record, rgb)
+                        for box in hand_boxes:
+                            masks, _scores, _ = specialist.predict(
+                                point_coords=None, point_labels=None, box=np.asarray(box, dtype=np.float32), multimask_output=False,
+                            )
+                            confirmed = accepted_specialist_hand_mask(masks, rgb.shape[:2], box)
+                            if confirmed is not None:
+                                hand_mask = np.maximum(hand_mask, confirmed)
+                if np.any(hand_mask):
+                    boundary_segment["image_exclusions"] = {"hand": hand_mask}
+                boundary_segment = self._finalize_exclusions(rgb, [boundary_segment])[0]
+                candidate_id = uuid.uuid4().hex
+                default_padding = min(int(self.settings["detection"]["default_candidate_padding_px"]), int(np.ceil(np.hypot(record.width - 1, record.height - 1))))
+                default_exclude_padding = min(int(self.settings["detection"]["default_exclude_candidate_padding_px"]), int(np.ceil(np.hypot(record.width - 1, record.height - 1))))
+                created = [Candidate(
+                    candidate_id=candidate_id,
+                    label_token="boundary_polygon" if polygon_mask is not None else "boundary",
+                    confidence=confidence,
+                    mask_path=self.cache_dir / record.image_id / f"{candidate_id}.png",
+                    color="#ffffff", source="boundary", origin="boundary", expand_px=default_padding,
+                )]
+                masks = [np.asarray(clipped, dtype=np.uint8)]
+                exclusions = {
+                    **dict(boundary_segment.get("image_exclusions", {})),
+                    **dict(boundary_segment.get("exclusions", {})),
+                }
+                for exclusion_kind, exclusion_mask in exclusions.items():
+                    if not np.any(exclusion_mask):
+                        continue
+                    exclusion_source = f"{exclusion_kind}_exclusion"
+                    exclusion_id = uuid.uuid4().hex
+                    created.append(Candidate(
+                        candidate_id=exclusion_id, label_token=exclusion_kind, confidence=None,
+                        mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png", color="#4ac3df",
+                        source=exclusion_source, origin="boundary", role=CandidateRole.EXCLUDE,
+                        enabled=True,
+                        forced=self.settings["detection"].get("exclude_forced_default", True),
+                        expand_px=default_exclude_padding,
+                    ))
+                    masks.append(np.asarray(exclusion_mask, dtype=np.uint8))
+            except (MemoryError, OSError) as exc:
+                raise ClientError("境界候補の手・除外マスクを処理できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
             temporary_paths: list[Path] = []
             try:
                 for item, candidate_mask in zip(created, masks):
@@ -1034,6 +1052,10 @@ class DetectionMixin:
                             )
                     if not catalog_current:
                         raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。", "catalog_changed")
+            except (MemoryError, OSError) as exc:
+                for path in [*temporary_paths, *(item.mask_path for item in created)]:
+                    path.unlink(missing_ok=True)
+                raise ClientError("境界候補のマスクを保存できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
             except Exception:
                 for path in [*temporary_paths, *(item.mask_path for item in created)]:
                     path.unlink(missing_ok=True)
