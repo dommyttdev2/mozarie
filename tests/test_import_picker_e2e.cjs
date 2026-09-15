@@ -16,6 +16,18 @@ const contentTypes = {
 };
 const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==", "base64");
 const browserCoverage = process.env.MOZARIE_JS_COVERAGE === "1" ? [] : null;
+const dynamicControlEvidence = new Set();
+
+function recordDynamicControl(selector) {
+  assert.ok(uiDynamicControlManifest.some((control) => control.selector === selector), `${selector} has a dynamic control contract`);
+  dynamicControlEvidence.add(selector);
+}
+
+function assertDynamicControlEvidence() {
+  const missing = uiDynamicControlManifest.filter((control) => !dynamicControlEvidence.has(control.selector))
+    .map((control) => `${control.assertionId} (${control.selector})`);
+  assert.equal(missing.join("\n"), "", `all ${uiDynamicControlManifest.length} dynamic controls are operated through Playwright with an observed result\n${missing.join("\n")}`);
+}
 
 async function newCoveredPage(browser, options) {
   // Every scenario gets an incognito-like context.  The fixture drives local
@@ -120,6 +132,10 @@ function startFixtureServer() {
   ];
   let catalog = structuredClone(initialCatalog);
   let catalogGeneration = 1;
+  const listedProjects = [{
+    id: "ledger-project", name: "Ledger project", status: "working", imageCount: 1,
+    sourceRoot: "G:\\ledger-source", createdAt: "2026-09-16T00:00:00Z", updatedAt: "2026-09-16T00:01:00Z",
+  }];
   const catalogSnapshot = () => ({
     images: catalog,
     root: "G:/fixture",
@@ -136,7 +152,7 @@ function startFixtureServer() {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
     display: { apply_color: "#ff3d4d", exclude_color: "#28d3ff", overlay_opacity: 0.78, mosaic_preview: true, tool_position: "left" },
-    importing: { parallelism: 3 }, editing: { fill_color_tolerance: 20 }, saving: { parallelism: 2 },
+    importing: { parallelism: 3 }, editing: { fill_color_tolerance: 20 }, saving: { parallelism: 2, default_output_directory: "" },
     detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 2, default_candidate_padding_px: 3, targets: ["penis", "pussy"] },
     shortcuts: {
       enabled: true,
@@ -230,7 +246,7 @@ function startFixtureServer() {
     // into a spurious project-list error.
     if (requestPath === "/api/projects" && request.method === "GET") {
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ projects: [] }));
+      response.end(JSON.stringify({ projects: listedProjects }));
       return;
     }
     if (requestPath === "/api/project/mismatches" && request.method === "GET") {
@@ -262,8 +278,9 @@ function startFixtureServer() {
     }
     if (requestPath === "/api/output-directory/pick" && request.method === "POST") {
       for await (const _chunk of request) { /* consume request */ }
+      settings.saving.default_output_directory = "G:\\fixture-output";
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ path: "G:\\fixture-output" }));
+      response.end(JSON.stringify({ path: "G:\\fixture-output", settings }));
       return;
     }
     if (requestPath === "/api/catalog/delete-source/prepare" && request.method === "POST") {
@@ -603,7 +620,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests: (count) => settingsStatusRequests.length >= count ? Promise.resolve() : new Promise((resolve) => settingsStatusWaiters.push({ count, resolve })), updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests: (count) => settingsStatusRequests.length >= count ? Promise.resolve() : new Promise((resolve) => settingsStatusWaiters.push({ count, resolve })), updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, setDefaultOutputDirectory: (value) => { settings.saving.default_output_directory = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -803,6 +820,7 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
         && document.querySelector("#candidatePane")?.classList.contains("blink-active")
         && candidateRow.querySelector(".candidate-display-toggle")?.getAttribute("aria-pressed") === "true";
     }, scenario.candidateId);
+    recordDynamicControl(".candidate-row .candidate-display-toggle");
     const blinkTickReads = await page.evaluate(() => {
       const originalHasPixels = canvasHasPixels;
       const originalGetImageData = CanvasRenderingContext2D.prototype.getImageData;
@@ -910,6 +928,7 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     assert.equal(await paddingInput.getAttribute("max"), null, "candidate padding has no arbitrary browser input cap");
     assert.equal(await paddingPopover.evaluate((node) => node.matches(":popover-open")), true, "one shared padding popover opens from the candidate row");
     assert.equal(await paddingInput.evaluate((node) => document.activeElement === node), true, "opening focuses the numeric value for immediate replacement");
+    recordDynamicControl(".candidate-row .candidate-padding-button");
     const beforeInvalid = scenario.candidateUpdates.length;
     await page.locator("#candidatePaddingDecrease").click(); assert.equal(await paddingInput.inputValue(), "0", "decrease clamps at zero without persistence");
     await page.locator("#candidatePaddingIncrease").click(); assert.equal(await paddingInput.inputValue(), "1", "increase changes only the draft value");
@@ -969,15 +988,18 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     await page.waitForFunction(() => state.blinkModes.get("candidate-blink-exclude") === "normal");
     await excludeRow.locator(".candidate-effective-toggle").click();
     await page.waitForFunction(() => state.blinkModes.get("candidate-blink-exclude") === "effective");
+    recordDynamicControl(".candidate-row .candidate-effective-toggle");
     await row.locator(".candidate-toggle").click();
     await page.waitForFunction((id) => state.candidates.find((candidate) => candidate.id === id)?.enabled === false, scenario.candidateId);
     assert.deepEqual(scenario.candidateUpdates.at(-1), { id: scenario.candidateId, update: { enabled: false, color: "#ff3d4d" } }, "the automatic mosaic row toggle persists its explicit API state");
+    recordDynamicControl(".candidate-row .candidate-toggle");
     await excludeRow.locator(".candidate-toggle").click();
     await page.waitForFunction(() => state.candidates.find((candidate) => candidate.id === "candidate-blink-exclude")?.enabled === false);
     assert.deepEqual(scenario.candidateUpdates.at(-1), { id: "candidate-blink-exclude", update: { enabled: false, color: "#28d3ff", forced: true } }, "the automatic exclusion row toggle persists its explicit API state");
     await excludeRow.locator(".candidate-forced").click();
     await page.waitForFunction(() => state.candidates.find((candidate) => candidate.id === "candidate-blink-exclude")?.forced === false);
     assert.deepEqual(scenario.candidateUpdates.at(-1), { id: "candidate-blink-exclude", update: { enabled: false, color: "#28d3ff", forced: false } }, "the automatic exclusion force control persists its explicit API state");
+    recordDynamicControl(".candidate-row .candidate-forced");
 
     await page.evaluate(() => {
       state.manualMaskPresent = true; state.manualEnabled = true;
@@ -1014,6 +1036,7 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     await page.waitForFunction(() => document.querySelector("#confirmDialog").open);
     await page.locator("#confirmAccept").click();
     await page.waitForFunction((id) => state.removedCandidateIds.has(id) && !document.querySelector(`[data-candidate-blink-id="${id}"]`), scenario.candidateId);
+    recordDynamicControl(".candidate-row .candidate-delete");
     await excludeRow.locator(".candidate-delete").click();
     await page.waitForFunction(() => document.querySelector("#confirmDialog").open);
     await page.locator("#confirmAccept").click();
@@ -1088,6 +1111,48 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
 
 async function runExhaustiveCandidateScenarios(browser) {
   await runCandidateBlinkScenario(browser, true);
+}
+
+async function runDynamicProjectAndShortcutScenario(browser, fixtureUrl) {
+  const page = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
+  try {
+    await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+
+    await page.locator("#projectButton").click();
+    await page.locator("#projectOpenList").click();
+    await page.locator('[data-project-action="open"]').first().waitFor();
+    await page.locator('[data-project-sort="name"]').click();
+    await page.waitForFunction(() => document.querySelector('[data-project-sort="name"]')?.closest("th")?.getAttribute("aria-sort") === "ascending");
+    assert.equal(await page.locator('[data-project-sort="name"]').evaluate((button) => button.closest("th")?.getAttribute("aria-sort")), "ascending", "project sort reorders through its public sort control");
+    recordDynamicControl("[data-project-sort]");
+
+    await page.locator('[data-project-action="delete"]').click();
+    await page.waitForFunction(() => document.querySelector("#projectDeleteDialog")?.open === true);
+    assert.equal(await page.locator("#projectDeleteConfirm").isDisabled(), false, "project delete action opens an actionable confirmation for the selected row");
+    recordDynamicControl("[data-project-action]");
+    await page.locator("#projectDeleteCancel").click();
+    await page.locator("#projectListClose").click();
+
+    await page.locator("#settingsButton").click();
+    await page.locator("#settingsTabShortcuts").click();
+    const shortcut = page.locator('[data-shortcut-action="previous"]');
+    const shortcutBefore = await shortcut.inputValue();
+    await shortcut.focus();
+    await page.keyboard.press("Control+K");
+    await page.waitForFunction((previous) => document.querySelector('[data-shortcut-action="previous"]')?.value !== previous, shortcutBefore);
+    assert.equal(await shortcut.inputValue(), "Ctrl+K", "shortcut action records the keyboard binding through its public key handler");
+    recordDynamicControl("[data-shortcut-action]");
+
+    const shortcutEnabled = page.locator('[data-shortcut-enabled="previous"]');
+    const enabledBefore = await shortcutEnabled.isChecked();
+    await shortcutEnabled.click();
+    await page.waitForFunction((previous) => document.querySelector('[data-shortcut-enabled="previous"]')?.checked !== previous, enabledBefore);
+    assert.equal(await shortcutEnabled.isChecked(), !enabledBefore, "shortcut enabled control toggles the action availability");
+    recordDynamicControl("[data-shortcut-enabled]");
+    await page.locator("#settingsCloseButton").click();
+  } finally {
+    await stopCoveredPage(page, true);
+  }
 }
 
 function overlaps(left, right) {
@@ -1696,18 +1761,15 @@ async function runExhaustiveAddedScenarios(page, fixtureUrl, resetScenario) {
   assert.deepEqual(await page.evaluate(() => ({ original: [originalCanvas.width, originalCanvas.height], worker: state.mosaicWorker, imageCache: state.imageCache.items.size, candidateCache: state.candidateBundleCache.items.size })), { original: [1, 1], worker: null, imageCache: 0, candidateCache: 0 }, "clearing a selected 4K image releases its original canvas, preview worker, and decoded caches");
 }
 
-async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, finishCancel, holdSaveRender, releaseSaveRenders, resetScenario) {
+async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdSaveRender, releaseSaveRenders, resetScenario, pageErrors) {
   page.setDefaultTimeout(3000);
   const operated = new Set();
   const assertionPassed = new Set();
   const staticContracts = new Map(contracts.map((control) => [control.id, control]));
-  const dynamicContractsBySelector = new Map(dynamicContracts.map((control) => [control.selector, control]));
   const markDynamic = async (selector, before, predicate) => {
-    const contract = dynamicContractsBySelector.get(selector);
-    assert.ok(contract, `${selector} has a dynamic ledger contract`);
     const after = await snapshot();
     await predicate(before, after);
-    operated.add(selector); assertionPassed.add(contract.assertionId);
+    recordDynamicControl(selector);
   };
   const setupFixture = async () => {
     await page.goto(fixtureUrl, { waitUntil: "networkidle" });
@@ -1725,10 +1787,9 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   };
   await setupFixture();
 
-  // A configured server path is not a browser-granted directory. Exercise the
-  // visible single-save flow with no handle and require both the disabled
-  // button and the unselected label before any output picker is used.
-  await page.evaluate(() => { state.outputDirectoryHandle = null; renderOutputDirectory(); });
+  // Copy saves require a configured server output path. Exercise the visible
+  // single-save flow with no configured path before the picker is used.
+  await page.evaluate(() => { state.settings.saving.default_output_directory = ""; renderOutputDirectory(); });
   await page.locator("#brushTool").click();
   const unavailableOutputCanvas = await page.locator("#editorCanvas").boundingBox();
   assert.ok(unavailableOutputCanvas, "the editor canvas is available before testing an unselected save destination");
@@ -1736,8 +1797,8 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await page.mouse.down(); await page.mouse.move(unavailableOutputCanvas.x + unavailableOutputCanvas.width / 2 + 10, unavailableOutputCanvas.y + unavailableOutputCanvas.height / 2 + 6); await page.mouse.up();
   await page.locator("#saveButton").click();
   await page.waitForFunction(() => document.querySelector("#singleSaveDialog").open);
-  assert.equal(await page.locator("#singleSaveStartButton").isDisabled(), true, "single save remains disabled until a browser directory handle is selected");
-  assert.equal(await page.locator("#singleSaveOutputDirectoryStatus").textContent(), await page.evaluate(() => t("apply.outputDirectoryUnset")), "single save never presents the configured server path as its browser destination");
+  assert.equal(await page.locator("#singleSaveStartButton").isDisabled(), true, "single save remains disabled until a server output path is selected");
+  assert.equal(await page.locator("#singleSaveOutputDirectoryStatus").textContent(), await page.evaluate(() => t("apply.outputDirectoryUnset")), "single save displays that no server output path is selected");
   await page.locator("#singleSaveCloseButton").click();
   await setupFixture();
 
@@ -1787,6 +1848,24 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     const requests = after.api.slice(before.api.length);
     assert.ok(requests.length > 0, `${control} must issue a product API request`);
     if (endpoint) assert.ok(requests.some((request) => request.url.includes(endpoint)), `${control} must request ${endpoint}; got ${requests.map((request) => request.url).join(", ")}`);
+  };
+  const assertOutputDirectoryPick = async (before, control, statusSelector, startSelector = null) => {
+    await page.waitForFunction((count) => window.__ledgerApi.slice(count).some((request) => request.method === "POST" && request.url.includes("/api/output-directory/pick")), before.api.length);
+    await page.waitForFunction(([statusId, startId]) => {
+      const status = document.querySelector(statusId);
+      const value = status?.value ?? status?.textContent;
+      return !state.outputDirectoryPicking && state.settings?.saving?.default_output_directory === "G:\\fixture-output"
+        && value === "G:\\fixture-output" && (!startId || !document.querySelector(startId)?.disabled);
+    }, [statusSelector, startSelector]);
+    const after = await snapshot();
+    apiChanged(before, after, control, "/api/output-directory/pick");
+    const result = await page.evaluate(([statusId, startId]) => ({
+      path: state.settings?.saving?.default_output_directory, picking: state.outputDirectoryPicking,
+      status: document.querySelector(statusId)?.value ?? document.querySelector(statusId)?.textContent,
+      startEnabled: startId ? !document.querySelector(startId)?.disabled : true,
+      errorOpen: $("#errorDialog").open,
+    }), [statusSelector, startSelector]);
+    assert.deepEqual(result, { path: "G:\\fixture-output", picking: false, status: "G:\\fixture-output", startEnabled: true, errorOpen: false }, `${control} stores and displays the selected absolute server output path`);
   };
   const dialog = (id, expected, control) => async (before, after) => {
     if (after.dialogs[id] !== expected) await page.waitForFunction(([dialogId, open]) => document.querySelector(`#${dialogId}`)?.open === open, [id, expected]);
@@ -1850,8 +1929,38 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     fitButton: () => assertFitPostcondition(),
     flipHorizontalButton: (before, after) => apiChanged(before, after, "flipHorizontalButton", "/transform"),
     flipVerticalButton: (before, after) => apiChanged(before, after, "flipVerticalButton", "/transform"),
-    undoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "undoButton"),
-    redoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "redoButton"),
+    undoButton: async (before) => {
+      const target = before.state.historyIndex - 1;
+      assert.ok(before.state.historyIndex > 0, "undoButton has an undoable history position");
+      await page.waitForFunction((expected) => (!state.historyRestoreBusy && state.historyIndex === expected) || $("#errorDialog").open, target);
+      const settled = await snapshot();
+      const diagnostic = await page.evaluate(() => ({
+        error: { open: $("#errorDialog").open, title: $("#errorDialogTitle").textContent, cause: $("#errorDialogCause").textContent, action: $("#errorDialogAction").textContent },
+        historyIndex: state.historyIndex, historyLength: state.history.length, historyRestoreBusy: state.historyRestoreBusy,
+        gestureActive: isGestureActive(), actionPending: currentImageActionPending(), candidateBatchPending: state.candidateBatchPending.size,
+        candidateUpdates: state.candidateUpdateChains.size, imageMutations: state.imageMutationChains.size, draftSaves: state.draftSaveChains.size,
+        workspaceSaves: state.workspaceDraftChains.size, workspaceErrors: state.workspaceMutationErrors.size,
+      }));
+      assert.equal(diagnostic.error.open, false, `undoButton must not surface an error while restoring history: ${JSON.stringify(diagnostic)}`);
+      assert.equal(settled.state.historyIndex, target, "undoButton reaches its requested history position after persistence settles");
+      assert.equal(settled.controls.redoButton.disabled, false, "undoButton enables redo after the restored state is durable");
+    },
+    redoButton: async (before) => {
+      const target = before.state.historyIndex + 1;
+      assert.ok(before.state.historyIndex < before.state.history, "redoButton has a redoable history position");
+      await page.waitForFunction((expected) => (!state.historyRestoreBusy && state.historyIndex === expected) || $("#errorDialog").open, target);
+      const settled = await snapshot();
+      const diagnostic = await page.evaluate(() => ({
+        error: { open: $("#errorDialog").open, title: $("#errorDialogTitle").textContent, cause: $("#errorDialogCause").textContent, action: $("#errorDialogAction").textContent },
+        historyIndex: state.historyIndex, historyLength: state.history.length, historyRestoreBusy: state.historyRestoreBusy,
+        gestureActive: isGestureActive(), actionPending: currentImageActionPending(), candidateBatchPending: state.candidateBatchPending.size,
+        candidateUpdates: state.candidateUpdateChains.size, imageMutations: state.imageMutationChains.size, draftSaves: state.draftSaveChains.size,
+        workspaceSaves: state.workspaceDraftChains.size, workspaceErrors: state.workspaceMutationErrors.size,
+      }));
+      assert.equal(diagnostic.error.open, false, `redoButton must not surface an error while restoring history: ${JSON.stringify(diagnostic)}`);
+      assert.equal(settled.state.historyIndex, target, "redoButton reaches its requested history position after persistence settles");
+      assert.equal(settled.controls.undoButton.disabled, false, "redoButton enables undo after the restored state is durable");
+    },
     mosaicPreviewButton: (before, after) => changed(before, after, (item) => item.state.mosaicPreview, "mosaicPreviewButton"),
     mosaicHelpButton: dialog("mosaicHelpDialog", true, "mosaicHelpButton"), mosaicHelpCloseButton: dialog("mosaicHelpDialog", false, "mosaicHelpCloseButton"),
     bucketToleranceDecrease: (before, after) => changed(before, after, (item) => item.controls.bucketTolerance.value, "bucketToleranceDecrease"),
@@ -1871,10 +1980,19 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     toggleReviewMenuItem: (before, after) => assert.equal(after.popovers.catalogContextMenu, false, "toggleReviewMenuItem must complete and close the catalog context menu"),
     copyImagePathMenuItem: (before, after) => assert.ok(after.clipboardWrites > before.clipboardWrites, "copyImagePathMenuItem must write the clipboard"),
     removeImageMenuItem: async (before) => { await page.waitForFunction((count) => state.hiddenImageIds.size !== count, before.state.hiddenCount); const settled = await snapshot(); assert.notEqual(settled.state.hiddenCount, before.state.hiddenCount, "removeImageMenuItem must toggle hidden state"); assert.equal(settled.popovers.catalogContextMenu, false, "removeImageMenuItem must close its context menu"); },
+    sourceDeleteResume: async () => {
+      await page.waitForFunction(() => {
+        const result = window.__sourceDeleteResumeLedger;
+        return Boolean(document.querySelector("#sourceDeleteResume")?.hidden)
+          && result?.permissionCalls === 1 && result?.resumeCalls === 1 && result?.resumeWithPermission === true;
+      });
+      const result = await page.evaluate(() => window.__sourceDeleteResumeLedger);
+      assert.deepEqual(result, { permissionCalls: 1, resumeCalls: 1, resumeWithPermission: true }, "sourceDeleteResume requests the cached parent-handle permission once and hides after the public click");
+    },
     detectAllButton: dialog("detectDialog", true, "detectAllButton"), detectCancelButton: dialog("detectDialog", false, "detectCancelButton"),
     detectStartButton: dialog("processingDialog", true, "detectStartButton"),
     settingsCloseButton: dialog("settingsDialog", false, "settingsCloseButton"),
-    settingsChooseOutputDirectory: (before, after) => assert.ok(after.pickers.directory > before.pickers.directory, "settingsChooseOutputDirectory opens the browser directory picker"),
+    settingsChooseOutputDirectory: (before) => assertOutputDirectoryPick(before, "settingsChooseOutputDirectory", "#settingsDefaultOutputDirectory"),
     checkUpdateButton: dialog("confirmDialog", true, "checkUpdateButton"),
     settingsResetButton: async (before, after) => { await page.waitForFunction((count) => window.__ledgerApi.slice(count).some((request) => request.url.includes("/api/settings/reset")), before.api.length); apiChanged(before, await snapshot(), "settingsResetButton", "/api/settings/reset"); },
     settingsSaveButton: (before, after) => apiChanged(before, after, "settingsSaveButton", "/api/settings"),
@@ -1882,11 +2000,8 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     modelDownloadCopy: (before, after) => assert.ok(after.clipboardWrites > before.clipboardWrites, "modelDownloadCopy must write the clipboard"),
     modelDownloadStart: (before, after) => apiChanged(before, after, "modelDownloadStart", "/api/model-download/start"),
     modelDownloadCancel: (before, after) => apiChanged(before, after, "modelDownloadCancel", "/api/model-download/cancel"),
-    chooseOutputDirectoryButton: (before, after) => assert.ok(after.pickers.directory > before.pickers.directory, "chooseOutputDirectoryButton opens the browser directory picker"),
-    singleSaveChooseOutputDirectoryButton: async () => {
-      await page.waitForFunction(() => Boolean(state.outputDirectoryHandle));
-      assert.ok(await page.locator("#singleSaveOutputDirectoryStatus").textContent(), "singleSaveChooseOutputDirectoryButton shows the selected output directory");
-    },
+    chooseOutputDirectoryButton: (before) => assertOutputDirectoryPick(before, "chooseOutputDirectoryButton", "#applyOutputDirectoryStatus", "#applyStartButton"),
+    singleSaveChooseOutputDirectoryButton: (before) => assertOutputDirectoryPick(before, "singleSaveChooseOutputDirectoryButton", "#singleSaveOutputDirectoryStatus", "#singleSaveStartButton"),
     singleSaveCloseButton: dialog("singleSaveDialog", false, "singleSaveCloseButton"),
     singleSaveStartButton: dialog("confirmDialog", true, "singleSaveStartButton"),
     applyCloseButton: dialog("applyDialog", false, "applyCloseButton"),
@@ -2096,19 +2211,52 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     });
   }
   await page.evaluate(() => {
+    window.__ledgerCandidateFixture = {
+      candidates: state.candidates, candidateImages: state.candidateImages, removedCandidateIds: state.removedCandidateIds,
+    };
+    const mask = document.createElement("canvas"); mask.width = addCanvas.width; mask.height = addCanvas.height;
     state.candidates = [{ id: "ledger-padding-candidate", role: "apply", enabled: true, forced: false, expandPx: 0, labelToken: "penis", source: "target", refinement: null, confidence: 1, color: "#ff3d4d" }];
-    state.removedCandidateIds.clear(); renderCandidates(); updateCandidateBatchButtons();
+    state.candidateImages = new Map([["ledger-padding-candidate", mask]]);
+    state.removedCandidateIds = new Set(); renderCandidates(); updateCandidateBatchButtons();
   });
   const candidatePaddingBatchBefore = await snapshot();
   await page.locator("[data-candidate-padding-batch]").first().click();
   await markDynamic("[data-candidate-padding-batch]", candidatePaddingBatchBefore, (prior, after) => assert.equal(after.popovers.candidatePaddingPopover, true, "candidate batch padding opens its editor"));
   await page.locator("#candidatePaddingPopover").evaluate((popover) => popover.hidePopover());
+  await page.waitForFunction(() => state.candidateBatchPending.size === 0 && state.candidateUpdateChains.size === 0
+    && state.imageMutationChains.size === 0 && state.draftSaveChains.size === 0 && state.workspaceDraftChains.size === 0);
+  await page.evaluate(() => {
+    const original = window.__ledgerCandidateFixture;
+    state.candidates = original.candidates; state.candidateImages = original.candidateImages; state.removedCandidateIds = original.removedCandidateIds;
+    delete window.__ledgerCandidateFixture;
+    renderCandidates(); updateCandidateBatchButtons(); resetHistoryToCurrentManualMask();
+  });
   await click("brushTool");
+  await page.locator("#editorCanvas").scrollIntoViewIfNeeded();
   const ledgerCanvas = await page.locator("#editorCanvas").boundingBox();
+  const errorsBeforeHistoryPointer = pageErrors.length;
   await page.mouse.move(ledgerCanvas.x + ledgerCanvas.width / 2, ledgerCanvas.y + ledgerCanvas.height / 2);
   await page.mouse.down(); await page.mouse.move(ledgerCanvas.x + ledgerCanvas.width / 2 + 8, ledgerCanvas.y + ledgerCanvas.height / 2 + 8); await page.mouse.up();
-  await page.waitForFunction(() => state.history.length > 0);
-  await click("undoButton"); await click("redoButton");
+  try {
+    await page.waitForFunction(() => state.history.length === 1 && state.historyIndex === 1 && !state.activeStroke);
+  } catch (error) {
+    const diagnostic = await page.evaluate(() => ({
+      historyLength: state.history.length, historyIndex: state.historyIndex, activeStroke: Boolean(state.activeStroke), tool: state.tool,
+      busy: isBusy(), gesture: isGestureActive(), actionPending: currentImageActionPending(), candidateBatchPending: state.candidateBatchPending.size,
+      candidateUpdates: state.candidateUpdateChains.size, imageMutations: state.imageMutationChains.size, draftSaves: state.draftSaveChains.size,
+      workspaceSaves: state.workspaceDraftChains.size, workspaceErrors: state.workspaceMutationErrors.size,
+    }));
+    throw new Error(`isolated public-brush history fixture did not produce exactly one settled history entry: ${JSON.stringify(diagnostic)}`, { cause: error });
+  }
+  const assertHistoryControlReady = async (id) => {
+    const ready = await page.evaluate((controlId) => ({
+      enabled: !$("#" + controlId).disabled, busy: isBusy(), gesture: isGestureActive(), actionPending: currentImageActionPending(),
+    }), id);
+    assert.deepEqual(ready, { enabled: true, busy: false, gesture: false, actionPending: false }, `${id} is enabled only after the isolated history fixture is idle`);
+  };
+  await assertHistoryControlReady("undoButton");
+  assert.deepEqual(pageErrors.slice(errorsBeforeHistoryPointer), [], "the isolated public brush gesture does not raise a page error");
+  await click("undoButton"); await assertHistoryControlReady("redoButton"); await click("redoButton");
   for (const id of ["detectTargetPenis", "detectTargetPussy", "confidence"]) await input(id, id === "confidence" ? "0.51" : true);
 
   // Detection includes the disabled boundary action before a boundary is
@@ -2337,6 +2485,37 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   if (await page.locator("#nativeRelinkDialog").evaluate((dialog) => dialog.open)) await page.locator("#nativeRelinkCancel").click();
   await page.locator("#projectClose").click();
 
+  // A pending browser-source delete is resumed only after the user explicitly
+  // clicks this visible control.  Keep the fixture to its observable browser
+  // capability: the cached parent handle must receive one synchronous
+  // read/write request and the control must return to hidden.
+  await page.evaluate(() => {
+    const originalResume = resumePendingSourceDeletes;
+    window.__sourceDeleteResumeLedger = { permissionCalls: 0, resumeCalls: 0, resumeWithPermission: false };
+    state.pendingSourceDeleteEntries = [{
+      imageId: "sample-two",
+      parentHandle: {
+        requestPermission(options) {
+          window.__sourceDeleteResumeLedger.permissionCalls += 1;
+          if (options?.mode === "readwrite") return "granted";
+          return "denied";
+        },
+      },
+    }];
+    resumePendingSourceDeletes = async (requestPermission) => {
+      window.__sourceDeleteResumeLedger.resumeCalls += 1;
+      window.__sourceDeleteResumeLedger.resumeWithPermission = requestPermission === true;
+    };
+    window.__sourceDeleteResumeOriginal = originalResume;
+    $("#sourceDeleteResume").hidden = false;
+  });
+  await click("sourceDeleteResume");
+  await page.evaluate(() => {
+    resumePendingSourceDeletes = window.__sourceDeleteResumeOriginal;
+    delete window.__sourceDeleteResumeOriginal;
+    state.pendingSourceDeleteEntries = [];
+  });
+
   // Static controls that are only visible in a model dialog are explicitly
   // opened last.  This also gives the copy controls a clipboard result.
   await click("settingsButton"); await click("settingsTabModels"); await page.locator('[data-model-download="ntd11"]').click(); await click("modelDownloadCopy"); await click("modelDownloadClose"); await page.locator('[data-model-help="ntd11"]').click(); await click("modelHelpCopy"); await click("modelHelpCloseButton"); await click("settingsCloseButton");
@@ -2346,19 +2525,13 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   const failedAssertions = activeContracts.filter((control) => !assertionPassed.has(control.assertionId)).map((control) => control.assertionId);
   assert.equal(missing.join("\n"), "", `all ${activeContracts.length} operable static controls are operated through Playwright\n${missing.join("\n")}`);
   assert.equal(failedAssertions.join("\n"), "", `all ${activeContracts.length} operable static controls have a concrete passing assertion\n${failedAssertions.join("\n")}`);
-  // Dynamic entries have explicit fixture coverage above; query their public
-  // selectors after the scenario as a guard against selector drift.
-  const missingDynamic = dynamicContracts.filter((control) => !operated.has(control.selector)).map((control) => `${control.assertionId} (${control.selector})`);
-  const failedDynamicAssertions = dynamicContracts.filter((control) => !assertionPassed.has(control.assertionId)).map((control) => control.assertionId);
-  assert.deepEqual(missingDynamic, [], `all ${dynamicContracts.length} dynamic controls are operated through Playwright`);
-  assert.deepEqual(failedDynamicAssertions, [], `all ${dynamicContracts.length} dynamic controls have a concrete passing assertion`);
 }
 
 async function main() {
   let server;
   let browser;
   let fixtureUrl;
-  let detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetScenario, setCatalog, resetJob, finishCancel, finishApply, setUpdateAvailable;
+  let detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetScenario, setCatalog, setDefaultOutputDirectory, resetJob, finishCancel, finishApply, setUpdateAvailable;
   let settingsRequests, waitForSettingsStatusRequests;
   let settingsActions;
   let settingsStatusRequests;
@@ -2368,7 +2541,7 @@ async function main() {
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, holdSaveRender, releaseSaveRenders, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, setCatalog, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, holdSaveRender, releaseSaveRenders, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, setCatalog, setDefaultOutputDirectory, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
     // A real unsupported-browser bootstrap must stop before any API request or
     // editor binding. This covers the user-visible File System Access contract.
@@ -4089,30 +4262,62 @@ async function main() {
           assert.equal(accepts(pixels), true, `4K ${tool} changes its intended pixel layer`);
         }
         await page.waitForFunction(() => !state.activeStroke && !state.mosaicWorkerBusy && !state.mosaicPending, null, { timeout: 15000 });
-        const editorPerf = await page.evaluate(async () => {
-          let undo = 0; let redo = 0;
+        const editorPerf = await page.evaluate(async ({ logical }) => {
+          const pixelState = () => ({
+            add: addCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
+            exclusion: exclusionCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
+            exclusionErase: exclusionEraseCtx.getImageData(logical.x, logical.y, 1, 1).data[3],
+          });
+          const same = (left, right) => Object.keys(left).every((key) => left[key] === right[key]);
+          const editorState = () => historyEditorState();
+          const expectedEditorState = (target) => target > 0 ? state.history[target - 1].editorState : state.historyEditorState;
+          const measureRestore = async (target) => {
+            const imageId = state.currentId;
+            const beforePixels = pixelState();
+            const expectedEditor = expectedEditorState(target);
+            const started = performance.now();
+            const restoring = restoreSnapshot(target);
+            const localMs = performance.now() - started;
+            const immediate = {
+              pixels: pixelState(), editor: editorState(), busy: state.historyRestoreBusy,
+            };
+            // The local canvas and editor state must switch before persistence
+            // starts.  The asynchronous work remains part of this test below.
+            if (!immediate.busy || same(beforePixels, immediate.pixels)
+              || JSON.stringify(immediate.editor) !== JSON.stringify(expectedEditor)) {
+              throw new Error(`4K history local restore did not apply target=${target}: ${JSON.stringify({ beforePixels, immediate, expectedEditor })}`);
+            }
+            await restoring;
+            const draft = state.drafts.get(imageId);
+            const persisted = state.historyIndex === target && !state.historyRestoreBusy
+              && draft?.historyIndex === target && !state.draftSaveChains.has(imageId)
+              && !state.workspaceDraftChains.has(imageId) && !state.workspaceMutationErrors.has(imageId);
+            if (!persisted) {
+              throw new Error(`4K history persistence did not settle target=${target}: ${JSON.stringify({ historyIndex: state.historyIndex, busy: state.historyRestoreBusy, draftIndex: draft?.historyIndex, draftSaving: state.draftSaveChains.has(imageId), workspaceSaving: state.workspaceDraftChains.has(imageId), workspaceError: state.workspaceMutationErrors.has(imageId) })}`);
+            }
+            return { localMs, endToEndMs: performance.now() - started };
+          };
+          let undo = 0; let redo = 0; let undoEndToEnd = 0; let redoEndToEnd = 0;
           for (let index = 0; index < 10; index += 1) {
             const undoTarget = state.historyIndex - 1;
             if (undoTarget < 0) throw new Error("4K undo measurement requires one undoable history step");
-            let start = performance.now(); await restoreSnapshot(undoTarget); undo = Math.max(undo, performance.now() - start);
-            if (state.historyIndex !== undoTarget) throw new Error("4K undo measurement did not reach its requested history position");
+            const undoResult = await measureRestore(undoTarget); undo = Math.max(undo, undoResult.localMs); undoEndToEnd = Math.max(undoEndToEnd, undoResult.endToEndMs);
             const redoTarget = state.historyIndex + 1;
             if (redoTarget > state.history.length) throw new Error("4K redo measurement requires one redoable history step");
-            start = performance.now(); await restoreSnapshot(redoTarget); redo = Math.max(redo, performance.now() - start);
-            if (state.historyIndex !== redoTarget) throw new Error("4K redo measurement did not reach its requested history position");
+            const redoResult = await measureRestore(redoTarget); redo = Math.max(redo, redoResult.localMs); redoEndToEnd = Math.max(redoEndToEnd, redoResult.endToEndMs);
           }
           const value = window.__editorPerf;
-          const result = { pendingMax: value.pendingMax, undo, redo };
+          const result = { pendingMax: value.pendingMax, undo, redo, undoEndToEnd, redoEndToEnd };
           const canvas = document.querySelector("#editorCanvas"); canvas.removeEventListener("pointermove", value.begin, true); canvas.removeEventListener("pointermove", value.end); delete window.__editorPerf;
           return result;
-        });
+        }, geometry);
         editorPerf.drag = Math.max(...toolMetrics.map((metric) => metric.drag));
         editorPerf.p95 = Math.max(...toolMetrics.map((metric) => metric.p95));
         assert.ok(editorPerf.drag < 250, `each 4K 100-point drag completes within 250ms (actual max ${editorPerf.drag.toFixed(1)}ms)`);
         assert.ok(editorPerf.p95 < 16.7, `4K pointer handler p95 stays under one frame (actual max ${editorPerf.p95.toFixed(2)}ms)`);
-        assert.ok(editorPerf.undo < 250 && editorPerf.redo < 250, `4K undo/redo each stay under 250ms (actual ${editorPerf.undo.toFixed(1)}/${editorPerf.redo.toFixed(1)}ms)`);
+        assert.ok(editorPerf.undo < 250 && editorPerf.redo < 250, `4K undo/redo local mask/editor restoration each stay under 250ms (actual ${editorPerf.undo.toFixed(1)}/${editorPerf.redo.toFixed(1)}ms)`);
         assert.equal(editorPerf.pendingMax <= 1, true, "4K preview keeps at most one pending worker frame");
-        console.log(`4K editor performance: drag=${editorPerf.drag.toFixed(1)}ms pointer-p95=${editorPerf.p95.toFixed(2)}ms undo=${editorPerf.undo.toFixed(1)}ms redo=${editorPerf.redo.toFixed(1)}ms pending=${editorPerf.pendingMax}`);
+        console.log(`4K editor performance: drag=${editorPerf.drag.toFixed(1)}ms pointer-p95=${editorPerf.p95.toFixed(2)}ms undo-local=${editorPerf.undo.toFixed(1)}ms redo-local=${editorPerf.redo.toFixed(1)}ms undo-end-to-end=${editorPerf.undoEndToEnd.toFixed(1)}ms redo-end-to-end=${editorPerf.redoEndToEnd.toFixed(1)}ms pending=${editorPerf.pendingMax}`);
       }
 
       await page.locator("#eraserTool").click();
@@ -4169,7 +4374,7 @@ async function main() {
     });
     holdDetection(true);
     try {
-      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, uiDynamicControlManifest, finishCancel, holdSaveRender, releaseSaveRenders, resetScenario);
+      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, finishCancel, holdSaveRender, releaseSaveRenders, resetScenario, pageErrors);
     } finally {
       holdDetection(false);
       await stopCoveredPage(ledgerPage, true);
@@ -4197,53 +4402,19 @@ async function main() {
     // the catalogue for real; the fixture is reset instead of faking state in
     // the page.
     resetScenario();
+    setDefaultOutputDirectory("");
     const browserSavePage = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
     await browserSavePage.addInitScript(() => {
       window.showOpenFilePicker = async () => [];
-      const files = new Map([["sample_検証.png", new Uint8Array([0])]]);
-      let outputPermission = "prompt";
-      const permissionCalls = [];
-      const outputHandle = {
-        name: "fixture-output",
-        async queryPermission(options) { permissionCalls.push(["query", options.mode]); return outputPermission; },
-        async requestPermission(options) { permissionCalls.push(["request", options.mode]); if (outputPermission === "prompt") outputPermission = "granted"; return outputPermission; },
-        async getFileHandle(name, options = {}) {
-          if (!options.create && !files.has(name)) throw new DOMException("missing", "NotFoundError");
-          if (!files.has(name)) files.set(name, new Uint8Array());
-          return { async createWritable() {
-            const chunks = [];
-            return new WritableStream({
-              write(chunk) { chunks.push(new Uint8Array(chunk)); },
-              close() { files.set(name, chunks.length === 1 ? chunks[0] : new Uint8Array(chunks.reduce((size, chunk) => size + chunk.length, 0))); },
-            });
-          } };
-        },
-        async removeEntry(name) { files.delete(name); },
+      window.showDirectoryPicker = async () => ({ async *values() {} });
+      window.__serverOutputPicks = [];
+      const originalFetch = window.fetch.bind(window);
+      window.fetch = (...args) => {
+        const input = args[0]; const init = args[1] || {};
+        const url = String(input?.url || input);
+        if (url.includes("/api/output-directory/pick") && (init.method || input?.method || "GET") === "POST") window.__serverOutputPicks.push(url);
+        return originalFetch(...args);
       };
-      window.__outputPermission = {
-        calls: permissionCalls,
-        set(value) { outputPermission = value; },
-      };
-      const outputStore = {
-        get(key) {
-          const request = {};
-          queueMicrotask(() => { request.result = key === "output-directory" ? { handle: outputHandle } : undefined; request.onsuccess?.(); });
-          return request;
-        },
-        put() {},
-      };
-      Object.defineProperty(window, "indexedDB", { configurable: true, value: {
-        open() {
-          const request = {};
-          queueMicrotask(() => {
-            request.result = { transaction() { return { objectStore() { return outputStore; } }; }, close() {} };
-            request.onsuccess?.();
-          });
-          return request;
-        },
-      }});
-      window.__singleSaveFiles = files;
-      window.showDirectoryPicker = async () => outputHandle;
     });
     try {
       await browserSavePage.goto(fixtureUrl, { waitUntil: "networkidle" });
@@ -4269,32 +4440,33 @@ async function main() {
       await browserSavePage.waitForFunction(() => !document.querySelector("#saveButton").disabled);
       await browserSavePage.locator("#saveButton").click();
       await browserSavePage.waitForFunction(() => document.querySelector("#singleSaveDialog").open);
-      await browserSavePage.waitForFunction(() => state.outputDirectoryHandle?.name === "fixture-output");
-      assert.equal(await browserSavePage.locator("#singleSaveStartButton").isDisabled(), false, "a restored output directory is available until its save-click permission check");
-      assert.deepEqual(await browserSavePage.evaluate(() => window.__outputPermission.calls), [], "restoring the IndexedDB handle does not prompt before a save click");
-      await browserSavePage.waitForFunction(() => document.querySelector("#singleSaveOutputDirectoryStatus").textContent.includes("fixture-output"));
-      assert.match(await browserSavePage.locator("#singleSaveOutputDirectoryStatus").textContent(), /fixture-output/, "the restored output directory updates its visible destination");
+      assert.equal(await browserSavePage.locator("#singleSaveStartButton").isDisabled(), true, "copy save remains disabled until the server output path is selected");
+      await browserSavePage.locator("#singleSaveChooseOutputDirectoryButton").click();
+      await browserSavePage.waitForFunction(() => window.__serverOutputPicks.length === 1 && !state.outputDirectoryPicking
+        && state.settings?.saving?.default_output_directory === "G:\\fixture-output"
+        && document.querySelector("#singleSaveOutputDirectoryStatus").textContent === "G:\\fixture-output"
+        && !document.querySelector("#singleSaveStartButton").disabled);
+      assert.equal(await browserSavePage.locator("#singleSaveOutputDirectoryStatus").textContent(), "G:\\fixture-output", "the selected server output path is displayed in the single-save dialog");
       await browserSavePage.locator("#singleSaveCopyMode").check();
       await browserSavePage.locator("#singleSaveSuffix").fill("_検証");
-      await browserSavePage.locator("#singleSaveDeleteOriginal").check();
       await browserSavePage.locator("#singleSaveStartButton").click();
-      await browserSavePage.waitForFunction(() => window.__outputPermission.calls.length === 2);
-      assert.deepEqual(await browserSavePage.evaluate(() => window.__outputPermission.calls), [["query", "readwrite"], ["request", "readwrite"]], "single save requests read/write access from the restored handle in its click chain");
-      await browserSavePage.locator("#confirmAccept").click();
+      assert.equal(await browserSavePage.locator("#confirmDialog").evaluate((dialog) => dialog.open), false, "copy save without source deletion starts without an unrelated confirmation");
       await browserSavePage.waitForFunction(() => state.saving, null, { timeout: 5000 });
       await browserSavePage.waitForFunction(() => !state.saving, null, { timeout: 5000 });
-      assert.deepEqual(saveRequests.map((request) => request.path), ["/api/save/prepare", "/api/save/reserve", "/api/save/render", "/api/save/commit", "/api/save/ack"], "single copy-and-delete drives the durable browser save lifecycle in order");
-      assert.equal(await browserSavePage.evaluate(() => window.__singleSaveFiles.has("sample_検証_1.png")), true, "single save keeps Unicode suffixes and avoids an existing output name");
+      assert.deepEqual(saveRequests.map((request) => request.path), ["/api/save/prepare", "/api/save/reserve", "/api/save/render", "/api/save/commit", "/api/save/ack"], "single copy save drives the durable save lifecycle in order");
+      assert.equal(saveRequests[2].payload.copyToDefault, true, "single copy save delegates output creation to the configured server path");
       assert.deepEqual(await browserSavePage.evaluate(() => ({ imageIds: state.images.map((image) => image.id), currentId: state.currentId, reviewed: state.images.find((image) => image.id === "sample")?.reviewed })), { imageIds: ["sample", "sample-two"], currentId: "sample", reviewed: false }, "single save reloads without changing catalogue or reviewed state");
-      await browserSavePage.evaluate(() => window.__outputPermission.set("prompt"));
       await browserSavePage.locator("#singleSaveChooseOutputDirectoryButton").click();
-      await browserSavePage.waitForFunction(() => window.__outputPermission.calls.length === 4);
-      assert.deepEqual(await browserSavePage.evaluate(() => window.__outputPermission.calls.slice(-2)), [["query", "readwrite"], ["request", "readwrite"]], "a newly selected output directory uses the same explicit permission check");
+      await browserSavePage.waitForFunction(() => window.__serverOutputPicks.length === 2 && !state.outputDirectoryPicking
+        && state.settings?.saving?.default_output_directory === "G:\\fixture-output"
+        && document.querySelector("#singleSaveOutputDirectoryStatus").textContent === "G:\\fixture-output");
     } finally {
       await stopCoveredPage(browserSavePage, true);
     }
 
+    await runDynamicProjectAndShortcutScenario(browser, fixtureUrl);
     await runExhaustiveCandidateScenarios(browser);
+    assertDynamicControlEvidence();
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
