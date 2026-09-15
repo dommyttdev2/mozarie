@@ -72,6 +72,7 @@ const document = {
   },
 };
 const context = {
+  codedError(code) { const error = new Error(code); error.code = code; return error; },
   responseError(response, payload) { const error = new Error(); error.status = response.status; error.code = typeof payload?.error_code === "string" ? payload.error_code : (response.status === 404 ? "api_not_found" : "internal_error"); error.params = payload?.params || {}; return error; },
   console, Promise, Set, Map, Array, Object, Math, Number, Boolean, String, Error,
   AbortController, DOMException, setTimeout, clearTimeout, encodeURIComponent, crypto: { randomUUID: () => `key-${++unique}` },
@@ -98,7 +99,7 @@ const context = {
   beginCatalogEpoch: () => ++state.catalogEpoch, isCurrentCatalogEpoch: (epoch) => epoch === state.catalogEpoch, async resyncAfterStaleCatalog() {},
   updateActionButtons: () => calls.push(["actions"]), releaseCandidateBundles: () => {}, resetHistoryToCurrentManualMask: () => {}, refreshMaskStatus: () => {},
   markImagesUnreviewed: () => {}, renderCandidates: () => {}, renderCatalogViews: () => calls.push(["catalog"]), updateNavigationControls: () => {}, clearStatus: () => {},
-  flushAllWorkspaceMutations: async () => {}, clearStoredCatalogState: () => {}, resetCatalog: (next) => { images = next; state.images = next; },
+  flushAllImageMutations: async () => {}, flushAllWorkspaceMutations: async () => {}, clearStoredCatalogState: () => {}, resetCatalog: (next) => { images = next; state.images = next; },
   reviewPath: (image) => image.id, isReviewed: (image) => state.reviewedPaths.has(image.id), isHidden: (image) => Boolean(image.hidden),
   selectImage: async (id) => { state.currentId = id; state.currentImage = state.images.find((image) => image.id === id) || null; },
   showUserError: (error) => calls.push(["error", error.code || error.message]), setStatusKey: (key) => calls.push(["status", key]),
@@ -106,11 +107,11 @@ const context = {
   selectedImages: () => state.images.filter((image) => state.selectedImageIds.has(image.id)), closeBatchMoreMenus: () => {},
   setHidden: async (image, value) => { image.hidden = value; }, setReviewed: async (image, value) => { if (value) state.reviewedPaths.add(image.id); },
   openDetectionDialog: () => calls.push(["detect"]), importParallelism: () => 2,
-  showProcessing: () => {}, closeProcessing: () => {}, remapImportedImageIds: undefined, loadReviewedPaths: () => {},
-  catalogForDirectoryHandle: async () => "directory-catalog", rememberProjectSource: async (_projectId, _handle, _imageId, sourceId) => sourceId || "remembered-source",
+  showProcessing: () => {}, closeProcessing: () => {}, remapImportedImageIds: undefined,
+  catalogForDirectoryHandle: async () => "directory-catalog", rememberProjectSource: async (_projectId, _handle, _imageId, sourceId) => sourceId || "remembered-source", forgetPendingProjectSource: async () => {}, applyCatalogGeneration: () => {}, reconcileCatalogSnapshot: () => {}, loadReviewedPaths: () => {},
   fetch: async () => ({ ok: true, status: 200, json: async () => ({ imported: [], catalogId: "final", provisional: false }) }),
-  setGalleryDropOverlay: undefined, shortcutFromEvent: (event) => event.binding, isEditableTarget: () => editable, hasOpenDialog: () => dialogOpen,
-  isGestureActive: () => gesture, moveCurrentBy: () => {}, setViewMode: (mode) => { state.viewMode = mode; }, reviewAndMoveNext: () => {}, restoreSnapshot: () => {},
+  setGalleryDropOverlay: undefined, shortcutFromEvent: (event) => event.binding, isEditableTarget: () => editable, isTextEditableTarget: () => editable, hasOpenDialog: () => dialogOpen,
+  isGestureActive: () => gesture, moveCurrentBy: () => {}, setViewMode: (mode) => { state.viewMode = mode; }, reviewAndMoveNext: () => {}, hasDurableHistory: () => false, restoreProjectHistory: () => {}, restoreSnapshot: () => {},
 };
 
 const interactionPath = path.join(__dirname, "..", "static", "js", "interaction.js");
@@ -181,7 +182,7 @@ const tolerancePanelCss = styleSource.match(/\.bucket-tolerance-panel\s*\{([^}]*
   images = [{ id: "one" }, { id: "two" }]; state.images = images; state.selectedImageIds = new Set(["one", "two"]);
   for (const action of ["hide", "show", "reviewed", "unreviewed", "detect", "clear", "remove"]) await test.runSelectionAction(action);
   assert.deepEqual(test.droppedFile(file("a.png")).relativePath, "a.png");
-  const directory = { name: "folder", kind: "directory", async *values() { yield { name: "a.png", kind: "file" }; } };
+  const directory = { name: "folder", kind: "directory", async *values() { yield { name: "a.png", kind: "file", getFile: async () => file("a.png") }; } };
   assert.equal((await test.directFilesFromDrop({ items: [{ kind: "file", getAsFileSystemHandle: async () => directory }, { kind: "text" }] })).handleEntries.length, 1);
   assert.equal(test.isSupportedImageFile(file("x.PNG")), true); assert.equal(test.isSupportedImageFile(file("x.gif")), false); assert.match(test.newClientKey(), /^key-/);
   state.sourceAccess.set("gone", {}); test.pruneSourceAccess();
@@ -305,7 +306,7 @@ const tolerancePanelCss = styleSource.match(/\.bucket-tolerance-panel\s*\{([^}]*
   state.settings.confirmations.removeImage = false; state.images = [{ id: "one" }]; images = state.images; state.currentId = "one";
   context.api = async (url) => { if (url.startsWith("/api/catalog/image/")) { state.catalogEpoch += 1; return { images: [] }; } return {}; }; await test.removeImageFromCatalog("one");
   state.images = [{ id: "one" }]; images = state.images; context.api = async () => { throw new Error("remove failed"); }; await test.removeImageFromCatalog("one"); context.api = apiForClear;
-  test.rememberImportedSource({ clientKey: "parentless", entry: { file: file("p.png"), fileHandle: {} }, data: { imported: [{ clientKey: "parentless", imageId: "p" }] } });
+  test.rememberImportedSource({ clientKey: "parentless", entry: { file: file("p.png"), fileHandle: {} }, data: { imported: [{ clientKey: "parentless", imageId: "p" }] } }, { sourceKind: "browser-files" });
   await test.importFiles([{}]);
   const importOriginal = context.importSingleFile;
   vm.runInNewContext("importSingleFile = async (entry) => { state.importSession = {}; return {}; };", context);
@@ -337,15 +338,16 @@ const tolerancePanelCss = styleSource.match(/\.bucket-tolerance-panel\s*\{([^}]*
   vm.runInNewContext("importSingleFile = async () => ({ catalogId: null, provisional: false });", context);
   state.importing = false; state.importSession = null; await test.importFiles([{ getFile: async () => { state.importSession = {}; return file('mismatch.png'); }, relativePath: "mismatch.png" }]);
   state.importing = false; state.importSession = null; await test.importFiles([{ getFile: async () => file("skip.gif"), relativePath: "skip.png" }]);
-  let finalizedHits = 0;
+  const serverSessionCalls = [];
+  state.serverCatalogGeneration = 0;
   context.api = async (url) => {
-    if (url === "/api/workspace/catalog") return { catalogId: "p", provisional: true };
-    if (url === "/api/workspace/catalog/finalize") { finalizedHits += 1; return {}; }
+    if (url === "/api/import/start") { serverSessionCalls.push("start"); return {}; }
+    if (url === "/api/import/finish") { serverSessionCalls.push("finish"); return {}; }
     if (url === "/api/images") return { images: [] };
     return {};
   };
   state.images = []; images = state.images; state.importing = false; state.importSession = null; await test.importFiles([{ getFile: async () => file("final.png"), relativePath: "final.png" }]);
-  assert.equal(finalizedHits, 1, `the provisional catalog is finalized before its final image reconciliation: ${JSON.stringify(calls.slice(-4))}`);
+  assert.deepEqual(serverSessionCalls, ["start", "finish"], "the import server session brackets its final image reconciliation");
   context.fetch = async () => { throw new Error("network"); }; context.api = async () => { throw new Error("refresh"); };
   state.importing = false; state.importSession = null; await test.importFiles([{ getFile: async () => file("failure.png"), relativePath: "failure.png" }]);
   context.fetch = originalFetch; context.api = apiForClear;
