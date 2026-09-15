@@ -19,8 +19,16 @@ function element() {
     classList: { toggle() {}, add() {} },
     setAttribute() {},
     append(child) { this.children.push(child); child.parentNode = this; },
+    insertBefore(child, before) {
+      const index = this.children.indexOf(before);
+      if (index < 0) this.children.push(child);
+      else this.children.splice(index, 0, child);
+      child.parentNode = this;
+    },
     remove() { const siblings = this.parentNode?.children; const index = siblings?.indexOf(this); if (index >= 0) siblings.splice(index, 1); },
     addEventListener() {},
+    focus() {},
+    matches() { return false; },
     showModal() { this.open = true; },
     close() { this.open = false; },
   };
@@ -117,7 +125,6 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     btoa(value) { return Buffer.from(value, "binary").toString("base64"); },
     window: browserWindow,
     navigator: browserNavigator,
-    showUserError(error) { context.lastUserError = error; },
     showModalFromInvoker(dialog) { dialog?.showModal?.(); },
     fetch: async (requestPath, options = {}) => {
       if (requestPath === "/api/images") {
@@ -188,7 +195,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     "apply.outputDirectoryUnset": "Save location: not selected",
     "errorCode.output_write_unsupported": "Output writes are unsupported",
   };
-  return { element: getElement, elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, navigator: browserNavigator, outputFiles, requests, runBrowserSave, saveTargets, processableImages, isBusy, catalogStagingEditsActive, selectedSaveMode, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, state, translate, lastError: () => context.lastUserError, window: browserWindow };
+  return { element: getElement, elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, navigator: browserNavigator, outputFiles, requests, runBrowserSave, saveTargets, processableImages, isBusy, catalogStagingEditsActive, selectedSaveMode, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, state, translate, window: browserWindow };
 }
 
 async function runOutputDirectoryPermissionCases() {
@@ -213,13 +220,13 @@ async function runOutputDirectoryPermissionCases() {
 }
 
 async function runSingleCopyKeepsEditorStateCase() {
-  const image = { id: "image-1", relativePath: "source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1, reviewed: false, hidden: true };
+  const image = { id: "image-1", relativePath: "source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1, reviewed: false, hidden: false };
   const images = [image];
   const runtime = createRuntime({ initialImages: images, commit: () => jsonResponse({ cleared: true, stale: false }) });
   const candidates = [{ id: "candidate-1", role: "apply", enabled: true }];
   const draft = { add: "manual-mask", exclusion: "manual-exclusion", exclusionErase: "manual-restore" };
   runtime.state.currentId = image.id; runtime.state.currentImage = image;
-  runtime.state.singleSave = { imageId: image.id, divisor: 100, draft };
+  runtime.state.singleSave = { imageId: image.id, generation: runtime.state.imageGeneration, divisor: 100, draft };
   runtime.state.candidates = candidates; runtime.state.drafts.set(image.id, draft); runtime.state.maskStatus.set(image.id, true);
   runtime.state.manualMaskPresent = true; runtime.state.manualEnabled = false; runtime.state.manualExclusionEnabled = true; runtime.state.manualExclusionEraseEnabled = false; runtime.state.manualExclusionForced = true;
   runtime.element('input[name="singleSaveMode"]:checked').value = "copy";
@@ -236,7 +243,8 @@ async function runSingleCopyKeepsEditorStateCase() {
   assert.equal(runtime.state.drafts.get(image.id), draft, "copy-and-keep preserves all manual draft layers");
   assert.equal(runtime.state.maskStatus.get(image.id), true, "copy-and-keep preserves mask status");
   assert.deepEqual([runtime.state.manualMaskPresent, runtime.state.manualEnabled, runtime.state.manualExclusionEnabled, runtime.state.manualExclusionEraseEnabled, runtime.state.manualExclusionForced], [true, false, true, false, true], "copy-and-keep preserves manual layer switches");
-  assert.deepEqual([image.reviewed, image.hidden], [false, true], "copy-and-keep preserves reviewed and hidden flags");
+  assert.deepEqual([image.reviewed, image.hidden], [false, false], "copy-and-keep preserves reviewed and hidden flags");
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, "copy-and-keep reaches the browser commit contract");
 }
 
 function deferred() {
@@ -259,7 +267,7 @@ async function runOutputPermissionSubmissionLockCases() {
   assert.equal(batchQueries, 1, "a second batch submit does not duplicate the permission request");
   batchPermission.resolve("granted");
   await Promise.all([firstBatch, secondBatch]);
-  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, `a pending batch permission starts one save loop and one commit (${runtime.requests.map((request) => request.path).join(", ")}; processable=${runtime.processableImages().map((image) => image.id).join(",")}; busy=${runtime.isBusy()}; staging=${runtime.catalogStagingEditsActive()}; mode=${runtime.selectedSaveMode()}; error=${runtime.lastError()?.message})`);
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, "a pending batch permission starts one save loop and one commit");
   assert.equal(runtime.state.saveStarting, false, "a completed batch releases the preflight lock");
 
   const retryPermission = deferred();
@@ -276,7 +284,8 @@ async function runOutputPermissionSubmissionLockCases() {
 
   const lockedImage = { id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1, reviewed: false, hidden: false };
   const single = createRuntime({ initialImages: [lockedImage], commit: () => jsonResponse({ cleared: true, stale: false, images: [lockedImage] }) });
-  single.state.singleSave = { imageId: "image-1", divisor: 100, draft: null };
+  single.state.currentId = "image-1"; single.state.currentImage = lockedImage;
+  single.state.singleSave = { imageId: "image-1", generation: single.state.imageGeneration, divisor: 100, draft: null };
   single.element('input[name="singleSaveMode"]:checked').value = "copy";
   single.element("#singleSaveSuffix").value = "_locked";
   single.element("#singleSaveDeleteOriginal").checked = true;
@@ -310,6 +319,7 @@ async function runOutputPermissionSubmissionLockCases() {
   assert.equal(single.state.images[0].reviewed, false, "single save does not mark an unreviewed image as reviewed");
 
   const singleCommits = single.requests.filter((request) => request.path === "/api/save/commit").length;
+  single.state.singleSave = { imageId: "image-1", generation: single.state.imageGeneration, divisor: 100, draft: null };
   single.state.outputDirectoryHandle.queryPermission = async () => "denied";
   await single.startSingleSave(event);
   assert.equal(single.elements.get("#singleSaveResult").textContent, "output permission denied", "a denied single-save permission uses the localized stable error");
@@ -684,7 +694,7 @@ async function runSingleSaveKeepsReviewAndDraftCase() {
   const runtime = createRuntime({ initialImages: [image], commit: () => jsonResponse({ cleared: true, stale: false, images: [image] }) });
   runtime.element('input[name="singleSaveMode"]:checked').value = "copy";
   runtime.state.currentId = image.id;
-  runtime.state.singleSave = { imageId: image.id, divisor: 100, draft: { add: "manual" } };
+  runtime.state.singleSave = { imageId: image.id, generation: runtime.state.imageGeneration, divisor: 100, draft: { add: "manual" } };
   runtime.state.drafts.set(image.id, { add: "manual", hasEffectiveMask: true });
   runtime.state.currentImage = { sentinel: "current-image" };
   runtime.state.candidates = [{ candidateId: "candidate" }];
@@ -713,7 +723,8 @@ async function runSingleSaveKeepsReviewAndDraftCase() {
   const reviewedRuntime = createRuntime({ initialImages: [reviewed], commit: () => jsonResponse({ cleared: true, stale: false, images: [reviewed] }) });
   reviewedRuntime.element('input[name="singleSaveMode"]:checked').value = "copy";
   reviewedRuntime.state.currentId = reviewed.id;
-  reviewedRuntime.state.singleSave = { imageId: reviewed.id, divisor: 100, draft: { add: "manual" } };
+  reviewedRuntime.state.currentImage = reviewed;
+  reviewedRuntime.state.singleSave = { imageId: reviewed.id, generation: reviewedRuntime.state.imageGeneration, divisor: 100, draft: { add: "manual" } };
   await reviewedRuntime.startSingleSave({ preventDefault() {} });
   assert.equal(reviewedRuntime.state.images[0].reviewed, true, "single save keeps an already reviewed image reviewed");
 }
