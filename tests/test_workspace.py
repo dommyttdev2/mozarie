@@ -18,6 +18,11 @@ from mozarie.workspace import WorkspaceOpenError, WorkspaceStore
 
 
 class WorkspaceTests(unittest.TestCase):
+    @staticmethod
+    def _new_catalog(store: WorkspaceStore, name: str | None = None) -> str:
+        """Create the current explicit project boundary used by workspace APIs."""
+        return str(store.create_project(name)["id"])
+
     def _image(self, root: Path):
         return SimpleNamespace(relative_path="001.png", size_bytes=10, mtime_ns=20)
 
@@ -30,7 +35,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_manual_effective_presence_uses_scalar_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             store = WorkspaceStore(Path(directory))
-            catalog = store.ensure_catalog()
+            catalog = self._new_catalog(store)
             image_id = store.reconcile_images(catalog, [self._image(Path(directory))])["001.png"]["image_id"]
             store.save_manual(str(image_id), {"add": "x", "manualEnabled": True, "hasEffectiveMask": True}, lambda value: self._png() if value else None)
             self.assertEqual(store.manual_mask_statuses([str(image_id)]), {str(image_id): (True, 0)})
@@ -38,7 +43,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_manual_effective_mask_requires_the_client_scalar(self):
         with tempfile.TemporaryDirectory() as directory:
             store = WorkspaceStore(Path(directory))
-            catalog = store.ensure_catalog()
+            catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [self._image(Path(directory))])["001.png"]["image_id"])
             with self.assertRaisesRegex(ValueError, "effective mask"):
                 store.save_manual(image_id, {"add": "x"}, lambda value: b"png" if value else None)
@@ -47,7 +52,7 @@ class WorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = WorkspaceStore(root)
-            catalog = store.ensure_catalog()
+            catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
             connection = sqlite3.connect(store.path)
             with connection as db:
@@ -73,7 +78,7 @@ class WorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = WorkspaceStore(root)
-            catalog = store.ensure_catalog()
+            catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
             connection = sqlite3.connect(store.path)
             with connection as db:
@@ -89,7 +94,7 @@ class WorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = WorkspaceStore(root)
-            catalog = store.ensure_catalog()
+            catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
             store.save_manual(image_id, {
                 "add": "add", "exclusion": "exclusion", "exclusionErase": "erase",
@@ -127,7 +132,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_history_restores_one_image_and_discards_its_redo_after_new_edit(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkspaceStore(Path(directory)); catalog = store.ensure_catalog()
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [SimpleNamespace(relative_path="001.png", size_bytes=1, mtime_ns=1, width=4, height=4)])["001.png"]["image_id"])
             before = store.history_state(image_id)
             payload = {"add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": [], "hasEffectiveMask": False, "history": {}}
@@ -145,7 +150,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_history_group_restores_every_affected_image(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkspaceStore(Path(directory)); catalog = store.ensure_catalog()
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store)
             records = [SimpleNamespace(relative_path=f"{index}.png", size_bytes=1, mtime_ns=1, width=4, height=4) for index in range(2)]
             ids = [str(value["image_id"]) for value in store.reconcile_images(catalog, records).values()]
             payload = {"add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": [], "hasEffectiveMask": False, "history": {}}
@@ -159,7 +164,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_history_uses_manual_xor_delta_without_candidate_blob_copies(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkspaceStore(Path(directory)); catalog = store.ensure_catalog()
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [SimpleNamespace(relative_path="001.png", size_bytes=1, mtime_ns=1, width=8, height=8)])["001.png"]["image_id"])
             before = store.history_state(image_id)
             mask = Image.new("L", (8, 8), 0); mask.putpixel((3, 4), 255)
@@ -181,7 +186,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_candidate_history_references_existing_png_and_restores_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkspaceStore(Path(directory)); catalog = store.ensure_catalog()
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [SimpleNamespace(relative_path="001.png", size_bytes=1, mtime_ns=1, width=4, height=4)])["001.png"]["image_id"])
             db = sqlite3.connect(store.path); db.execute("INSERT INTO candidates VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", (image_id, "candidate", "penis", .9, self._png(), 1, "#fff", "auto", "auto", None, "apply", 0, 0)); db.commit(); db.close()
             before = store.history_state(image_id)
@@ -234,7 +239,7 @@ class WorkspaceTests(unittest.TestCase):
                         db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (version,))
                 connection.close()
                 before = store.path.read_bytes()
-                with self.assertRaisesRegex(WorkspaceOpenError, "recreated|not a Mozarie"):
+                with self.assertRaisesRegex(WorkspaceOpenError, "recreated|not a Mozarie|not schema"):
                     WorkspaceStore(root)
                 self.assertEqual(store.path.read_bytes(), before)
 
@@ -280,7 +285,7 @@ class WorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = WorkspaceStore(root)
-            catalog = store.ensure_catalog()
+            catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
             store.commit_save(image_id, candidate_revision=1, clear_workspace=True)
             reopened = WorkspaceStore(root)
@@ -310,7 +315,7 @@ class WorkspaceTests(unittest.TestCase):
     def test_empty_candidate_set_keeps_nonzero_revision_after_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             store = WorkspaceStore(Path(directory))
-            catalog = store.ensure_catalog()
+            catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [self._image(Path(directory))])["001.png"]["image_id"])
             store.commit_candidate_state(image_id, 7, [], False, replace=True)
             reopened = WorkspaceStore(Path(directory))
@@ -321,7 +326,7 @@ class WorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = WorkspaceStore(root)
-            catalog = store.ensure_catalog()
+            catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
             connection = sqlite3.connect(store.path)
             with connection as db:
@@ -343,19 +348,54 @@ class WorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = WorkspaceStore(root)
-            catalog = store.ensure_catalog()
+            catalog = self._new_catalog(store)
             records = [SimpleNamespace(relative_path=f"{index}.png", size_bytes=10, mtime_ns=20) for index in range(1100)]
             ids = [item["image_id"] for item in store.reconcile_images(catalog, records).values()]
             store.delete_images(ids)
             self.assertEqual(store.manual_mask_statuses(ids), {})
 
-    def test_reconcile_images_fetches_existing_rows_once_for_a_large_manifest(self):
+    def test_reconcile_images_loads_transforms_without_per_image_queries(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = WorkspaceStore(root)
-            catalog = store.ensure_catalog()
+            catalog = self._new_catalog(store)
             records = [SimpleNamespace(relative_path=f"nested/{index:05}.png", size_bytes=10, mtime_ns=20) for index in range(5000)]
-            store.reconcile_images(catalog, records)
+            stored = store.reconcile_images(catalog, records)
+            transformed_id = str(stored["nested/00001.png"]["image_id"])
+            store.set_image_transform(transformed_id, flip_horizontal=True)
+
+            def select_count(items):
+                statements: list[str] = []
+                original_connect = store._connect
+
+                def counted_connect():
+                    connection = original_connect()
+                    connection.set_trace_callback(statements.append)
+                    return connection
+
+                store._connect = counted_connect  # type: ignore[method-assign]
+                try:
+                    reconciled = store.reconcile_images(catalog, items)
+                finally:
+                    store._connect = original_connect  # type: ignore[method-assign]
+                return reconciled, len([statement for statement in statements if statement.lstrip().upper().startswith("SELECT")])
+
+            small, small_selects = select_count(records[:2])
+            large, large_selects = select_count(records)
+            self.assertTrue(small["nested/00001.png"]["flip_horizontal"])
+            self.assertTrue(large["nested/00001.png"]["flip_horizontal"])
+            # The current reconciliation path may chunk SQL for the runtime's
+            # SQLite bind limit, but its read count must not grow per image.
+            self.assertLessEqual(large_selects, small_selects + 4)
+
+    def test_project_open_preview_reads_a_large_source_in_one_query(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = WorkspaceStore(root)
+            catalog = self._new_catalog(store)
+            source = store.ensure_project_source(catalog, kind="browser-files", display_name="test", identity="browser:test")
+            records = [SimpleNamespace(relative_path=f"nested/{index:05}.png", size_bytes=10, mtime_ns=20) for index in range(5000)]
+            store.reconcile_images(catalog, records, source)
             statements: list[str] = []
             original_connect = store._connect
 
@@ -365,28 +405,11 @@ class WorkspaceTests(unittest.TestCase):
                 return connection
 
             store._connect = counted_connect  # type: ignore[method-assign]
-            store.reconcile_images(catalog, records)
+            preview = store.preview_reconcile_images(catalog, source, records)
+            self.assertEqual(len(preview), len(records))
             selects = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
             self.assertEqual(len(selects), 1)
-            self.assertIn("workspace_reconcile_records", selects[0])
-
-    def test_manifest_scoring_joins_the_manifest_once_for_a_large_manifest(self):
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            store = WorkspaceStore(root)
-            catalog = store.ensure_catalog()
-            entries = [(f"nested/{index:05}.png", f"hash-{index}") for index in range(5000)]
-            store.reconcile_images(catalog, [SimpleNamespace(relative_path=path, size_bytes=10, mtime_ns=20) for path, _hash in entries])
-            statements: list[str] = []
-            original_connect = store._connect
-
-            def counted_connect():
-                connection = original_connect()
-                connection.set_trace_callback(statements.append)
-                return connection
-
-            store._connect = counted_connect  # type: ignore[method-assign]
-            self.assertIsNone(store.best_catalog_for_manifest(entries, "f" * 32))
+            self.assertIn("image_transforms", selects[0])
 
     def test_schema_type_or_default_tampering_is_rejected_without_mutation(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as directory:
@@ -472,7 +495,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_history_restores_image_flags(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkspaceStore(Path(directory)); catalog = store.ensure_catalog()
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [self._image(Path(directory))])["001.png"]["image_id"])
             before = store.history_state(image_id)
             store.set_image_flags(image_id, hidden=True, reviewed=True)
@@ -481,23 +504,22 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(store.restore_history(image_id, "undo"), [image_id])
             self.assertEqual(store.image_state(image_id), (False, False))
 
-    def test_dimension_acknowledgement_stays_blocked_until_masks_are_cleared(self):
+    def test_dimension_acknowledgement_updates_the_durable_source_baseline(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkspaceStore(Path(directory)); catalog = store.ensure_catalog()
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store)
             initial = SimpleNamespace(relative_path="001.png", size_bytes=10, mtime_ns=20, width=4, height=4)
             image_id = str(store.reconcile_images(catalog, [initial])["001.png"]["image_id"])
             changed = SimpleNamespace(image_id=image_id, relative_path="001.png", size_bytes=11, mtime_ns=21, width=8, height=8)
-            store.accept_source_metadata([changed], preserve_mask_dimensions=True)
             reopened = store.reconcile_images(catalog, [changed])["001.png"]
             self.assertTrue(reopened["changed"]); self.assertTrue(reopened["dimensions_changed"])
-            store.clear_image_workspaces({image_id: 1})
-            store.accept_source_metadata([changed])
+            resized = store.acknowledge_source_mismatches([changed])
+            self.assertEqual(resized, {image_id})
             accepted = store.reconcile_images(catalog, [changed])["001.png"]
             self.assertFalse(accepted["changed"]); self.assertFalse(accepted["dimensions_changed"])
 
     def test_atomic_mutations_roll_back_when_the_history_insert_fails(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkspaceStore(Path(directory)); catalog = store.ensure_catalog()
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [self._image(Path(directory))])["001.png"]["image_id"])
             with patch.object(store, "_record_history_db", side_effect=sqlite3.OperationalError("history failed")):
                 with self.assertRaises(sqlite3.OperationalError):
@@ -511,7 +533,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_4k_manual_history_stores_only_changed_bbox_delta(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkspaceStore(Path(directory)); catalog = store.ensure_catalog()
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store)
             record = SimpleNamespace(relative_path="4k.png", size_bytes=1, mtime_ns=1, width=3840, height=2160)
             image_id = str(store.reconcile_images(catalog, [record])["4k.png"]["image_id"])
             mask = Image.new("L", (3840, 2160), 0)
@@ -529,7 +551,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_candidate_metadata_history_never_copies_the_detector_png(self):
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory); store = WorkspaceStore(root); catalog = store.ensure_catalog()
+            root = Path(directory); store = WorkspaceStore(root); catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [self._image(root)])["001.png"]["image_id"])
             mask_path = root / "candidate.png"; mask_path.write_bytes(self._png())
             candidate = SimpleNamespace(candidate_id="candidate", label_token="penis", confidence=.9, mask_path=mask_path,
@@ -550,7 +572,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_project_listing_never_selects_mask_blobs(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkspaceStore(Path(directory)); catalog = store.ensure_catalog("a" * 32)
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store, "listing")
             store.reconcile_images(catalog, [self._image(Path(directory))])
             statements: list[str] = []; original_connect = store._connect
             def traced():
@@ -562,7 +584,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_building_batch_is_not_undoable_until_it_is_finished(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkspaceStore(Path(directory)); catalog = store.ensure_catalog()
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store)
             records = [SimpleNamespace(relative_path=f"{index}.png", size_bytes=1, mtime_ns=1, width=4, height=4) for index in range(2)]
             ids = [str(item["image_id"]) for item in store.reconcile_images(catalog, records).values()]
             group = store.begin_history_group()
@@ -573,7 +595,7 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_image_delete_cascades_history_and_its_group(self):
         with tempfile.TemporaryDirectory() as directory:
-            store = WorkspaceStore(Path(directory)); catalog = store.ensure_catalog()
+            store = WorkspaceStore(Path(directory)); catalog = self._new_catalog(store)
             image_id = str(store.reconcile_images(catalog, [self._image(Path(directory))])["001.png"]["image_id"])
             group = store.begin_history_group()
             store.clear_image_workspaces({image_id: 1}, history_group=group)
