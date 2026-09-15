@@ -296,7 +296,7 @@ A～Hは確認用画像を区別する記号。ファイル名は任意とし、
 | DI-225 | ネイティブ元画像のrename後にunlink不能を起こし、Mozarieを再起動する | 画像のMozarie内削除は成功として表示し、隔離ファイルの後処理件数を別表示する。DB削除済み画像を復元表示せず、隔離ファイルの後処理を起動時に再試行する。保留中はCMD warningとstatusの`cleanup_pending`で確認する。 |
 | DI-226 | 元画像削除のprepare・status・cancel・ackを同一トークン、別トークン、不正UUIDで直接API確認する | UUID以外は拒否する。prepareはworkspace・PJ・カタログ世代・対象ID・元画像fingerprintを保存し、statusは再起動後も同じ結果を返す。cancelは未確定操作だけを取り消し、ackはcommitted/cancelledだけを削除する。 |
 | DI-227 | ネイティブ元画像のrename直前、rename直後、SQLite確定直後にMozarieを停止して再起動する | rename前の隔離予定と進捗を永続化する。SQLite確定前は元パスへ復元してpreparedへ戻り、確定後は元画像を復元せず、画面キャッシュ整理とunlink後処理だけを再試行する。native-onlyのpreparedは黙ってcancelせず、未完了として再試行できる。 |
-| DI-228 | prepare後に一覧世代を変え、元画像のパス・サイズ・更新日時・source kindのいずれかを変えて確定する | prepare時の世代と対象fingerprintを現在レコードと再照合する。全件を再照合できない場合はstaleとして元画像・Mozarie内データを保持する。 |
+| DI-228 | prepare後に一覧世代を変え、複数画像のうち一部だけ元画像のパス・サイズ・更新日時・source kindを変えて確定する | prepare時の世代と対象fingerprintを画像ごとに現在レコードと再照合する。再照合できた画像だけ削除し、再照合できない画像はstale理由を表示して元画像・Mozarie内データを保持する。 |
 | DI-229 | ブラウザー元画像の`removeEntry`直前にタブを閉じ、再起動後に保存済み親・ファイルhandleで存在確認する | `deleting`を先にIndexedDBへ保存する。親に同名entryがなければbrowserDeletedとして確定し、存在する場合は削除を取消または再試行する。権限不明・NotFound以外の例外はpendingを保持して再照会でき、未確認の元画像をMozarie側だけ削除しない。 |
 | DI-230 | ブラウザーまたはネイティブの一括削除で、全件preflight失敗、prepare時一部失敗、削除時一部失敗をそれぞれ起こす | 成功・失敗の件数、相対パスまたは画像ID、理由を画面へ表示する。ブラウザー内だけのpreflight失敗はブラウザーconsole、サーバーへ到達したprepare・確定・後処理の失敗はCMDログにも出す。prepareされなかった操作はIndexedDBのトークンを残さず、prepare済みで削除対象が0件ならcancel→status→ackしてトークンを削除する。 |
 | DI-231 | 元画像削除の確認でキャンセル、ブラウザー親directoryの`readwrite`許可、拒否を順に行う | `requestPermission`は確認ダイアログの実行クリック内で開始し、close後や下書き保存後に開始しない。キャンセル時は権限要求を出さず、複数親の拒否・例外は画像別の失敗として集計する。 |

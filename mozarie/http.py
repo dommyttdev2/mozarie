@@ -73,6 +73,8 @@ _POST_OPERATION_LABELS = {
     "/api/catalog/remove": "画像一覧から削除",
     "/api/catalog/delete-source": "元画像を完全削除",
     "/api/catalog/delete-source/prepare": "元画像削除の確認",
+    "/api/catalog/delete-source/claim": "元画像削除の所有権確定",
+    "/api/catalog/delete-source/release": "元画像削除の所有権解除",
     "/api/catalog/delete-source/status": "元画像削除の状態確認",
     "/api/catalog/delete-source/cancel": "元画像削除の取消",
     "/api/catalog/delete-source/ack": "元画像削除の確認完了",
@@ -704,6 +706,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/catalog/delete-source/prepare":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
                                                    lambda: STATE.prepare_source_delete(payload)))
+            elif path == "/api/catalog/delete-source/claim":
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.claim_source_delete(str(payload.get("deleteToken", "")))))
+            elif path == "/api/catalog/delete-source/release":
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.release_source_delete_claim(str(payload.get("deleteToken", "")))))
             elif path == "/api/catalog/delete-source":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
                                                    lambda: STATE.delete_images_with_sources(payload)))

@@ -1286,13 +1286,15 @@ class WorkspaceStore:
                 # older prepared receipt for the same live catalog rather than
                 # accumulating abandoned confirmations indefinitely. Never
                 # replace renaming or committed receipts.
-                previous = db.execute("""SELECT token,requested_image_ids FROM source_delete_operations
-                    WHERE state='prepared' AND catalog_id IS ? AND workspace_id IS ?""", (catalog_id, workspace_id)).fetchall()
+                previous = db.execute("""SELECT token,state,requested_image_ids FROM source_delete_operations
+                    WHERE state IN ('prepared','claimed') AND catalog_id IS ? AND workspace_id IS ?""", (catalog_id, workspace_id)).fetchall()
                 requested_set = set(requested_image_ids)
                 for row in previous:
                     try: previous_ids = set(json.loads(str(row["requested_image_ids"])))
                     except (TypeError, ValueError, json.JSONDecodeError): continue
                     if requested_set & previous_ids:
+                        if str(row["state"]) == "claimed":
+                            raise ValueError("source delete operation is already claimed")
                         db.execute("DELETE FROM source_delete_operations WHERE token=?", (str(row["token"]),))
                 now = time.time_ns()
                 db.execute("""INSERT INTO source_delete_operations(
@@ -1322,7 +1324,7 @@ class WorkspaceStore:
                 operation = self._source_delete_operation_row(db.execute("SELECT * FROM source_delete_operations WHERE token=?", (token,)).fetchone())
                 if operation is None:
                     raise ValueError("source delete operation is missing")
-                if operation["state"] not in {"prepared", "renaming"}:
+                if operation["state"] not in {"claimed", "renaming"}:
                     raise ValueError("source delete operation is not prepared")
                 for chunk in _chunks(image_ids):
                     db.execute(f"DELETE FROM images WHERE image_id IN ({','.join('?' for _ in chunk)})", chunk)
@@ -1347,6 +1349,50 @@ class WorkspaceStore:
                     state, json.dumps(result, ensure_ascii=False), time.time_ns(), token,
                 ))
                 db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def claim_source_delete(self, token: str) -> dict[str, Any]:
+        """CAS ownership immediately before a client can remove its source file."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                operation = self._source_delete_operation_row(db.execute("SELECT * FROM source_delete_operations WHERE token=?", (token,)).fetchone())
+                if operation is None:
+                    raise ValueError("source delete operation is missing")
+                if operation["state"] != "prepared":
+                    raise ValueError("source delete operation is already claimed")
+                result = dict(operation.get("result") or {})
+                db.execute("UPDATE source_delete_operations SET state='claimed',result_json=?,updated_at=? WHERE token=? AND state='prepared'", (
+                    json.dumps(result, ensure_ascii=False), time.time_ns(), token,
+                ))
+                if db.total_changes != 1:
+                    raise ValueError("source delete operation state changed")
+                db.execute("COMMIT")
+                operation["state"] = "claimed"; return operation
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def release_source_delete_claim(self, token: str) -> dict[str, Any]:
+        """Return an untouched client claim to prepared for an explicit retry."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                operation = self._source_delete_operation_row(db.execute("SELECT * FROM source_delete_operations WHERE token=?", (token,)).fetchone())
+                if operation is None:
+                    raise ValueError("source delete operation is missing")
+                if operation["state"] != "claimed":
+                    raise ValueError("source delete operation is not claimed")
+                result = dict(operation.get("result") or {})
+                db.execute("UPDATE source_delete_operations SET state='prepared',result_json=?,updated_at=? WHERE token=? AND state='claimed'", (
+                    json.dumps(result, ensure_ascii=False), time.time_ns(), token,
+                ))
+                if db.total_changes != 1:
+                    raise ValueError("source delete operation state changed")
+                db.execute("COMMIT")
+                operation["state"] = "prepared"; return operation
             except Exception:
                 db.execute("ROLLBACK")
                 raise

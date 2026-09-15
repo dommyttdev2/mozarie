@@ -1162,7 +1162,10 @@ class CatalogMixin:
                               "relativePath": records[image_id].relative_path, "sourcePath": str(records[image_id].path),
                               "mtimeNs": records[image_id].mtime_ns, "sizeBytes": records[image_id].size_bytes}
                              for image_id in prepared]
-                    self.workspace_store.prepare_source_delete(delete_token, catalog_id, workspace_id, generation, requested_ids, items, failures)
+                    try:
+                        self.workspace_store.prepare_source_delete(delete_token, catalog_id, workspace_id, generation, requested_ids, items, failures)
+                    except ValueError as exc:
+                        raise ClientError("削除操作が別の画面で開始されています。", "source_delete_not_prepared") from exc
         result = {"committed": False, "deleteToken": delete_token, "preparedImageIds": prepared, "failed": failures, "state": "prepared"}
         failure_text = ", ".join(f"{failure['imageId']}:{failure['reason']}" for failure in failures)
         LOGGER.info("元画像を完全削除: 確認完了 対象=%d 準備=%d 失敗=%d%s", len(requested_ids), len(prepared), len(failures), f" 詳細={failure_text}" if failure_text else "")
@@ -1202,7 +1205,7 @@ class CatalogMixin:
                 operation = self.workspace_store.source_delete_operation(delete_token)
                 if operation is None:
                     raise ClientError("削除確認の有効期限が切れました。もう一度削除を実行してください。", "source_delete_not_prepared")
-                if operation.get("state") not in {"prepared", "renaming"}:
+                if operation.get("state") not in {"claimed", "renaming"}:
                     return dict(operation.get("result") or {})
                 self._assert_catalog_mutable(allow_terminal_cleanup=True)
                 if (operation.get("catalogId"), operation.get("workspaceId")) != (self.catalog_id, self.workspace_id):
@@ -1294,7 +1297,7 @@ class CatalogMixin:
         if plans:
             renaming = {"plannedQuarantines": plans, "renamedImageIds": [], "failed": failures,
                         "prepareFailures": (operation.get("result") or {}).get("prepareFailures", [])}
-            self.workspace_store.update_source_delete_operation(delete_token, "renaming", renaming, expected_states={"prepared"})
+            self.workspace_store.update_source_delete_operation(delete_token, "renaming", renaming, expected_states={"claimed"})
         plan_paths = {str(plan["imageId"]): Path(str(plan["quarantinePath"])) for plan in plans}
         for record in removable:
             if record.source_kind != "filesystem": confirmed.append(record); continue
@@ -1309,7 +1312,9 @@ class CatalogMixin:
         if confirmed or durable_only_ids:
             try:
                 durable_result = {"removedImageIds": [record.image_id for record in confirmed] + durable_only_ids, "failed": failures,
-                                  "state": "workspace_committed", "quarantinePaths": [str(path) for _record, path in renamed]}
+                                  "state": "workspace_committed", "quarantinePaths": [str(path) for _record, path in renamed],
+                                  "quarantinePlans": [planned[record.image_id] for record, _path in renamed],
+                                  "quarantineRelativePaths": {str(path): record.relative_path for record, path in renamed}}
                 removed = self.remove_images_from_catalog([record.image_id for record in confirmed], source_delete_token=delete_token,
                                                           source_delete_result=durable_result, source_delete_extra_ids=durable_only_ids)
             except Exception:
@@ -1343,7 +1348,9 @@ class CatalogMixin:
                         self.workspace_store.update_source_delete_operation(delete_token, "restore_conflict", collision, expected_states={"renaming"})
                         LOGGER.warning("元画像削除の復元を保留: 衝突=%d", len(restore_conflicts))
                     elif plans:
-                        self.workspace_store.update_source_delete_operation(delete_token, "prepared", {}, expected_states={"renaming"})
+                        prepared_result = {"failed": (operation.get("result") or {}).get("prepareFailures", []),
+                                           "prepareFailures": (operation.get("result") or {}).get("prepareFailures", [])}
+                        self.workspace_store.update_source_delete_operation(delete_token, "prepared", prepared_result, expected_states={"renaming"})
                     raise
         else:
             removed = {"images": self.list_images(), "removedImageIds": [], "catalogGeneration": self.catalog_generation}
@@ -1374,7 +1381,7 @@ class CatalogMixin:
         for failure in result["failed"]:
             if failure.get("imageId") in names: failure["relativePath"] = names[failure["imageId"]]
         with self.lock: self.source_delete_receipts[delete_token] = dict(result)
-        self.workspace_store.update_source_delete_operation(delete_token, result["state"], {key: value for key, value in result.items() if key != "images"}, expected_states={"workspace_committed", "renaming", "prepared"})
+        self.workspace_store.update_source_delete_operation(delete_token, result["state"], {key: value for key, value in result.items() if key != "images"}, expected_states={"workspace_committed", "renaming", "claimed"})
         failure_text = ", ".join(f"{failure.get('relativePath', failure['imageId'])}:{failure['reason']}" for failure in failures)
         LOGGER.info("元画像を完全削除: 完了 対象=%d 成功=%d 失敗=%d 所要=%.2fs%s", len(operation.get("requestedImageIds", requested_ids)), len(removed["removedImageIds"]), len(failures), time.monotonic() - started_at, f" 詳細={failure_text}" if failure_text else "")
         return result
@@ -1392,6 +1399,22 @@ class CatalogMixin:
         result = operation.get("result") or {}
         return {"deleteToken": token, "state": operation.get("state"), "preparedImageIds": [item["imageId"] for item in operation.get("items", [])],
                 "preparedSourceKinds": {str(item["imageId"]): str(item.get("sourceKind", "")) for item in operation.get("items", [])}, **result}
+
+    def claim_source_delete(self, token: str) -> dict[str, Any]:
+        with self.import_lock:
+            operation = self.source_delete_status(token)
+            if operation["state"] != "prepared":
+                raise ClientError("削除操作が別の画面で開始されています。", "source_delete_not_prepared")
+            claimed = self.workspace_store.claim_source_delete(token)
+            return {"deleteToken": token, "state": claimed["state"]}
+
+    def release_source_delete_claim(self, token: str) -> dict[str, Any]:
+        with self.import_lock:
+            operation = self.source_delete_status(token)
+            if operation["state"] != "claimed":
+                return operation
+            released = self.workspace_store.release_source_delete_claim(token)
+            return {"deleteToken": token, "state": released["state"]}
 
     def cancel_source_delete(self, token: str) -> dict[str, Any]:
         with self.import_lock:
@@ -1466,6 +1489,13 @@ class CatalogMixin:
             for raw_path in raw_paths:
                 plan = plans.get(raw_path)
                 _source, quarantine, reason = self._valid_source_delete_quarantine(plan or {})
+                if (reason == "quarantine_missing" and operation is not None
+                        and operation.get("state") in {"workspace_committed", "cleanup_pending"}
+                        and self._source_delete_plan_matches_item(plan or {}, operation.get("items", []))):
+                    # The database has already committed the workspace delete;
+                    # a missing verified quarantine means unlink completed just
+                    # before the receipt update was interrupted.
+                    continue
                 if (reason is not None or quarantine is None or str(quarantine) != raw_path
                         or not self._source_delete_plan_matches_item(plan or {}, (operation or {}).get("items", []))):
                     remaining.append(raw_path)

@@ -351,6 +351,12 @@ async function commitSourceDeleteWithRetry(payload) {
     return catalogApi("/api/catalog/delete-source", payload);
   }
 }
+async function claimSourceDelete(deleteToken) {
+  return catalogApi("/api/catalog/delete-source/claim", { deleteToken });
+}
+async function releaseSourceDeleteClaim(deleteToken) {
+  return catalogApi("/api/catalog/delete-source/release", { deleteToken });
+}
 
 async function acknowledgeSourceDelete(deleteToken) {
   await api("/api/catalog/delete-source/ack", { method: "POST", body: JSON.stringify({ deleteToken }), resyncOnStale: false });
@@ -361,7 +367,7 @@ async function recoverPendingBrowserDeletes(pending) {
   const entries = Array.isArray(pending.browserEntries) ? pending.browserEntries : [];
   if (!entries.length) return { deleted: pending.browserDeletedImageIds || [], unresolved: false };
   let unresolved = false;
-  for (const entry of entries.filter((candidate) => candidate.state === "deleting")) {
+  for (const entry of entries.filter((candidate) => candidate.state === "deleting" || candidate.state === "unknown")) {
     try {
       await entry.parentHandle.getFileHandle(entry.name);
       entry.state = "ready";
@@ -378,10 +384,14 @@ async function recoverPendingBrowserDeletes(pending) {
 async function resumePendingSourceDeletes() {
   for (const pending of await pendingSourceDeletes()) {
     try {
-      const status = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
-      const recovery = status.state === "prepared" ? await recoverPendingBrowserDeletes(pending) : { deleted: pending.browserDeletedImageIds || [], unresolved: false };
-      if (status.state === "prepared" && recovery.unresolved) continue;
-      if (status.state === "prepared" && recovery.deleted.length) {
+      let status = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
+      const recovery = ["prepared", "claimed"].includes(status.state) ? await recoverPendingBrowserDeletes(pending) : { deleted: pending.browserDeletedImageIds || [], unresolved: false };
+      if (["prepared", "claimed"].includes(status.state) && recovery.unresolved) continue;
+      if (status.state === "claimed" && !recovery.deleted.length) {
+        await releaseSourceDeleteClaim(pending.deleteToken);
+        status = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
+      }
+      if (["prepared", "claimed"].includes(status.state) && recovery.deleted.length) {
         await commitSourceDeleteWithRetry({ imageIds: pending.imageIds, deleteToken: pending.deleteToken,
           browserDeletedImageIds: recovery.deleted });
       } else if (status.state === "prepared" && Object.values(status.preparedSourceKinds || {}).includes("filesystem")) {
@@ -437,6 +447,7 @@ async function permanentlyDeleteImages(images, visibleImages) {
     const pending = { deleteToken: token, imageIds: preparedImages.map((image) => image.id), browserDeletedImageIds: [],
       browserEntries: preparedImages.filter((image) => image.sourceKind !== "filesystem").map(browserDeleteEntry).filter(Boolean) };
     await rememberPendingSourceDelete(pending);
+    await claimSourceDelete(token);
     const browser = await deleteBrowserSources(preparedImages, pending.browserEntries, async () => {
       pending.browserDeletedImageIds = pending.browserEntries.filter((entry) => entry.state === "deleted").map((entry) => entry.imageId);
       await rememberPendingSourceDelete(pending);
@@ -450,6 +461,7 @@ async function permanentlyDeleteImages(images, visibleImages) {
       imageIds: commitImages.map((image) => image.id), deleteToken: token, browserDeletedImageIds: browser.deleted,
     });
     else {
+      await releaseSourceDeleteClaim(token);
       data = await api("/api/catalog/delete-source/cancel", { method: "POST", body: JSON.stringify({ deleteToken: token }), resyncOnStale: false });
       data = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken: token }), resyncOnStale: false });
       await acknowledgeSourceDelete(token);
@@ -470,6 +482,7 @@ async function permanentlyDeleteImages(images, visibleImages) {
       .map((failure) => [`${failure.imageId || failure.relativePath || ""}:${failure.reason || ""}`, failure])).values()];
     const failureDetails = failed.map((failure) => `${failure.relativePath || failure.imageId}: ${failure.reason}`).join("、");
     const cleanupNotice = data.cleanupPendingCount ? ` 元画像ファイルの後処理${data.cleanupPendingCount}件を再試行します。` : "";
+    if (failed.length) console.warn("元画像を完全削除: 対象=%d 成功=%d 失敗=%d 詳細=%s", images.length, removed.size, failed.length, failureDetails);
     setStatus(`元画像を${removed.size}件削除しました。${failed.length ? `失敗${failed.length}件: ${failureDetails}` : ""}${cleanupNotice}`, failed.length ? "warning" : "success");
     if (failed.length) showUserError(codedError(failed[0].reason));
     if (data.state === "committed") await acknowledgeSourceDelete(token);
