@@ -269,9 +269,10 @@ class SaveJournal:
         create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
         create.restype = wintypes.HANDLE
         close = kernel32.CloseHandle; close.argtypes = [wintypes.HANDLE]; close.restype = wintypes.BOOL
-        # Keep DELETE unshared until both rename and journal ownership record
-        # finish, so a replacement cannot slip into that interval.
-        handle = create(str(staged), 0x10080, 0x3, None, 3, 0x80, None)
+        # Share reads only until rename and journal ownership recording finish.
+        # A competing writer or replacement must fail rather than mutating the
+        # file between its FILE_ID_INFO check and publication.
+        handle = create(str(staged), 0x10080, 0x1, None, 3, 0x80, None)
         if handle == wintypes.HANDLE(-1).value:
             return None
         try:
@@ -333,7 +334,8 @@ class SaveJournal:
         create.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
         create.restype = wintypes.HANDLE
         close = kernel32.CloseHandle; close.argtypes = [wintypes.HANDLE]; close.restype = wintypes.BOOL
-        handle = create(str(source), 0x10080, 0x3, None, 3, 0x80, None)
+        # Keep the verified source immutable until its no-replace rename.
+        handle = create(str(source), 0x10080, 0x1, None, 3, 0x80, None)
         if handle == wintypes.HANDLE(-1).value:
             return False
         try:
