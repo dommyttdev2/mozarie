@@ -289,6 +289,7 @@ class DetectionMixin:
             stage_lock = threading.Lock()
 
             def claim_and_run(index: int, record: ImageRecord) -> None:
+                candidates: list[Candidate] = []
                 try:
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
                     candidates = self._detect_image(
@@ -303,19 +304,19 @@ class DetectionMixin:
                         fluid_color_fill=detection_options["fluid_color_fill"],
                     )
                     if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
-                        self._discard_candidates(candidates)
                         return
                     self._assert_record_stat_matches(record)
                     with self.lock:
                         if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
                                 or not self._job_is_current(job_generation, catalog_generation)
                                 or self.images.get(record.image_id) is not record):
-                            self._discard_candidates(candidates)
                             return
                         expected_revision = self._candidate_revision(record.image_id)
                     with stage_lock:
                         staged[record.image_id] = (index, record, candidates)
+                    candidates = []
                 finally:
+                    self._discard_candidates(candidates)
                     self.invalidate_sam_image(record.image_id)
 
             failures = self._run_fixed_workers(records, worker_count, claim_and_run, control, job_generation, catalog_generation)
