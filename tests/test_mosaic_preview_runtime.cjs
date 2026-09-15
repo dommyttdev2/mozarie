@@ -53,7 +53,7 @@ const state = {
 const previewButton = { classList: { remove() {} }, setAttribute() {} };
 const context = {
   Worker, ImageData: imageData, Uint8Array, Uint8ClampedArray, state,
-  createImageBitmap: async (image) => bitmap(image === state.currentImage ? "source" : "mask"), OffscreenCanvas: class {},
+  createImageBitmap: async (image) => bitmap(image === context.originalCanvas ? "source" : "mask"), OffscreenCanvas: class {},
   requestAnimationFrame: () => 1,
   originalCanvas: canvas(), combinedCanvas: canvas(), mosaicCanvas: canvas(),
   originalCtx: { clearRect() {}, drawImage() {} }, combinedCtx: {},
@@ -103,7 +103,7 @@ vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: can
   await deferredBuild;
   assert.equal(oldMask.closed, true, "a mask superseded while it is being captured is closed");
   assert.equal(worker.renderMasks.includes(oldMask), false, "a superseded mask is never posted to the worker");
-  context.createImageBitmap = async (image) => bitmap(image === state.currentImage ? "source" : "mask");
+  context.createImageBitmap = async (image) => bitmap(image === context.originalCanvas ? "source" : "mask");
   const replacementAfterCapture = await worker.nextRender();
   worker.frame(replacementAfterCapture);
 
@@ -174,7 +174,7 @@ vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: can
   state.mosaicWorkerBusy = false; state.mosaicPending = false;
   let resolveSource; let sourceDecodes = 0;
   context.createImageBitmap = (image) => {
-    if (image === state.currentImage) { sourceDecodes += 1; return new Promise((resolve) => { resolveSource = resolve; }); }
+    if (image === context.originalCanvas) { sourceDecodes += 1; return new Promise((resolve) => { resolveSource = resolve; }); }
     return Promise.resolve(bitmap("mask"));
   };
   const sourceWorker = context.createMosaicWorker();
@@ -202,7 +202,7 @@ vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: can
   assert.equal(state.mosaicPreviewEnabled, false, "a worker source-post failure closes the decoded source and disables preview");
 
   context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "stroke"; state.activeStroke = { id: "stroke" };
-  context.createImageBitmap = async (image) => bitmap(image === state.currentImage ? "source" : "mask");
+  context.createImageBitmap = async (image) => bitmap(image === context.originalCanvas ? "source" : "mask");
   await context.rebuildMosaicPreview();
   assert.equal(state.mosaicWorkerBusy, true); assert.equal(state.mosaicPending, false, "an active manual stroke starts a preview render immediately");
   context.requestMosaicPreview(); assert.equal(state.mosaicPending, true, "a new stroke update retains one newest pending preview while the worker is busy");
@@ -210,7 +210,7 @@ vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: can
   state.activeStroke = null; state.mosaicPreviewRequested = true; context.requestMosaicPreview();
   context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "mask-stale";
   let resolveStaleMask; let staleMaskRequested;
-  context.createImageBitmap = (image) => image === state.currentImage
+  context.createImageBitmap = (image) => image === context.originalCanvas
     ? Promise.resolve(bitmap("source"))
     : new Promise((resolve) => { staleMaskRequested = true; resolveStaleMask = resolve; });
   const staleMaskBuild = context.rebuildMosaicPreview();
@@ -218,7 +218,7 @@ vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: can
   const staleMask = bitmap("mask-stale"); context.releaseMosaicPreview(); resolveStaleMask(staleMask); await staleMaskBuild;
   assert.equal(staleMask.closed, true, "a mask captured for a released worker is closed without posting");
   context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "mask-error";
-  context.createImageBitmap = async (image) => { if (image === state.currentImage) return bitmap("source"); throw new Error("mask unavailable"); };
+  context.createImageBitmap = async (image) => { if (image === context.originalCanvas) return bitmap("source"); throw new Error("mask unavailable"); };
   await context.rebuildMosaicPreview(); assert.equal(state.mosaicPreviewEnabled, false, "a mask capture failure disables preview and releases its worker");
 
   context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "worker-error";
@@ -242,7 +242,7 @@ vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: can
   assert.equal(state.mosaicSourcePromise, newerSourcePromise, "an older source completion cannot clear a newer source promise");
 
   context.releaseMosaicPreview(); state.mosaicPreviewEnabled = true; state.currentImage = { width: 12, height: 9 }; state.currentId = "render-post-error";
-  context.createImageBitmap = async (image) => bitmap(image === state.currentImage ? "source" : "mask-render-post-error");
+  context.createImageBitmap = async (image) => bitmap(image === context.originalCanvas ? "source" : "mask-render-post-error");
   const renderPostWorker = context.createMosaicWorker(); renderPostWorker.postMessage = (payload, transfer) => {
     if (payload.type === "render") throw new Error("render stopped");
     return Worker.prototype.postMessage.call(renderPostWorker, payload, transfer);
@@ -250,7 +250,7 @@ vm.runInNewContext(fs.readFileSync(canvasPath, "utf8"), context, { filename: can
   await context.rebuildMosaicPreview();
   assert.equal(state.mosaicPreviewEnabled, false, "a render post failure closes its captured mask and disables preview");
 
-  context.createImageBitmap = async (image) => bitmap(image === state.currentImage ? "source" : "mask");
+  context.createImageBitmap = async (image) => bitmap(image === context.originalCanvas ? "source" : "mask");
   context.releaseMosaicPreview();
   assert.equal(state.mosaicWorker, null, "release leaves no active worker handle");
   assert.equal(counters.workerCanvases, 0, "all controlled worker canvas handles are reclaimed");

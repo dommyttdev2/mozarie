@@ -117,6 +117,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     btoa(value) { return Buffer.from(value, "binary").toString("base64"); },
     window: browserWindow,
     navigator: browserNavigator,
+    showUserError(error) { context.lastUserError = error; },
     showModalFromInvoker(dialog) { dialog?.showModal?.(); },
     fetch: async (requestPath, options = {}) => {
       if (requestPath === "/api/images") {
@@ -156,10 +157,10 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     new vm.Script(fs.readFileSync(appPath, "utf8"), { filename: appPath }).runInContext(runtimeContext);
   }
   new vm.Script(
-    "globalThis.__browserSaveRuntime = { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, translate: t };",
+    "globalThis.__browserSaveRuntime = { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, processableImages, isBusy, catalogStagingEditsActive, selectedSaveMode, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, translate: t };",
     { filename: "test-browser-save-exports.js" },
   ).runInContext(runtimeContext);
-  const { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, translate } = context.__browserSaveRuntime;
+  const { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, processableImages, isBusy, catalogStagingEditsActive, selectedSaveMode, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, translate } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   state.settings = { saving: { parallelism: 1, default_output_directory: "G:/output" } };
   const outputFiles = new Map();
@@ -187,7 +188,7 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     "apply.outputDirectoryUnset": "Save location: not selected",
     "errorCode.output_write_unsupported": "Output writes are unsupported",
   };
-  return { element: getElement, elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, navigator: browserNavigator, outputFiles, requests, runBrowserSave, saveTargets, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, state, translate, window: browserWindow };
+  return { element: getElement, elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, navigator: browserNavigator, outputFiles, requests, runBrowserSave, saveTargets, processableImages, isBusy, catalogStagingEditsActive, selectedSaveMode, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, state, translate, lastError: () => context.lastUserError, window: browserWindow };
 }
 
 async function runOutputDirectoryPermissionCases() {
@@ -258,7 +259,7 @@ async function runOutputPermissionSubmissionLockCases() {
   assert.equal(batchQueries, 1, "a second batch submit does not duplicate the permission request");
   batchPermission.resolve("granted");
   await Promise.all([firstBatch, secondBatch]);
-  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, "a pending batch permission starts one save loop and one commit");
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, `a pending batch permission starts one save loop and one commit (${runtime.requests.map((request) => request.path).join(", ")}; processable=${runtime.processableImages().map((image) => image.id).join(",")}; busy=${runtime.isBusy()}; staging=${runtime.catalogStagingEditsActive()}; mode=${runtime.selectedSaveMode()}; error=${runtime.lastError()?.message})`);
   assert.equal(runtime.state.saveStarting, false, "a completed batch releases the preflight lock");
 
   const retryPermission = deferred();
