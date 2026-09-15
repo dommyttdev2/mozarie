@@ -197,7 +197,7 @@ async function writeSingleOutput(handle, relativePath, suffix, response, format 
     reservation = await navigator.locks.request("mozarie-output-name", { mode: "exclusive" }, async () => {
       entered = true;
       let fileHandle; let name; let created = false;
-      for (let sequence = 0; sequence < 10000; sequence += 1) {
+      for (let sequence = 0; ; sequence += 1) {
         name = singleOutputName(relativePath, suffix, sequence, format);
         try { await handle.getFileHandle(name); }
         catch (error) {
@@ -205,7 +205,6 @@ async function writeSingleOutput(handle, relativePath, suffix, response, format 
           fileHandle = await handle.getFileHandle(name, { create: true }); created = true; break;
         }
       }
-      if (!fileHandle) { const error = new Error("output_name_exhausted"); error.code = "output_name_exhausted"; throw error; }
       return { name, fileHandle, created };
     });
   } catch (error) {

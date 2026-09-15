@@ -21,8 +21,6 @@ from typing import Any, Callable
 
 APP_DIR = Path(__file__).resolve().parent
 RELEASE_API = "https://api.github.com/repos/norqis/mozarie/releases/latest"
-MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
-MAX_ARCHIVE_FILES = 10_000
 
 _WINDOWS_RESERVED_NAMES = frozenset({
     "CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$",
@@ -68,13 +66,12 @@ MESSAGES = {
         "download_url": "ダウンロード先が見つかりません。",
         "download_digest": "GitHub Releaseの更新ファイル検証情報が正しくありません。",
         "archive_digest": "ダウンロードした更新ファイルのSHA-256が一致しません。",
-        "archive_too_large": "更新ファイルが大きすぎます。",
+        "archive_disk_space": "更新ファイルを展開する空き容量が不足しています。",
         "downloading_progress": "ダウンロード中: {megabytes} MB",
         "archive_download": "更新ファイルをダウンロードできませんでした。",
         "archive_invalid_path": "更新ZIPに不正なパスが含まれています。",
         "archive_symlink": "更新ZIPにシンボリックリンクが含まれています。",
-        "archive_invalid_count": "更新ZIPのファイル数が正しくありません。",
-        "archive_extracted_too_large": "展開後の更新ファイルが大きすぎます。",
+        "archive_invalid_count": "更新ZIPの内容が正しくありません。",
         "archive_extract": "更新ZIPを展開できませんでした。",
         "archive_missing_app": "更新ZIPにMozarie本体が見つかりません。",
         "requirements_updating": "依存関係を更新しています...",
@@ -111,13 +108,12 @@ MESSAGES = {
         "download_url": "No download URL was found.",
         "download_digest": "The GitHub Release update verification information is invalid.",
         "archive_digest": "The downloaded update archive SHA-256 does not match.",
-        "archive_too_large": "The update archive is too large.",
+        "archive_disk_space": "There is not enough free disk space to extract the update.",
         "downloading_progress": "Downloading: {megabytes} MB",
         "archive_download": "Could not download the update archive.",
         "archive_invalid_path": "The update archive contains an invalid path.",
         "archive_symlink": "The update archive contains a symbolic link.",
-        "archive_invalid_count": "The update archive has an invalid file count.",
-        "archive_extracted_too_large": "The extracted update is too large.",
+        "archive_invalid_count": "The update archive contents are invalid.",
         "archive_extract": "Could not extract the update archive.",
         "archive_missing_app": "The update archive does not contain Mozarie.",
         "requirements_updating": "Updating dependencies...",
@@ -281,15 +277,26 @@ def release_archive(release: dict[str, Any]) -> tuple[str, str, int]:
         raise UpdateError(tr("download_url"))
     if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise UpdateError(tr("download_digest"))
-    if not isinstance(size, int) or size < 1 or size > MAX_ARCHIVE_BYTES:
-        raise UpdateError(tr("archive_too_large"))
+    if not isinstance(size, int) or size < 1:
+        raise UpdateError(tr("download_url"))
     return url, digest.removeprefix("sha256:"), size
+
+
+def _require_free_space(destination: Path, required: int) -> None:
+    try:
+        if shutil.disk_usage(destination).free < required:
+            raise UpdateError(tr("archive_disk_space"))
+    except UpdateError:
+        raise
+    except OSError as exc:
+        raise UpdateError(tr("archive_disk_space")) from exc
 
 
 def download_archive(url: str, destination: Path, expected_digest: str, expected_size: int,
                      opener: Callable[..., Any] = urllib.request.urlopen) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "Mozarie-Updater"})
     try:
+        _require_free_space(destination.parent, expected_size)
         with opener(request, timeout=60) as response, destination.open("wb") as output:
             total = 0
             digest = hashlib.sha256()
@@ -298,8 +305,8 @@ def download_archive(url: str, destination: Path, expected_digest: str, expected
                 if not chunk:
                     break
                 total += len(chunk)
-                if total > MAX_ARCHIVE_BYTES:
-                    raise UpdateError(tr("archive_too_large"))
+                if total > expected_size:
+                    raise UpdateError(tr("archive_download"))
                 output.write(chunk)
                 digest.update(chunk)
                 print(f"\r{tr('downloading_progress', megabytes=total // 1024 // 1024)}", end="", flush=True)
@@ -338,10 +345,8 @@ def extract_archive(archive: Path, destination: Path) -> Path:
         destination_root = destination.resolve()
         with zipfile.ZipFile(archive) as bundle:
             infos = bundle.infolist()
-            if not infos or len(infos) > MAX_ARCHIVE_FILES:
+            if not infos:
                 raise UpdateError(tr("archive_invalid_count"))
-            if sum(info.file_size for info in infos) > MAX_ARCHIVE_BYTES:
-                raise UpdateError(tr("archive_extracted_too_large"))
             for info in infos:
                 relative = _safe_member_path(info)
                 target = destination_root.joinpath(*relative.parts).resolve()
@@ -350,9 +355,15 @@ def extract_archive(archive: Path, destination: Path) -> Path:
                 if info.is_dir():
                     target.mkdir(parents=True, exist_ok=True)
                     continue
+                _require_free_space(destination_root, info.file_size)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 with bundle.open(info) as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output)
+                    written = 0
+                    while chunk := source.read(1024 * 1024):
+                        output.write(chunk)
+                        written += len(chunk)
+                    if written != info.file_size:
+                        raise UpdateError(tr("archive_extract"))
     except UpdateError:
         raise
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
