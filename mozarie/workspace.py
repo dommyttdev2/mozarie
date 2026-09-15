@@ -1281,6 +1281,19 @@ class WorkspaceStore:
                 if existing is not None:
                     db.execute("COMMIT")
                     return existing
+                # A newly prepared deletion proves that every overlapping
+                # source still exists and matches its fingerprint. Replace an
+                # older prepared receipt for the same live catalog rather than
+                # accumulating abandoned confirmations indefinitely. Never
+                # replace renaming or committed receipts.
+                previous = db.execute("""SELECT token,requested_image_ids FROM source_delete_operations
+                    WHERE state='prepared' AND catalog_id IS ? AND workspace_id IS ?""", (catalog_id, workspace_id)).fetchall()
+                requested_set = set(requested_image_ids)
+                for row in previous:
+                    try: previous_ids = set(json.loads(str(row["requested_image_ids"])))
+                    except (TypeError, ValueError, json.JSONDecodeError): continue
+                    if requested_set & previous_ids:
+                        db.execute("DELETE FROM source_delete_operations WHERE token=?", (str(row["token"]),))
                 now = time.time_ns()
                 db.execute("""INSERT INTO source_delete_operations(
                     token,state,catalog_id,workspace_id,catalog_generation,requested_image_ids,items_json,result_json,created_at,updated_at
@@ -1370,7 +1383,7 @@ class WorkspaceStore:
 
     def pending_source_delete_renames(self) -> list[tuple[str, list[dict[str, Any]]]]:
         with self._lock, self._connect() as db:
-            rows = db.execute("SELECT token,result_json FROM source_delete_operations WHERE state='renaming'").fetchall()
+            rows = db.execute("SELECT token,result_json FROM source_delete_operations WHERE state IN ('renaming','restore_conflict')").fetchall()
             result: list[tuple[str, list[dict[str, Any]]]] = []
             for row in rows:
                 try:

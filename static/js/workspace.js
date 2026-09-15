@@ -48,14 +48,15 @@ async function directoryCatalogStore() {
 }
 
 async function rememberPendingSourceDelete(payload) {
-  const db = await directoryCatalogStore(); if (!db) return;
+  const db = await directoryCatalogStore(); if (!db) throw codedError("source_delete_recovery_unavailable");
   try {
     await new Promise((resolve, reject) => {
       const transaction = db.transaction("sourceDeletes", "readwrite");
       transaction.objectStore("sourceDeletes").put({ ...payload, savedAt: Date.now() });
       transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); transaction.onabort = () => reject(transaction.error);
     });
-  } finally { db.close(); }
+  } catch { throw codedError("source_delete_recovery_unavailable"); }
+  finally { db.close(); }
 }
 
 async function forgetPendingSourceDelete(deleteToken) {

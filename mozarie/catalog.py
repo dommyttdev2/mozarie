@@ -6,6 +6,7 @@ import binascii
 import io
 import json
 import os
+import re
 import secrets
 import shutil
 import threading
@@ -1223,6 +1224,39 @@ class CatalogMixin:
                         LOGGER.info("元画像削除を再検証して再開: 保存時世代=%s 現在世代=%s", operation.get("catalogGeneration"), self.catalog_generation)
                 return self._commit_prepared_source_delete(delete_token, requested_ids, browser_deleted, records, started_at)
 
+    @staticmethod
+    def _valid_source_delete_quarantine(plan: dict[str, Any]) -> tuple[Path | None, Path | None, str | None]:
+        """Accept only the exact private rename we recorded for this source."""
+        source = Path(str(plan.get("sourcePath", ""))); quarantine = Path(str(plan.get("quarantinePath", "")))
+        if not source.name or source.parent != quarantine.parent:
+            return source, quarantine, "quarantine_path_invalid"
+        if re.fullmatch(rf"\.{re.escape(source.name)}\.mozarie-delete-[0-9a-f]{{32}}", quarantine.name) is None:
+            return source, quarantine, "quarantine_name_invalid"
+        try: stat = quarantine.stat()
+        except OSError: return source, quarantine, "quarantine_missing"
+        try: fingerprint = (int(plan.get("mtimeNs", -1)), int(plan.get("sizeBytes", -1)))
+        except (TypeError, ValueError): return source, quarantine, "quarantine_fingerprint_invalid"
+        if (stat.st_mtime_ns, stat.st_size) != fingerprint:
+            return source, quarantine, "quarantine_changed"
+        return source, quarantine, None
+
+    @staticmethod
+    def _source_delete_plan_matches_item(plan: dict[str, Any], items: list[dict[str, Any]]) -> bool:
+        try:
+            plan_mtime, plan_size = int(plan.get("mtimeNs", -2)), int(plan.get("sizeBytes", -2))
+        except (TypeError, ValueError):
+            return False
+        for item in items:
+            try:
+                if (str(item.get("imageId", "")) == str(plan.get("imageId", ""))
+                        and str(item.get("sourceKind", "")) == "filesystem"
+                        and str(item.get("sourcePath", "")) == str(plan.get("sourcePath", ""))
+                        and int(item.get("mtimeNs", -1)) == plan_mtime and int(item.get("sizeBytes", -1)) == plan_size):
+                    return True
+            except (TypeError, ValueError):
+                continue
+        return False
+
     def _commit_prepared_source_delete(self, delete_token: str, requested_ids: list[str], browser_deleted: set[str],
                                         records: dict[str, ImageRecord | None], started_at: float) -> dict[str, Any]:
         removable: list[ImageRecord] = []
@@ -1253,11 +1287,13 @@ class CatalogMixin:
             removable.append(record)
         renamed: list[tuple[ImageRecord, Path]] = []; confirmed: list[ImageRecord] = []
         native_records = [record for record in removable if record.source_kind == "filesystem"]
-        plans = [{"imageId": record.image_id, "sourcePath": str(record.path),
+        plans = [{"imageId": record.image_id, "relativePath": record.relative_path, "sourcePath": str(record.path),
+                  "mtimeNs": record.mtime_ns, "sizeBytes": record.size_bytes,
                   "quarantinePath": str(record.path.with_name(f".{record.path.name}.mozarie-delete-{uuid.uuid4().hex}"))}
                  for record in native_records]
         if plans:
-            renaming = {"plannedQuarantines": plans, "renamedImageIds": [], "failed": failures}
+            renaming = {"plannedQuarantines": plans, "renamedImageIds": [], "failed": failures,
+                        "prepareFailures": (operation.get("result") or {}).get("prepareFailures", [])}
             self.workspace_store.update_source_delete_operation(delete_token, "renaming", renaming, expected_states={"prepared"})
         plan_paths = {str(plan["imageId"]): Path(str(plan["quarantinePath"])) for plan in plans}
         for record in removable:
@@ -1267,7 +1303,8 @@ class CatalogMixin:
             except OSError:
                 failures.append({"imageId": record.image_id, "reason": "source_delete_failed"}); continue
             renamed.append((record, quarantine)); confirmed.append(record)
-            progress = {"plannedQuarantines": plans, "renamedImageIds": [current.image_id for current, _path in renamed], "failed": failures}
+            progress = {"plannedQuarantines": plans, "renamedImageIds": [current.image_id for current, _path in renamed], "failed": failures,
+                        "prepareFailures": (operation.get("result") or {}).get("prepareFailures", [])}
             self.workspace_store.update_source_delete_operation(delete_token, "renaming", progress, expected_states={"renaming"})
         if confirmed or durable_only_ids:
             try:
@@ -1285,18 +1322,43 @@ class CatalogMixin:
                         removed = {"images": self.list_images(), "removedImageIds": durable_result["removedImageIds"],
                                    "catalogGeneration": self.catalog_generation}
                 else:
-                    for record, quarantine in reversed(renamed):
-                        try:
-                            if quarantine.exists(): os.replace(quarantine, record.path)
-                        except OSError: LOGGER.exception("元画像の削除復元に失敗: %s", record.relative_path)
-                    if plans:
+                    restore_conflicts: list[dict[str, str]] = []
+                    planned = {str(plan["imageId"]): plan for plan in plans}
+                    for record, _quarantine in reversed(renamed):
+                        source, quarantine, reason = self._valid_source_delete_quarantine(planned[record.image_id])
+                        if reason is not None or source is None or quarantine is None:
+                            restore_conflicts.append({"imageId": record.image_id, "relativePath": record.relative_path,
+                                                      "reason": reason or "quarantine_path_invalid"}); continue
+                        if source.exists():
+                            restore_conflicts.append({"imageId": record.image_id, "relativePath": record.relative_path,
+                                                      "reason": "source_restore_conflict"}); continue
+                        try: os.replace(quarantine, source)
+                        except OSError as restore_error:
+                            restore_conflicts.append({"imageId": record.image_id, "relativePath": record.relative_path,
+                                                      "reason": "source_restore_failed"})
+                            LOGGER.warning("元画像の削除復元に失敗: 対象=%s 理由=%s", record.relative_path, restore_error)
+                    if restore_conflicts:
+                        collision = {"removedImageIds": [], "failed": restore_conflicts, "state": "restore_conflict",
+                                     "recoveryConflicts": restore_conflicts, "plannedQuarantines": plans, "quarantinePaths": [], "cleanupPendingCount": len(restore_conflicts)}
+                        self.workspace_store.update_source_delete_operation(delete_token, "restore_conflict", collision, expected_states={"renaming"})
+                        LOGGER.warning("元画像削除の復元を保留: 衝突=%d", len(restore_conflicts))
+                    elif plans:
                         self.workspace_store.update_source_delete_operation(delete_token, "prepared", {}, expected_states={"renaming"})
                     raise
         else:
             removed = {"images": self.list_images(), "removedImageIds": [], "catalogGeneration": self.catalog_generation}
         removed_ids = set(removed["removedImageIds"]); cleanup_paths: list[str] = []
+        cleanup_conflicts: list[dict[str, str]] = []
+        planned = {str(plan["imageId"]): plan for plan in plans}
         for record, quarantine in renamed:
             if record.image_id not in removed_ids: continue
+            _source, verified_quarantine, reason = self._valid_source_delete_quarantine(planned[record.image_id])
+            if reason is not None or verified_quarantine is None:
+                cleanup_paths.append(str(quarantine))
+                cleanup_conflicts.append({"imageId": record.image_id, "relativePath": record.relative_path,
+                                          "reason": reason or "quarantine_path_invalid"})
+                LOGGER.warning("元画像削除の後処理を保留: 対象=%s 理由=%s", record.relative_path, reason)
+                continue
             try: quarantine.unlink()
             except OSError as exc:
                 LOGGER.warning("元画像削除の後処理を保留: 対象=%s 理由=%s", record.relative_path, exc)
@@ -1304,8 +1366,9 @@ class CatalogMixin:
         result = {**removed, "failed": failures, "prepareFailures": (operation.get("result") or {}).get("prepareFailures", []),
                   "state": "cleanup_pending" if cleanup_paths else "committed",
                   "quarantinePaths": cleanup_paths,
+                  "quarantinePlans": [plan for plan in plans if str(plan["quarantinePath"]) in cleanup_paths],
                   "quarantineRelativePaths": {str(path): record.relative_path for record, path in renamed if str(path) in cleanup_paths},
-                  "cleanupPendingCount": len(cleanup_paths)}
+                  "recoveryConflicts": cleanup_conflicts, "cleanupPendingCount": len(cleanup_paths)}
         names = {image_id: record.relative_path for image_id, record in records.items() if record is not None}
         names.update({str(item["imageId"]): str(item.get("relativePath", item["imageId"])) for item in operation.get("items", [])})
         for failure in result["failed"]:
@@ -1327,7 +1390,8 @@ class CatalogMixin:
         if operation is None:
             raise ClientError("削除操作が見つかりません。", "source_delete_not_prepared")
         result = operation.get("result") or {}
-        return {"deleteToken": token, "state": operation.get("state"), "preparedImageIds": [item["imageId"] for item in operation.get("items", [])], **result}
+        return {"deleteToken": token, "state": operation.get("state"), "preparedImageIds": [item["imageId"] for item in operation.get("items", [])],
+                "preparedSourceKinds": {str(item["imageId"]): str(item.get("sourceKind", "")) for item in operation.get("items", [])}, **result}
 
     def cancel_source_delete(self, token: str) -> dict[str, Any]:
         with self.import_lock:
@@ -1358,24 +1422,59 @@ class CatalogMixin:
     def retry_source_delete_cleanups(self) -> None:
         """Finish source unlinks left after a committed workspace deletion."""
         for token, plans in self.workspace_store.pending_source_delete_renames():
-            recovered = True
+            operation = self.workspace_store.source_delete_operation(token) or {}
+            conflicts: list[dict[str, str]] = []
             for plan in plans:
-                source, quarantine = Path(str(plan.get("sourcePath", ""))), Path(str(plan.get("quarantinePath", "")))
-                try:
-                    if quarantine.exists() and not source.exists(): os.replace(quarantine, source)
-                    elif quarantine.exists() and source.exists(): quarantine.unlink()
-                except OSError:
-                    recovered = False; LOGGER.warning("元画像削除の名前変更を復元できません: %s", source)
-            if recovered:
-                self.workspace_store.update_source_delete_operation(token, "prepared", {}, expected_states={"renaming"})
+                source, quarantine, reason = self._valid_source_delete_quarantine(plan)
+                relative_path = str(plan.get("relativePath", plan.get("imageId", "")))
+                if not self._source_delete_plan_matches_item(plan, operation.get("items", [])):
+                    conflicts.append({"imageId": str(plan.get("imageId", "")), "relativePath": relative_path,
+                                      "reason": "quarantine_item_mismatch"}); continue
+                if reason == "quarantine_missing" and source is not None and source.exists():
+                    continue
+                if reason is not None or source is None or quarantine is None:
+                    conflicts.append({"imageId": str(plan.get("imageId", "")), "relativePath": relative_path,
+                                      "reason": reason or "quarantine_path_invalid"}); continue
+                if source.exists():
+                    conflicts.append({"imageId": str(plan.get("imageId", "")), "relativePath": relative_path,
+                                      "reason": "source_restore_conflict"}); continue
+                try: os.replace(quarantine, source)
+                except OSError as exc:
+                    conflicts.append({"imageId": str(plan.get("imageId", "")), "relativePath": relative_path,
+                                      "reason": "source_restore_failed"})
+                    LOGGER.warning("元画像削除の名前変更を復元できません: 対象=%s 理由=%s", relative_path, exc)
+            if conflicts:
+                result = {"removedImageIds": [], "failed": conflicts, "state": "restore_conflict", "recoveryConflicts": conflicts,
+                          "plannedQuarantines": plans, "quarantinePaths": [], "cleanupPendingCount": len(conflicts)}
+                self.workspace_store.update_source_delete_operation(token, "restore_conflict", result, expected_states={"renaming", "restore_conflict"})
+                LOGGER.warning("元画像削除の名前変更を保留: 衝突=%d", len(conflicts))
+            else:
+                prepared_result = {"failed": (operation.get("result") or {}).get("prepareFailures", []),
+                                   "prepareFailures": (operation.get("result") or {}).get("prepareFailures", [])}
+                self.workspace_store.update_source_delete_operation(token, "prepared", prepared_result, expected_states={"renaming", "restore_conflict"})
                 LOGGER.info("元画像削除の名前変更を復元: token=%s", token)
         for token, raw_paths in self.workspace_store.pending_source_delete_cleanups():
             remaining: list[str] = []
             operation = self.workspace_store.source_delete_operation(token)
-            names = dict((operation or {}).get("result", {}).get("quarantineRelativePaths", {}))
+            durable_result = dict((operation or {}).get("result") or {})
+            if durable_result.get("recoveryConflicts"):
+                LOGGER.warning("元画像削除の後処理を保留: 衝突=%d", len(durable_result["recoveryConflicts"]))
+                continue
+            plans = {str(plan.get("quarantinePath", "")): plan for plan in durable_result.get("quarantinePlans", []) if isinstance(plan, dict)}
+            names = dict(durable_result.get("quarantineRelativePaths", {}))
+            conflicts: list[dict[str, str]] = []
             for raw_path in raw_paths:
+                plan = plans.get(raw_path)
+                _source, quarantine, reason = self._valid_source_delete_quarantine(plan or {})
+                if (reason is not None or quarantine is None or str(quarantine) != raw_path
+                        or not self._source_delete_plan_matches_item(plan or {}, (operation or {}).get("items", []))):
+                    remaining.append(raw_path)
+                    conflict_reason = reason or "quarantine_item_mismatch"
+                    conflicts.append({"relativePath": names.get(raw_path, Path(raw_path).name), "reason": conflict_reason})
+                    LOGGER.warning("元画像削除の後処理を再試行しません: 対象=%s 理由=%s", names.get(raw_path, Path(raw_path).name), conflict_reason)
+                    continue
                 try:
-                    Path(raw_path).unlink(missing_ok=True)
+                    quarantine.unlink(missing_ok=True)
                 except OSError as exc:
                     remaining.append(raw_path)
                     LOGGER.warning("元画像削除の後処理を再試行できません: 対象=%s 理由=%s", names.get(raw_path, Path(raw_path).name), exc)
@@ -1383,6 +1482,7 @@ class CatalogMixin:
                 continue
             result = dict(operation.get("result") or {})
             result["quarantinePaths"] = remaining
+            result["recoveryConflicts"] = conflicts
             result["state"] = "cleanup_pending" if remaining else "committed"
             self.workspace_store.update_source_delete_operation(token, result["state"], result, expected_states={"cleanup_pending", "workspace_committed"})
             if remaining:

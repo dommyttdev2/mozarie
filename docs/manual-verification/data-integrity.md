@@ -295,7 +295,10 @@ A～Hは確認用画像を区別する記号。ファイル名は任意とし、
 | DI-224 | ブラウザー元画像の削除で、`removeEntry`後の確定前にタブを閉じ、Mozarieを再起動して同じPJを開く | 永続化した削除トークンの状態を再照会する。すでに消えたブラウザー元画像は同じトークンでMozarie内削除を一度だけ完了し、一覧・候補・手描き・履歴を整合させる。終端結果を受領したらackしてトークンを削除する。 |
 | DI-225 | ネイティブ元画像のrename後にunlink不能を起こし、Mozarieを再起動する | 画像のMozarie内削除は成功として表示し、隔離ファイルの後処理件数を別表示する。DB削除済み画像を復元表示せず、隔離ファイルの後処理を起動時に再試行する。保留中はCMD warningとstatusの`cleanup_pending`で確認する。 |
 | DI-226 | 元画像削除のprepare・status・cancel・ackを同一トークン、別トークン、不正UUIDで直接API確認する | UUID以外は拒否する。prepareはworkspace・PJ・カタログ世代・対象ID・元画像fingerprintを保存し、statusは再起動後も同じ結果を返す。cancelは未確定操作だけを取り消し、ackはcommitted/cancelledだけを削除する。 |
-| DI-227 | ネイティブ元画像のrename直前、rename直後、SQLite確定直後にMozarieを停止して再起動する | rename前の隔離予定と進捗を永続化する。SQLite確定前は元パスへ復元してpreparedへ戻り、確定後は元画像を復元せず、画面キャッシュ整理とunlink後処理だけを再試行する。 |
+| DI-227 | ネイティブ元画像のrename直前、rename直後、SQLite確定直後にMozarieを停止して再起動する | rename前の隔離予定と進捗を永続化する。SQLite確定前は元パスへ復元してpreparedへ戻り、確定後は元画像を復元せず、画面キャッシュ整理とunlink後処理だけを再試行する。native-onlyのpreparedは黙ってcancelせず、未完了として再試行できる。 |
 | DI-228 | prepare後に一覧世代を変え、元画像のパス・サイズ・更新日時・source kindのいずれかを変えて確定する | prepare時の世代と対象fingerprintを現在レコードと再照合する。全件を再照合できない場合はstaleとして元画像・Mozarie内データを保持する。 |
-| DI-229 | ブラウザー元画像の`removeEntry`直前にタブを閉じ、再起動後に保存済み親・ファイルhandleで存在確認する | `deleting`を先にIndexedDBへ保存する。親に同名entryがなければbrowserDeletedとして確定し、存在する場合は削除を取消または再試行し、未確認の元画像をMozarie側だけ削除しない。 |
-| DI-230 | ブラウザーまたはネイティブの一括削除で、全件preflight失敗、prepare時一部失敗、削除時一部失敗をそれぞれ起こす | 成功・失敗の件数、相対パスまたは画像ID、理由を画面とCMDログに表示する。prepareされなかった操作はIndexedDBのトークンを残さず、prepare済みで削除対象が0件ならcancel→status→ackしてトークンを削除する。 |
+| DI-229 | ブラウザー元画像の`removeEntry`直前にタブを閉じ、再起動後に保存済み親・ファイルhandleで存在確認する | `deleting`を先にIndexedDBへ保存する。親に同名entryがなければbrowserDeletedとして確定し、存在する場合は削除を取消または再試行する。権限不明・NotFound以外の例外はpendingを保持して再照会でき、未確認の元画像をMozarie側だけ削除しない。 |
+| DI-230 | ブラウザーまたはネイティブの一括削除で、全件preflight失敗、prepare時一部失敗、削除時一部失敗をそれぞれ起こす | 成功・失敗の件数、相対パスまたは画像ID、理由を画面へ表示する。ブラウザー内だけのpreflight失敗はブラウザーconsole、サーバーへ到達したprepare・確定・後処理の失敗はCMDログにも出す。prepareされなかった操作はIndexedDBのトークンを残さず、prepare済みで削除対象が0件ならcancel→status→ackしてトークンを削除する。 |
+| DI-231 | 元画像削除の確認でキャンセル、ブラウザー親directoryの`readwrite`許可、拒否を順に行う | `requestPermission`は確認ダイアログの実行クリック内で開始し、close後や下書き保存後に開始しない。キャンセル時は権限要求を出さず、複数親の拒否・例外は画像別の失敗として集計する。 |
+| DI-232 | IndexedDBのopen、transaction、putをそれぞれ失敗させてブラウザー元画像削除を実行する | 復旧intentを保存できないことを明示して`removeEntry`へ進まない。prepare前にローカルtokenを保存し、prepare応答消失時は次回起動でstatus照会する。同じ画像の新しいprepareは古いprepared receiptを置換し、終端receiptはackで削除する。 |
+| DI-233 | rename後の元パスに外部ファイルを作成し、隔離ファイルも外部変更した状態でDB失敗または再起動復旧を行う | 元パスと隔離ファイルが同時にある場合、または隔離ファイルの親・名前・fingerprintが記録と違う場合、どちらも上書き・削除しない。`restore_conflict`として相対パスと理由を残し、外部衝突の解消後だけ安全に復元を再試行する。 |
