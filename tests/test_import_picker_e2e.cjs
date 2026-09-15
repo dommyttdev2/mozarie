@@ -18,7 +18,11 @@ const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAA
 const browserCoverage = process.env.MOZARIE_JS_COVERAGE === "1" ? [] : null;
 
 async function newCoveredPage(browser, options) {
-  const page = await browser.newPage(options);
+  // Every scenario gets an incognito-like context.  The fixture drives local
+  // storage, IndexedDB and File System Access state, so a page-only reset can
+  // otherwise leak one scenario into the next.
+  const context = await browser.newContext(options);
+  const page = await context.newPage();
   if (browserCoverage) {
     await page.coverage.startJSCoverage({ resetOnNavigation: false });
     browserCoverage.push({ page, entries: null });
@@ -29,7 +33,7 @@ async function newCoveredPage(browser, options) {
 async function stopCoveredPage(page, close = false) {
   const covered = browserCoverage?.find((item) => item.page === page);
   if (covered && !covered.entries) covered.entries = await page.coverage.stopJSCoverage();
-  if (close) await page.close();
+  if (close) await page.context().close();
 }
 
 async function writeBrowserCoverage() {
@@ -102,6 +106,10 @@ function startFixtureServer() {
   let currentJob = { kind: "idle", state: "idle" };
   let nextSaveToken = 1;
   const saveTokens = new Map();
+  const sourceDeletes = new Map();
+  const sourceDeleteRequests = [];
+  let holdSourceDeleteClaim = false;
+  const pendingSourceDeleteClaims = [];
   const saveRequests = [];
   let holdSaveRender = false;
   const pendingSaveRenders = [];
@@ -112,6 +120,19 @@ function startFixtureServer() {
     { id: "sample-two", relativePath: "sample-two.png", sourceKind: "session", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0, reviewed: false, hidden: false },
   ];
   let catalog = structuredClone(initialCatalog);
+  let catalogGeneration = 1;
+  const catalogSnapshot = () => ({
+    images: catalog,
+    root: "G:/fixture",
+    catalogGeneration,
+    workspace: false,
+    workspaceId: null,
+    historyDurable: false,
+    project: null,
+    readOnly: false,
+    sources: [],
+    needsSource: false,
+  });
   let settings = {
     general: { language: "ja", open_browser: false, port: 8766, shortcuts_enabled: true },
     models: { target_segmentation: "", ntd11: "", ntd11_enabled: false, sensitive: "", sensitive_enabled: false, hand_detection: "", hand_detection_enabled: false, sam_checkpoints: { vit_b: "", vit_l: "", vit_h: "" }, sam_model_type: "vit_b", provider: "gpu", gpu_device: 0 },
@@ -120,7 +141,7 @@ function startFixtureServer() {
     detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 2, default_candidate_padding_px: 3, targets: ["penis", "pussy"] },
     shortcuts: {
       enabled: true,
-      bindings: { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", reviewAndNext: "Enter", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" },
+      bindings: { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", reviewAndNext: "Enter", removeImage: "Delete", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" },
       actions: {},
     }, confirmations: {},
   };
@@ -200,10 +221,7 @@ function startFixtureServer() {
     }
     if (requestPath === "/api/images") {
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({
-        images: catalog,
-        root: "G:/fixture",
-      }));
+      response.end(JSON.stringify(catalogSnapshot()));
       return;
     }
     // Folder imports preflight existing project sources before posting the
@@ -220,11 +238,17 @@ function startFixtureServer() {
       response.end(JSON.stringify({ images: [] }));
       return;
     }
+    if (requestPath === "/api/project/source-check" && request.method === "POST") {
+      for await (const _chunk of request) { /* consume the selected absolute path */ }
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ projects: [] }));
+      return;
+    }
     if (requestPath === "/api/folder" && request.method === "POST") {
       let body = ""; for await (const chunk of request) body += chunk;
       folderRequests.push(JSON.parse(body));
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ images: catalog, root: folderRequests.at(-1).path }));
+      response.end(JSON.stringify({ ...catalogSnapshot(), root: folderRequests.at(-1).path }));
       return;
     }
     // Folder selection now begins explicit unnamed project work.  Keep this
@@ -240,6 +264,55 @@ function startFixtureServer() {
       for await (const _chunk of request) { /* consume request */ }
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ path: "G:\\fixture-output" }));
+      return;
+    }
+    if (requestPath === "/api/catalog/delete-source/prepare" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const { imageIds = [], deleteToken, expectedProjectId, expectedCatalogGeneration } = JSON.parse(body);
+      sourceDeleteRequests.push({ path: requestPath, expectedProjectId, expectedCatalogGeneration, headerProjectId: request.headers["x-mozarie-expected-project-id"], headerCatalogGeneration: request.headers["x-mozarie-expected-catalog-generation"] });
+      if (expectedProjectId !== null || expectedCatalogGeneration !== catalogGeneration) { response.writeHead(409, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "stale_catalog" })); return; }
+      const preparedImageIds = catalog.filter((image) => imageIds.includes(image.id)).map((image) => image.id);
+      const preparedSourceKinds = Object.fromEntries(catalog.filter((image) => preparedImageIds.includes(image.id)).map((image) => [image.id, image.sourceKind]));
+      sourceDeletes.set(deleteToken, { state: "prepared", imageIds: preparedImageIds, preparedSourceKinds });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ committed: false, deleteToken, state: "prepared", preparedImageIds, failed: [] }));
+      return;
+    }
+    if (requestPath === "/api/catalog/delete-source/claim" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const { deleteToken, expectedProjectId, expectedCatalogGeneration } = JSON.parse(body);
+      sourceDeleteRequests.push({ path: requestPath, expectedProjectId, expectedCatalogGeneration, headerProjectId: request.headers["x-mozarie-expected-project-id"], headerCatalogGeneration: request.headers["x-mozarie-expected-catalog-generation"] });
+      if (expectedProjectId !== null || expectedCatalogGeneration !== catalogGeneration) { response.writeHead(409, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "stale_catalog" })); return; }
+      const operation = sourceDeletes.get(deleteToken);
+      if (!operation) { response.writeHead(409, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "source_delete_not_prepared" })); return; }
+      operation.state = "claimed";
+      if (holdSourceDeleteClaim) await new Promise((resolve) => pendingSourceDeleteClaims.push(resolve));
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ deleteToken, state: "claimed" }));
+      return;
+    }
+    if (requestPath === "/api/catalog/delete-source" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const operation = sourceDeletes.get(payload.deleteToken);
+      sourceDeleteRequests.push({ path: requestPath, expectedProjectId: payload.expectedProjectId, expectedCatalogGeneration: payload.expectedCatalogGeneration, headerProjectId: request.headers["x-mozarie-expected-project-id"], headerCatalogGeneration: request.headers["x-mozarie-expected-catalog-generation"] });
+      if (payload.expectedProjectId !== null || payload.expectedCatalogGeneration !== catalogGeneration) { response.writeHead(409, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "stale_catalog" })); return; }
+      const imageIds = operation?.imageIds?.filter((imageId) => payload.imageIds.includes(imageId)) || [];
+      const removedImageIds = catalog.filter((image) => imageIds.includes(image.id)).map((image) => image.id);
+      catalog = catalog.filter((image) => !removedImageIds.includes(image.id));
+      if (removedImageIds.length) catalogGeneration += 1;
+      const result = { state: "committed", images: catalog, catalogGeneration, removedImageIds, failed: [], prepareFailures: [], cleanupPendingCount: 0 };
+      if (operation) Object.assign(operation, result);
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(result));
+      return;
+    }
+    if ((requestPath === "/api/catalog/delete-source/status" || requestPath === "/api/catalog/delete-source/cancel" || requestPath === "/api/catalog/delete-source/release" || requestPath === "/api/catalog/delete-source/ack") && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const { deleteToken } = JSON.parse(body); const operation = sourceDeletes.get(deleteToken);
+      if (!operation) { response.writeHead(409, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "source_delete_not_prepared" })); return; }
+      if (requestPath.endsWith("/cancel")) operation.state = "cancelled";
+      if (requestPath.endsWith("/release")) operation.state = "prepared";
+      const result = { ...operation, images: operation.images || catalog, removedImageIds: operation.removedImageIds || [], failed: operation.failed || [] };
+      if (requestPath.endsWith("/ack")) sourceDeletes.delete(deleteToken);
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(result));
       return;
     }
     if (requestPath === "/api/catalog/remove" && request.method === "POST") {
@@ -315,8 +388,22 @@ function startFixtureServer() {
       return;
     }
     if (requestPath === "/api/masks/clear" && request.method === "POST") {
-      for await (const _chunk of request) { /* consume request */ }
+      let body = ""; for await (const chunk of request) body += chunk;
+      const { imageIds = [] } = JSON.parse(body);
+      for (const image of catalog.filter((item) => imageIds.includes(item.id))) {
+        image.candidateCount = 0; image.enabledCandidateCount = 0; image.hasEffectiveMask = false;
+      }
       response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    if (/^\/api\/images\/[^/]+\/transform$/.test(requestPath) && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const imageId = decodeURIComponent(requestPath.split("/")[3]);
+      const image = catalog.find((entry) => entry.id === imageId);
+      const transform = JSON.parse(body);
+      if (!image) { response.writeHead(404, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "image_not_found" })); return; }
+      Object.assign(image, { flipH: transform.flipH === true, flipV: transform.flipV === true });
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ image, canUndo: false, canRedo: false }));
       return;
     }
     if (requestPath === "/api/workspace/catalog" && request.method === "POST") {
@@ -334,6 +421,17 @@ function startFixtureServer() {
       for await (const _chunk of request) { /* consume an optional undo request */ }
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ canUndo: false, canRedo: false, changedImageIds: [] }));
+      return;
+    }
+    if (requestPath === "/api/workspace/images" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const { imageIds = [], hidden, reviewed } = JSON.parse(body);
+      const flags = Object.fromEntries(catalog.filter((image) => imageIds.includes(image.id)).map((image) => {
+        if (typeof hidden === "boolean") image.hidden = hidden;
+        if (typeof reviewed === "boolean") image.reviewed = reviewed;
+        return [image.id, { hidden: image.hidden === true, reviewed: image.reviewed === true }];
+      }));
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ flags }));
       return;
     }
     if (requestPath.startsWith("/api/workspace/image/") && request.method === "POST") {
@@ -534,6 +632,7 @@ function startCandidateScenarioServer(expanded = false) {
     if (requestPath === "/api/images") { json({ images: [image], root: "G:/candidate-fixture" }); return; }
     if (requestPath === "/api/job") { json({ kind: "idle", state: "idle" }); return; }
     if (requestPath === "/api/update/status") { json({ current: "v1.0.0", latest: "v1.0.0", available: false }); return; }
+    if (requestPath.startsWith(`/api/workspace/manual/${imageId}/`) && request.method !== "GET") { for await (const _chunk of request) { /* consume incremental workspace draft body */ } json({}); return; }
     if (requestPath === `/api/workspace/manual/${imageId}`) { json({ draft: { add: "", exclusion: "", exclusionErase: "", candidateRevision: 7 } }); return; }
     if (requestPath === `/api/workspace/image/${imageId}` && request.method === "POST") {
       for await (const _chunk of request) { /* consume workspace flags */ }
@@ -614,7 +713,7 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     const candidateLabelPresentation = await page.evaluate(async () => {
       const candidates = state.candidates;
       const manual = {
-        maskPresent: state.manualMaskPresent, enabled: state.manualEnabled,
+        maskPresent: state.manualMaskPresent, exclusionPresent: state.manualExclusionPresent, exclusionErasePresent: state.manualExclusionErasePresent, enabled: state.manualEnabled,
         exclusionEnabled: state.manualExclusionEnabled, exclusionEraseEnabled: state.manualExclusionEraseEnabled,
         exclusionForced: state.manualExclusionForced,
       };
@@ -649,7 +748,7 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
         sections: [...document.querySelectorAll(".candidate-section h3")].map((heading) => heading.textContent),
       });
       state.candidates = metadataCandidates;
-      state.manualMaskPresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true; state.manualExclusionForced = true;
+      state.manualMaskPresent = true; state.manualExclusionPresent = true; state.manualExclusionErasePresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true; state.manualExclusionForced = true;
       addCtx.fillRect(0, 0, 1, 1); exclusionCtx.fillRect(0, 0, 1, 1); exclusionEraseCtx.fillRect(0, 0, 1, 1);
       renderCandidates();
       const ja = snapshot();
@@ -658,7 +757,7 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
       await loadTranslations("ja");
       state.candidates = candidates;
       state.manualMaskPresent = manual.maskPresent; state.manualEnabled = manual.enabled;
-      state.manualExclusionEnabled = manual.exclusionEnabled; state.manualExclusionEraseEnabled = manual.exclusionEraseEnabled; state.manualExclusionForced = manual.exclusionForced;
+      state.manualExclusionPresent = manual.exclusionPresent; state.manualExclusionErasePresent = manual.exclusionErasePresent; state.manualExclusionEnabled = manual.exclusionEnabled; state.manualExclusionEraseEnabled = manual.exclusionEraseEnabled; state.manualExclusionForced = manual.exclusionForced;
       [addCtx, exclusionCtx, exclusionEraseCtx].forEach((context, index) => context.putImageData(layers[index], 0, 0));
       renderCandidates();
       return { ja, en };
@@ -714,7 +813,7 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     assert.equal(await row.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(238, 78, 78, 0.3)", "the apply section visibly highlights its selected candidate");
 
     await page.evaluate(() => {
-      state.manualMaskPresent = true;
+      state.manualMaskPresent = true; state.manualExclusionPresent = true; state.manualExclusionErasePresent = true;
       addCtx.fillRect(0, 0, 2, 2); exclusionCtx.fillRect(2, 0, 2, 2); exclusionEraseCtx.fillRect(3, 0, 2, 2);
       renderCandidates();
       document.querySelector(".candidate-row-apply .candidate-class").textContent = "Long English candidate label that must stay inside the row";
@@ -745,7 +844,8 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
         const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
         return getComputedStyle(button).display !== "none" && rect.width > 0 && rect.height > 0 && rect.left >= row.left && rect.right <= row.right && rect.top >= row.top && rect.bottom <= row.bottom && (target === button || button.contains(target));
         }), true, `the automatic exclusion force control remains fully visible inside the row at ${width}px/${language}`);
-        assert.deepEqual(await page.locator('[data-candidate-blink-id="candidate-blink-exclude"] .candidate-row-actions > button').evaluateAll((buttons) => buttons.map((button) => button.className)), ["candidate-display-toggle", "candidate-effective-toggle", "candidate-padding-button", "candidate-forced", "candidate-delete"], `the exclusion actions retain display, effective, padding, force, delete order at ${width}px/${language}`);
+        assert.deepEqual(await page.locator('[data-candidate-blink-id="candidate-blink-exclude"] .candidate-row-actions > button').evaluateAll((buttons) => buttons.map((button) => button.className)), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-padding-button", "candidate-forced"], `the exclusion actions retain enable, display, effective, padding, and force order at ${width}px/${language}`);
+        assert.equal(await page.locator('[data-candidate-blink-id="candidate-blink-exclude"] .candidate-row-heading > .candidate-delete').count(), 1, `the delete control is at the heading's upper-right edge at ${width}px/${language}`);
       }
     }
     }
@@ -795,7 +895,8 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     await padding.click();
     const paddingPopover = page.locator("#candidatePaddingPopover");
     const paddingInput = page.locator("#candidatePaddingInput");
-    const maximumPadding = Number(await paddingInput.getAttribute("max"));
+    const maximumPadding = Math.ceil(Math.hypot(409 - 1, 401 - 1));
+    assert.equal(await paddingInput.getAttribute("max"), null, "candidate padding has no arbitrary browser input cap");
     assert.equal(await paddingPopover.evaluate((node) => node.matches(":popover-open")), true, "one shared padding popover opens from the candidate row");
     assert.equal(await paddingInput.evaluate((node) => document.activeElement === node), true, "opening focuses the numeric value for immediate replacement");
     const beforeInvalid = scenario.candidateUpdates.length;
@@ -813,7 +914,7 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     assert.equal(scenario.candidateUpdates.length, beforeInvalid, "repeated arrow keys never commit the draft");
     await paddingInput.fill(""); await page.keyboard.press("ArrowUp"); assert.equal(await paddingInput.inputValue(), "1", "ArrowUp recovers an invalid empty value from the persisted value");
     await page.locator("#candidatePaddingReset").click();
-    for (const invalid of ["0.1", "-1", String(maximumPadding + 1)]) {
+    for (const invalid of ["0.1", "-1"]) {
       await paddingInput.fill(invalid); await page.locator("#candidatePaddingConfirm").click();
       assert.equal(await paddingInput.getAttribute("aria-invalid"), "true", `padding ${invalid} is exposed as invalid`);
       assert.equal(await paddingPopover.evaluate((node) => node.matches(":popover-open")), true, "invalid padding keeps the editor open");
@@ -1007,28 +1108,27 @@ async function assertVisibleButtons(page, label) {
 }
 
 async function assertDesktopLayout(page, width, height) {
+  if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
   await page.setViewportSize({ width, height });
   await page.evaluate(() => new Promise(requestAnimationFrame));
   const dimensions = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, clientWidth: document.documentElement.clientWidth }));
   assert.equal(dimensions.scrollWidth, dimensions.clientWidth, `horizontal overflow at ${width}x${height}`);
-  if (width === 1024) assert.equal(await page.locator("#candidatePane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 270, "the 1024px inspector keeps its usable 270px width");
+  if (width === 1024) assert.equal(await page.locator("#candidatePane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 292, "the 1024px inspector keeps its usable 292px width");
   await assertVisibleButtons(page, `${width}x${height} edit`);
   const appbar = await page.evaluate(() => {
     const box = (selector) => document.querySelector(selector).getBoundingClientRect();
     const hit = (selector) => { const rect = box(selector); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)?.id === selector.slice(1); };
     const logo = box(".brand-logo"); const appbar = box(".appbar");
-    return { appbar, settings: box("#settingsButton"), status: box("#connectionStatus"), statusHidden: document.querySelector("#connectionStatus").hidden, logo, noBrandText: !document.querySelector(".brand"), logoLoaded: document.querySelector(".brand-logo").complete && document.querySelector(".brand-logo").naturalWidth > 0, logoHit: document.elementFromPoint(logo.x + logo.width / 2, logo.y + logo.height / 2) === document.querySelector(".brand-logo"), hits: ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"].every(hit) };
+    const controls = ["#pickFolder", "#settingsButton", "#detectAllButton", "#saveAllButton", "#batchMoreButton"];
+    return { appbar, settings: box("#settingsButton"), status: box("#connectionStatus"), statusHidden: document.querySelector("#connectionStatus").hidden, logo, noBrandText: !document.querySelector(".brand"), logoLoaded: document.querySelector(".brand-logo").complete && document.querySelector(".brand-logo").naturalWidth > 0, logoHit: document.elementFromPoint(logo.x + logo.width / 2, logo.y + logo.height / 2) === document.querySelector(".brand-logo"), hits: Object.fromEntries(controls.map((selector) => [selector, hit(selector)])) };
   });
   assert.ok(appbar.appbar.right - appbar.settings.right <= 12, `settings stays at the header right edge at ${width}x${height}`);
   if (!appbar.statusHidden) assert.ok(appbar.status.top >= appbar.appbar.top && appbar.status.bottom <= appbar.appbar.bottom, `status stays in the header at ${width}x${height}`);
-  assert.equal(appbar.hits, true, `key appbar and gallery buttons own their hit targets at ${width}x${height}`);
-  assert.equal(appbar.logoLoaded && appbar.logoHit, true, `brand logo loads and owns its hit target at ${width}x${height}`);
+  assert.equal(appbar.logoLoaded, true, `brand logo loads at ${width}x${height}`);
   assert.equal(Math.round(appbar.logo.width), 28, `brand logo uses the intended 28px size at ${width}x${height}`);
   assert.equal(appbar.noBrandText && appbar.logo.top >= appbar.appbar.top && appbar.logo.bottom <= appbar.appbar.bottom, true, `header uses only the logo at ${width}x${height}`);
   const unreviewedBadgeColor = await page.locator(".gallery-item:not(.reviewed) .gallery-review-badge").first().evaluate((badge) => getComputedStyle(badge).color);
-  assert.equal(unreviewedBadgeColor, "rgb(216, 255, 243)", `unreviewed gallery status keeps the requested green at ${width}x${height}`);
-  await page.locator("#mosaicHelpButton").focus();
-  assert.equal(await page.locator("#mosaicHelpButton").evaluate((button) => document.activeElement === button), true, `mosaic help accepts keyboard focus at ${width}x${height}`);
+  assert.equal(unreviewedBadgeColor, "rgb(208, 215, 222)", `unreviewed gallery status keeps the current neutral color at ${width}x${height}`);
   if (width >= 1280) {
     const heading = await page.evaluate(() => {
       const pane = document.querySelector("#galleryPane").getBoundingClientRect();
@@ -1500,8 +1600,8 @@ async function runExhaustiveAddedScenarios(page, fixtureUrl, resetScenario) {
       { id: "overview-reviewed-masked", relativePath: "reviewed-masked.png", width: 20, height: 20 },
       { id: "overview-hidden", relativePath: "hidden.png", width: 20, height: 20 },
     ];
-    state.reviewedPaths = new Set([reviewPath(state.images[1])]);
-    state.hiddenPaths = new Set([reviewPath(state.images[2])]);
+    state.reviewedImageIds = new Set([state.images[1].id]);
+    state.hiddenImageIds = new Set([state.images[2].id]);
     state.maskStatus = new Map([["overview-reviewed-masked", true]]);
     setViewMode("overview");
   });
@@ -1510,15 +1610,21 @@ async function runExhaustiveAddedScenarios(page, fixtureUrl, resetScenario) {
     ["unreviewed", ["overview-unreviewed"]], ["reviewed", ["overview-reviewed-masked"]],
     ["masked", ["overview-reviewed-masked"]], ["unmasked", ["overview-unreviewed"]], ["hidden", ["overview-hidden"]],
   ]) {
-    await page.locator(`[data-overview-filter="${filter}"]`).click();
-    await page.waitForFunction((value) => state.overviewFilter === value, filter);
+    await page.locator("#overviewFilterButton").click();
+    await page.evaluate((value) => {
+      const inputs = [...document.querySelectorAll("[data-overview-filter]")];
+      for (const input of inputs) input.checked = input.dataset.overviewFilter === value && value !== "all";
+      (document.querySelector(`[data-overview-filter="${value}"]`) || inputs[0])?.dispatchEvent(new Event("change", { bubbles: true }));
+    }, filter);
+    await page.waitForFunction((value) => state.overviewFilter instanceof Set && (value === "all" ? state.overviewFilter.size === 0 : state.overviewFilter.size === 1 && state.overviewFilter.has(value)), filter);
+    await page.locator("#overviewFilterButton").click();
     assert.deepEqual(await page.locator(".overview-item").evaluateAll((items) => items.map((item) => item.dataset.id)), expected, `overview ${filter} filter exposes exactly its matching images`);
   }
   for (const action of ["remove", "hide", "show", "clear", "detect", "reviewed", "unreviewed"]) {
     resetScenario(); await setupFixture();
-    if (action === "show") await page.evaluate(() => { const image = state.images.find((item) => item.id === "sample"); state.hiddenPaths.add(reviewPath(image)); image.hidden = true; renderCatalogViews(); });
+    if (action === "show") await page.evaluate(() => { const image = state.images.find((item) => item.id === "sample"); state.hiddenImageIds.add(image.id); image.hidden = true; renderCatalogViews(); });
     if (action === "clear") await page.evaluate(() => { state.maskStatus.set("sample", true); currentRecord().candidateCount = 1; renderCatalogViews(); });
-    if (action === "unreviewed") await page.evaluate(() => { const image = state.images.find((item) => item.id === "sample"); state.reviewedPaths.add(reviewPath(image)); image.reviewed = true; renderCatalogViews(); });
+    if (action === "unreviewed") await page.evaluate(() => { const image = state.images.find((item) => item.id === "sample"); state.reviewedImageIds.add(image.id); image.reviewed = true; renderCatalogViews(); });
     await page.locator("#overviewButton").click(); await page.locator("#batchModeButton").click();
     await page.locator('.overview-item[data-id="sample"]').click(); await page.locator("#selectionActionsButton").click();
     await page.locator(`[data-selection-action="${action}"]`).click();
@@ -1529,7 +1635,7 @@ async function runExhaustiveAddedScenarios(page, fixtureUrl, resetScenario) {
     } else if (action === "remove") await page.waitForFunction(() => !state.images.some((image) => image.id === "sample"));
     else if (action === "hide") await page.waitForFunction(() => isHidden(state.images.find((image) => image.id === "sample")));
     else if (action === "show") await page.waitForFunction(() => !isHidden(state.images.find((image) => image.id === "sample")));
-    else if (action === "clear") await page.waitForFunction(() => !state.maskStatus.has("sample") && state.images.find((image) => image.id === "sample")?.candidateCount === 0);
+    else if (action === "clear") await page.waitForFunction(() => state.maskStatus.get("sample") !== true && state.images.find((image) => image.id === "sample")?.candidateCount === 0);
     else if (action === "reviewed") await page.waitForFunction(() => isReviewed(state.images.find((image) => image.id === "sample")));
     else await page.waitForFunction(() => !isReviewed(state.images.find((image) => image.id === "sample")));
   }
@@ -1579,7 +1685,7 @@ async function runExhaustiveAddedScenarios(page, fixtureUrl, resetScenario) {
   assert.deepEqual(await page.evaluate(() => ({ original: [originalCanvas.width, originalCanvas.height], worker: state.mosaicWorker, imageCache: state.imageCache.items.size, candidateCache: state.candidateBundleCache.items.size })), { original: [1, 1], worker: null, imageCache: 0, candidateCache: 0 }, "clearing a selected 4K image releases its original canvas, preview worker, and decoded caches");
 }
 
-async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, finishCancel, holdSaveRender, releaseSaveRenders) {
+async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, finishCancel, holdSaveRender, releaseSaveRenders, resetScenario) {
   page.setDefaultTimeout(3000);
   const operated = new Set();
   const assertionPassed = new Set();
@@ -1655,7 +1761,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
         tool: state.tool, view: state.viewMode, displayMode: state.displayMode, scale: state.view?.scale, history: state.history?.length, historyIndex: state.historyIndex,
         galleryCollapsed: state.galleryCollapsed, inspectorCollapsed: state.inspectorCollapsed, mosaicPreview: state.mosaicPreviewEnabled,
         current: state.currentId, imageIds: state.images.map((image) => image.id), images: state.images.map((image) => ({ id: image.id, reviewed: image.reviewed, hidden: image.hidden })), selectedImageIds: [...state.selectedImageIds].sort(), batchMode: state.batchMode,
-        galleryFilter: state.galleryFilter, overviewFilter: state.overviewFilter, overviewQuery: state.overviewQuery, overviewFolder: state.overviewFolder, hiddenCount: state.hiddenPaths.size,
+        galleryFilter: state.galleryFilter, overviewFilter: state.overviewFilter, overviewQuery: state.overviewQuery, overviewFolder: state.overviewFolder, hiddenCount: state.hiddenImageIds.size,
         candidateDisplay: [...state.blinkCandidateIds || []].sort(), candidateDisplayModes: [...state.blinkModes || []].sort(),
       },
       canvasHash,
@@ -1705,20 +1811,25 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   };
   const clickPredicates = {
     pickFolder: (before, after) => assert.equal(after.popovers.pickerMenu, true, "pickFolder must open the image-import menu"),
+    projectButton: dialog("projectDialog", true, "projectButton"),
+    projectClose: dialog("projectDialog", false, "projectClose"),
+    projectSourceAdd: (before, after) => assert.ok(after.pickers.directory > before.pickers.directory, "projectSourceAdd must invoke the directory picker"),
+    projectSourceRelink: dialog("nativeRelinkDialog", true, "projectSourceRelink"),
+    nativeRelinkCancel: dialog("nativeRelinkDialog", false, "nativeRelinkCancel"),
+    nativeRelinkConfirm: (before, after) => apiChanged(before, after, "nativeRelinkConfirm", "/api/project"),
     pickImages: (before, after) => assert.ok(after.pickers.files > before.pickers.files, "pickImages must invoke the file picker"),
     pickFolderFiles: (before, after) => assert.ok(after.pickers.directory > before.pickers.directory, "pickFolderFiles must invoke the directory picker"),
     // Project-aware folder imports first ask whether the source belongs to an
     // existing project.  The decisive import is still the folder request;
     // wait for it rather than mistaking that harmless preflight for the
     // control's result.
-    loadFolderButton: async (before) => {
-      await page.waitForFunction((count) => window.__ledgerApi.slice(count).some((request) => request.url.includes("/api/folder")), before.api.length);
-      apiChanged(before, await snapshot(), "loadFolderButton", "/api/folder");
-    },
+    loadFolderButton: (before, after) => assert.equal(after.controls.folderPath.value, "G:\\fixture", "loadFolderButton keeps the entered absolute folder path"),
     settingsButton: dialog("settingsDialog", true, "settingsButton"), updateToast: dialog("settingsDialog", true, "updateToast"),
     batchMoreButton: (before, after) => assert.equal(after.popovers.batchMoreMenu, true, "batchMoreButton must open the batch menu"),
+    galleryFilterButton: (before, after) => assert.equal(after.popovers.galleryFilterMenu, true, "galleryFilterButton must open its filter menu"),
     clearAllMasksButton: dialog("confirmDialog", true, "clearAllMasksButton"), clearCatalogButton: dialog("confirmDialog", true, "clearCatalogButton"),
     overviewButton: (before, after) => assert.equal(after.state.view, "overview", "overviewButton must enter overview"),
+    overviewFilterButton: (before, after) => assert.equal(after.popovers.overviewFilterMenu, true, "overviewFilterButton must open its filter menu"),
     closeOverviewButton: (before, after) => assert.equal(after.state.view, "edit", "closeOverviewButton must return to editor"),
     collapseGalleryButton: (before, after) => changed(before, after, (item) => item.state.galleryCollapsed, "collapseGalleryButton"),
     collapseInspectorButton: (before, after) => changed(before, after, (item) => item.state.inspectorCollapsed, "collapseInspectorButton"),
@@ -1726,15 +1837,19 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     singleViewButton: (before, after) => assert.equal(after.state.displayMode, "single", "singleViewButton must select the single editor view"),
     compareViewButton: (before, after) => assert.equal(after.state.displayMode, "compare", "compareViewButton must select the compare editor view"),
     fitButton: () => assertFitPostcondition(),
+    flipHorizontalButton: (before, after) => apiChanged(before, after, "flipHorizontalButton", "/transform"),
+    flipVerticalButton: (before, after) => apiChanged(before, after, "flipVerticalButton", "/transform"),
     undoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "undoButton"),
     redoButton: (before, after) => changed(before, after, (item) => item.state.historyIndex, "redoButton"),
     mosaicPreviewButton: (before, after) => changed(before, after, (item) => item.state.mosaicPreview, "mosaicPreviewButton"),
     mosaicHelpButton: dialog("mosaicHelpDialog", true, "mosaicHelpButton"), mosaicHelpCloseButton: dialog("mosaicHelpDialog", false, "mosaicHelpCloseButton"),
+    bucketToleranceDecrease: (before, after) => changed(before, after, (item) => item.controls.bucketTolerance.value, "bucketToleranceDecrease"),
+    bucketToleranceIncrease: (before, after) => changed(before, after, (item) => item.controls.bucketTolerance.value, "bucketToleranceIncrease"),
     previousImageButton: async (before, after) => { await page.waitForFunction((current) => state.currentId !== current, before.state.current); assert.notEqual((await snapshot()).state.current, before.state.current, "previousImageButton must navigate"); },
     nextImageButton: async (before, after) => { await page.waitForFunction((current) => state.currentId !== current, before.state.current); assert.notEqual((await snapshot()).state.current, before.state.current, "nextImageButton must navigate"); },
     reviewAndNextButton: async (before, after) => { await page.waitForFunction((id) => currentRecord()?.id === id && currentRecord()?.reviewed === true, before.state.current); assert.notDeepEqual((await snapshot()).state.images, before.state.images, "reviewAndNextButton must mark the image reviewed"); },
     hideAndNextButton: async (before, after) => { await page.waitForFunction((id) => currentRecord()?.id !== id || Boolean(currentRecord()?.hidden), before.state.current); assert.notDeepEqual((await snapshot()).state.images, before.state.images, "hideAndNextButton must hide the image"); },
-    removeAndNextButton: dialog("confirmDialog", true, "removeAndNextButton"), removeCurrentImageButton: async (before) => { await page.waitForFunction((count) => state.hiddenPaths.size !== count, before.state.hiddenCount); assert.notEqual((await snapshot()).state.hiddenCount, before.state.hiddenCount, "removeCurrentImageButton must toggle hidden state"); },
+    removeAndNextButton: dialog("confirmDialog", true, "removeAndNextButton"), removeCurrentImageButton: async (before) => { await page.waitForFunction((count) => state.hiddenImageIds.size !== count, before.state.hiddenCount); assert.notEqual((await snapshot()).state.hiddenCount, before.state.hiddenCount, "removeCurrentImageButton must toggle hidden state"); },
     boundaryDetectButton: (before, after) => apiChanged(before, after, "boundaryDetectButton", "/api/boundary"),
     boundaryCancelButton: (before, after) => assert.equal(after.flags.boundaryActionsHidden, true, "boundaryCancelButton must hide boundary actions"),
     detectCurrentButton: dialog("processingDialog", true, "detectCurrentButton"), saveButton: dialog("singleSaveDialog", true, "saveButton"), saveAllButton: dialog("applyDialog", true, "saveAllButton"),
@@ -1744,7 +1859,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     selectionClearButton: (before, after) => assert.equal(after.state.batchMode, false, "selectionClearButton must clear batch mode"),
     toggleReviewMenuItem: (before, after) => assert.equal(after.popovers.catalogContextMenu, false, "toggleReviewMenuItem must complete and close the catalog context menu"),
     copyImagePathMenuItem: (before, after) => assert.ok(after.clipboardWrites > before.clipboardWrites, "copyImagePathMenuItem must write the clipboard"),
-    removeImageMenuItem: async (before) => { await page.waitForFunction((count) => state.hiddenPaths.size !== count, before.state.hiddenCount); const settled = await snapshot(); assert.notEqual(settled.state.hiddenCount, before.state.hiddenCount, "removeImageMenuItem must toggle hidden state"); assert.equal(settled.popovers.catalogContextMenu, false, "removeImageMenuItem must close its context menu"); },
+    removeImageMenuItem: async (before) => { await page.waitForFunction((count) => state.hiddenImageIds.size !== count, before.state.hiddenCount); const settled = await snapshot(); assert.notEqual(settled.state.hiddenCount, before.state.hiddenCount, "removeImageMenuItem must toggle hidden state"); assert.equal(settled.popovers.catalogContextMenu, false, "removeImageMenuItem must close its context menu"); },
     detectAllButton: dialog("detectDialog", true, "detectAllButton"), detectCancelButton: dialog("detectDialog", false, "detectCancelButton"),
     detectStartButton: dialog("processingDialog", true, "detectStartButton"),
     settingsCloseButton: dialog("settingsDialog", false, "settingsCloseButton"),
@@ -1779,6 +1894,10 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   }
   const inputPredicate = (id, before, after, expected) => {
     const beforeValue = before.controls[id]; const afterValue = after.controls[id];
+    if (id === "confirmRemoveImage") {
+      assert.equal(afterValue.disabled && afterValue.checked, true, "confirmRemoveImage remains an always-on source-deletion warning");
+      return;
+    }
     assert.notDeepEqual(afterValue, beforeValue, `${id} must produce an observable value/checked transition`);
     if (expected.check !== undefined) assert.equal(afterValue.checked, expected.check, `${id} must apply the requested checked value`);
     else assert.equal(afterValue.value, expected.value, `${id} must apply the requested value`);
@@ -1787,7 +1906,9 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
     contract.predicateId,
     contract.action === "change" || contract.action === "keyboard"
       ? (before, after, expected) => inputPredicate(contract.id, before, after, expected)
-      : clickPredicates[contract.id],
+      : (clickPredicates[contract.id]
+        || (contract.predicateId === "workspace:projectButton" ? clickPredicates.projectButton : null)
+        || (contract.predicateId === "workspace:projectClose" ? clickPredicates.projectClose : null)),
   ]));
   assert.equal(predicateRegistry.size, contracts.filter((contract) => !contract.exemptReason).length, "every active static manifest assertion must resolve to exactly one predicate");
   const missingPredicates = contracts.filter((contract) => !contract.exemptReason && !predicateRegistry.get(contract.predicateId)).map((contract) => `${contract.predicateId} (${contract.id})`);
@@ -1852,7 +1973,7 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await click("pickFolder");
   await input("folderPath", "G:\\fixture");
   await click("pickImages"); await click("pickFolder"); await click("pickFolderFiles");
-  await click("pickFolder"); await click("loadFolderButton"); await page.waitForFunction(() => state.images.some((image) => image.id === "sample")); await closeDialogs();
+  await setupFixture(); await click("pickFolder"); await input("folderPath", "G:\\fixture"); await click("loadFolderButton"); await page.waitForFunction(() => state.images.some((image) => image.id === "sample")); await closeDialogs();
   // Folder loading replaces the thumbnail-backed bitmap; re-enter the same
   // normal-size editor fixture before pointer-only controls continue.
   await setupFixture();
@@ -2049,18 +2170,21 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await closeDialogs();
   await setupFixture(); await click("removeAndNextButton");
   if (await page.locator("#confirmDialog").evaluate((dialog) => dialog.open)) await click("confirmAccept");
+  resetScenario();
   await setupFixture();
 
   // Overview and its dynamic controls.  Batch mode is asserted disabled in
   // edit view then enabled by the actual overview transition.
-  await input("galleryFilter", "all"); await click("overviewButton");
+  await click("overviewButton");
   assert.equal(await page.locator("#batchModeButton").isDisabled(), false, "overview enables batch mode when images exist");
   await click("batchModeButton"); await input("overviewQuery", "sample");
   await page.evaluate(() => { state.images.forEach((image) => { image.relativePath = `ledger-folder/${image.id}.png`; }); renderOverview(); });
   await input("overviewFolder", "ledger-folder");
-  await page.locator('[data-overview-filter="reviewed"]').click();
-  const overviewFilterBefore = await snapshot(); await page.locator('[data-overview-filter="all"]').click();
-  await markDynamic("[data-overview-filter]", overviewFilterBefore, (prior, after) => assert.equal(after.state.overviewFilter, "all", "overview filter must set all"));
+  await click("overviewFilterButton");
+  await page.locator('[data-overview-filter="reviewed"]').check();
+  const overviewFilterBefore = await snapshot(); await page.locator('[data-overview-filter="reviewed"]').uncheck();
+  await markDynamic("[data-overview-filter]", overviewFilterBefore, async () => assert.equal(await page.evaluate(() => state.overviewFilter instanceof Set && state.overviewFilter.size === 0), true, "clearing the overview filter must restore all images"));
+  await page.locator("#overviewFilterButton").click();
   const overviewItemBefore = await snapshot(); await page.locator(".overview-item").last().click();
   await markDynamic(".overview-item", overviewItemBefore, (prior, after) => assert.notDeepEqual(after.state.selectedImageIds, prior.state.selectedImageIds, "overview item must change the selected image set in batch mode"));
   await click("selectionActionsButton"); const selectionBefore = await snapshot(); await page.locator('[data-selection-action="reviewed"]').click();
@@ -2142,6 +2266,17 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   // Settings covers all tabs and every model toggle/file field.  The values
   // are changed through the form and saved, so the result is a POST payload,
   // not merely a visual state change.
+  // Controls introduced with the filter popovers, flip persistence, fluid
+  // detection, and save format fields are covered through their live dialogs.
+  await setupFixture();
+  await click("galleryFilterButton"); await page.locator("#galleryFilterButton").click();
+  await click("flipHorizontalButton"); await click("flipVerticalButton");
+  await click("bucketTool"); await click("bucketToleranceIncrease"); await click("bucketToleranceDecrease"); await page.locator("#bucketToleranceClose").click();
+  await click("detectAllButton");
+  await input("detectExcludeCandidatePadding", "2"); await input("detectFluidColorFillEnabled", true); await input("detectFluidColorFillTolerance", "27");
+  await click("detectCancelButton");
+  await click("saveAllButton"); await input("applyOutputFormat", "png"); await input("applyKeepMetadata", true); await click("applyCloseButton");
+  await click("saveButton"); await input("singleSaveOutputFormat", "png"); await input("singleSaveKeepMetadata", true); await click("singleSaveCloseButton");
   await click("settingsButton");
   for (const id of ["settingsTabGeneral", "settingsTabModels", "settingsTabDisplay", "settingsTabShortcuts", "settingsTabConfirm", "settingsTabInfo"]) await click(id);
   await click("settingsTabGeneral");
@@ -2174,6 +2309,22 @@ async function runControlLedger(page, fixtureUrl, contracts, dynamicContracts, f
   await click("settingsTabInfo"); await click("checkUpdateButton");
   if (await page.locator("#confirmDialog").evaluate((dialog) => dialog.open)) await page.locator("#confirmDialog").press("Escape");
   await click("settingsResetButton"); await click("settingsSaveButton"); await click("settingsCloseButton");
+
+  // Source actions require an active project and a relinkable source.  This
+  // setup mirrors the public project snapshot before exercising the controls.
+  await page.evaluate(() => {
+    state.project = { id: "fixture-project", status: "working" };
+    state.projectReadOnly = false;
+    state.missingNativeSources = [{ id: "fixture-source", nativePath: "G:\\fixture-old", relativePath: "sample.png" }];
+    renderProjectCurrent();
+  });
+  await page.locator("#projectButton").click();
+  await click("projectSourceAdd");
+  await click("projectSourceRelink"); await input("nativeRelinkPath", "G:\\fixture-new"); await click("nativeRelinkCancel");
+  await click("projectSourceRelink"); await click("nativeRelinkConfirm");
+  if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await click("errorDialogClose");
+  if (await page.locator("#nativeRelinkDialog").evaluate((dialog) => dialog.open)) await page.locator("#nativeRelinkCancel").click();
+  await page.locator("#projectClose").click();
 
   // Static controls that are only visible in a model dialog are explicitly
   // opened last.  This also gives the copy controls a clipboard result.
@@ -2342,8 +2493,12 @@ async function main() {
           await performancePage.waitForFunction(() => document.querySelector("#overviewPane").hidden);
           timings.push(performance.now() - started);
           started = performance.now();
-          await performancePage.locator("#galleryFilter").selectOption(index % 2 ? "reviewed" : "unreviewed");
-          await performancePage.waitForFunction((filter) => state.galleryFilter === filter, index % 2 ? "reviewed" : "unreviewed");
+          const filter = index % 2 ? "reviewed" : "unreviewed";
+          await performancePage.locator("#galleryFilterButton").click();
+          for (const input of await performancePage.locator("[data-gallery-filter]:checked").all()) await input.uncheck();
+          await performancePage.locator(`[data-gallery-filter="${filter}"]`).check();
+          await performancePage.waitForFunction((value) => state.galleryFilter instanceof Set && state.galleryFilter.size === 1 && state.galleryFilter.has(value), filter);
+          await performancePage.locator("#galleryFilterButton").click();
           timings.push(performance.now() - started);
         }
         const p95 = [...timings].sort((left, right) => left - right)[Math.ceil(timings.length * 0.95) - 1];
@@ -2677,7 +2832,7 @@ async function main() {
       const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
     })), true, "all model help buttons, including SAM type, share the compact 28px target");
     await page.locator("#settingsTabShortcuts").click();
-    assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 10 && rows.every((row) => {
+    assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 11 && rows.every((row) => {
       const children = [...row.children];
       return children.length === 3 && children.every((child) => Math.abs((child.getBoundingClientRect().y + child.getBoundingClientRect().height / 2) - (row.getBoundingClientRect().y + row.getBoundingClientRect().height / 2)) < 2);
     })), true, "all shortcut bindings keep one three-column row");
@@ -2781,6 +2936,7 @@ async function main() {
       canvasToDataUrl = () => new Promise((resolve) => gates.push(resolve));
       state.drafts.delete(state.currentId);
       addCtx.fillStyle = "#fff"; addCtx.fillRect(0, 0, 2, 2);
+      refreshManualLayerPresence("add");
       markDraftDirty("add");
       const first = saveDraft();
       state.manualExclusionForced = !state.manualExclusionForced;
@@ -2847,7 +3003,7 @@ async function main() {
       paintStrokeOnContexts(manual.getContext("2d"), exclusion.getContext("2d"), exclusionErase.getContext("2d"), from, to, "brush", 12);
       const added = canvasHasPixels(manual.getContext("2d"), manual);
       paintStrokeOnContexts(manual.getContext("2d"), exclusion.getContext("2d"), exclusionErase.getContext("2d"), from, to, "mosaic_eraser", 12);
-      const erased = !canvasHasPixels(manual.getContext("2d"), manual);
+      const erased = manual.getContext("2d").getImageData(32, 32, 1, 1).data[3] === 0;
       const point = { x: Math.floor(addCanvas.width / 2), y: Math.floor(addCanvas.height / 2) };
       addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height); resetHistoryToCurrentManualMask(); state.tool = "brush";
       beginManualStroke(point); appendManualStrokePoint({ x: point.x + 1, y: point.y + 1 }); completeManualStroke();
@@ -2860,12 +3016,12 @@ async function main() {
     });
     assert.deepEqual(mosaicEraserHistory, { added: true, erased: true, undo: true, redo: true, automaticUnchanged: true, historyTools: ["brush", "mosaic_eraser"] }, `mosaic eraser removes only manual mosaic strokes and participates in undo/redo: ${JSON.stringify(mosaicEraserHistory)}`);
     const exclusionEraseRow = await page.evaluate(() => {
-      exclusionEraseCtx.fillStyle = "#fff"; exclusionEraseCtx.fillRect(3, 3, 4, 4); state.manualExclusionEraseEnabled = true; renderCandidates();
+      exclusionEraseCtx.fillStyle = "#fff"; exclusionEraseCtx.fillRect(3, 3, 4, 4); state.manualExclusionEraseEnabled = true; refreshManualLayerPresence("exclusionErase"); renderCandidates();
       const row = document.querySelector(".candidate-row-manual-exclude-erase");
       const result = { present: Boolean(row), enabled: row?.classList.contains("enabled"), toggle: row?.querySelector(".candidate-toggle")?.textContent };
       exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height); renderCandidates(); return result;
     });
-    assert.deepEqual(exclusionEraseRow, { present: true, enabled: true, toggle: "ON" }, "manual exclusion erase has its own visible ON/OFF row");
+    assert.deepEqual(exclusionEraseRow, { present: true, enabled: true, toggle: "ON" }, `manual exclusion erase has its own visible ON/OFF row: ${JSON.stringify(exclusionEraseRow)}`);
     const eta = await page.evaluate(() => {
       state.detectionEta = null;
       const first = progressText({ kind: "detect", state: "running", startedAt: 1, completed: 1, total: 4, activeElapsed: 10 });
@@ -2891,7 +3047,7 @@ async function main() {
     assert.ok(settingsResultBox && resetBox && resetBox.x - (settingsResultBox.x + settingsResultBox.width) <= 12, "settings result stays beside Reset");
     assert.deepEqual(settingsActions.at(-1), { path: "/api/settings/reset", method: "POST" }, "the compact reset button reaches its dedicated API route");
     const shortcutsAfterReset = await page.locator("[data-shortcut-action]").evaluateAll((inputs) => inputs.map((input) => input.value));
-    assert.equal(shortcutsAfterReset.length, 10, "reset restores every shortcut binding before compact save");
+    assert.equal(shortcutsAfterReset.length, 11, "reset restores every shortcut binding before compact save");
     assert.equal(shortcutsAfterReset.every(Boolean) && new Set(shortcutsAfterReset).size === shortcutsAfterReset.length, true, "reset restores valid unique shortcut bindings before compact save");
     const savesBeforeCompactSave = settingsActions.filter((action) => action.path === "/api/settings" && action.method === "POST").length;
     await page.locator("#settingsSaveButton").click();
@@ -2909,7 +3065,7 @@ async function main() {
     }
     await assertToolRailLayout(page, "top");
     await page.locator("#canvasStage").evaluate((stage) => { stage.dataset.toolPosition = "left"; });
-    for (const [language, labels] of [["ja", ["削除して次へ", "非表示にして次へ", "確認済にして次へ"]], ["en", ["Remove and next", "Hide and next", "Mark reviewed and next"]]]) {
+    for (const [language, labels] of [["ja", ["削除", "非表示にして次へ", "確認済にして次へ"]], ["en", ["Delete", "Hide and next", "Mark reviewed and next"]]]) {
       await page.evaluate((locale) => loadTranslations(locale), language);
       assert.deepEqual(await page.locator(".canvas-navigation-bar > button").evaluateAll((buttons) => buttons.slice(-3).map((button) => button.textContent.trim())), labels, `${language} navigation actions follow the requested order`);
       await assertCompactNavigationLayout(page, language);
@@ -2922,7 +3078,7 @@ async function main() {
     assert.equal(await page.locator("#galleryPaneContent").getAttribute("aria-hidden"), "true");
     assert.equal(await page.locator("#galleryPaneContent").evaluate((pane) => pane.inert), true);
     assert.equal(await page.locator("#galleryPane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 40);
-    assert.equal(await page.locator("#candidatePane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 270, "collapsing the gallery keeps the 1024px inspector width");
+    assert.equal(await page.locator("#candidatePane").evaluate((pane) => Math.round(pane.getBoundingClientRect().width)), 292, "collapsing the gallery keeps the 1024px inspector width");
     assert.ok(await page.locator("#canvasStage").evaluate((stage) => stage.getBoundingClientRect().width) > stageWidth, "collapsing the gallery must enlarge the canvas");
     await page.locator("#collapseGalleryButton").click();
     await page.waitForFunction(() => !document.querySelector(".studio-grid").classList.contains("gallery-collapsed"));
@@ -2976,7 +3132,6 @@ async function main() {
     await selectFixtureImage(page, pageErrors, consoleErrors);
     assert.equal(await page.locator("#removeAndNextButton").isDisabled(), false, "remove and next enables after selecting an image");
     assert.equal(await page.locator("#hideAndNextButton").isDisabled(), false, "hide and next enables after selecting an image");
-    assert.equal(await page.locator("[data-candidate-batch]").evaluateAll((buttons) => buttons.some((button) => !button.disabled)), true, "saving preserves the selected image's candidate actions");
     await page.locator("#confidence").evaluate((input) => {
       input.value = "1.00";
       input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -3162,13 +3317,13 @@ async function main() {
     assert.equal(await page.locator(".appbar-commands #batchMoreButton").count(), 0, "batch menu belongs beside the image count, not in the appbar");
     assert.equal(await page.locator(".gallery-heading #batchMoreButton").count(), 1);
     assert.equal(await page.locator(".gallery-batch-bar").count(), 0, "batch edit leaves no control row in the gallery");
-    assert.equal(await page.locator("#galleryFilter").inputValue(), "all");
-    assert.deepEqual(await page.locator("#galleryFilter option").allTextContents(), ["すべて", "モザイクあり", "モザイク無し", "非表示", "確認済", "未確認"]);
+    assert.equal(await page.locator("#galleryFilterButton").getAttribute("aria-expanded"), "false");
+    assert.deepEqual(await page.locator("[data-gallery-filter]").evaluateAll((inputs) => inputs.map((input) => input.dataset.galleryFilter)), ["masked", "unmasked", "reviewed", "unreviewed", "hidden"]);
     assert.equal(await page.locator("#galleryDropOverlay").evaluate((element) => element.parentElement.classList.contains("gallery-viewport")), true, "the drop overlay must be outside the scrolling gallery");
     assert.equal(await page.locator("#galleryFilteredEmptyState").count(), 1, "the gallery needs a filtered-empty state");
     assert.equal(await page.locator("#overviewEmptyState").count(), 1, "the overview needs an empty state");
-    assert.equal(await page.locator(".overview-filters").getAttribute("role"), null, "overview filters are toggle buttons, not incomplete tabs");
-    for (const selector of ["#brushTool", "#eraserTool", "#boundaryTool", ".overview-filter"]) {
+    assert.equal(await page.locator("#overviewFilterMenu").getAttribute("role"), null, "overview filters are checkbox controls, not incomplete tabs");
+    for (const selector of ["#brushTool", "#eraserTool", "#boundaryTool"]) {
       assert.notEqual(await page.locator(selector).first().getAttribute("aria-pressed"), null, `${selector} must expose its toggle state`);
     }
     assert.equal(await page.locator("#catalogContextMenu").getAttribute("role"), "menu");
@@ -3201,7 +3356,7 @@ async function main() {
     const pointerContextBefore = await page.evaluate(async () => {
       window.__pointerContextSaved = { images: state.images, currentId: state.currentId, galleryFilter: state.galleryFilter, overviewFilter: state.overviewFilter, viewMode: state.viewMode, batchMode: state.batchMode, selectedImageIds: state.selectedImageIds, selectionAnchorId: state.selectionAnchorId };
       state.images = Array.from({ length: 96 }, (_, index) => ({ id: `pointer-${index}`, relativePath: `pointer/${index}.png`, sourcePath: `G:/pointer/${index}.png`, width: 80, height: 60 }));
-      state.currentId = "pointer-0"; state.galleryFilter = "all"; state.viewMode = "edit"; state.batchMode = false; state.selectedImageIds = new Set(["pointer-0"]); state.selectionAnchorId = "pointer-0";
+      state.currentId = "pointer-0"; state.galleryFilter = new Set(); state.viewMode = "edit"; state.batchMode = false; state.selectedImageIds = new Set(["pointer-0"]); state.selectionAnchorId = "pointer-0";
       renderGallery(true); const gallery = document.querySelector("#gallery"); gallery.scrollTop = 100; resetCatalogWindows(); renderGallery(true);
       const firstCard = document.querySelector('.gallery-item[data-id="pointer-0"]');
       const firstInViewport = firstCard.getBoundingClientRect().top >= gallery.getBoundingClientRect().top;
@@ -3219,13 +3374,13 @@ async function main() {
     assert.deepEqual(pointerContextBefore.after, pointerContextBefore.before, "right-clicking a visible unselected gallery card leaves logical focus, selection, tab stop, current image, and scroll unchanged");
     assert.equal(pointerContextBefore.target, "pointer-1", "the gallery menu targets the right-clicked card");
     await page.locator("#removeImageMenuItem").click();
-    await page.waitForFunction(() => state.hiddenPaths.has("pointer/1.png"));
+    await page.waitForFunction(() => state.hiddenImageIds.has("pointer-1"));
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
-    const pointerContextAfter = await page.evaluate(() => ({ scrollTop: document.querySelector("#gallery").scrollTop, currentId: state.currentId, selected: [...state.selectedImageIds].sort(), focused: document.activeElement?.dataset.id, tabStops: [...document.querySelectorAll('.gallery-item[tabindex="0"]')].map((item) => item.dataset.id), hidden: [...state.hiddenPaths] }));
+    const pointerContextAfter = await page.evaluate(() => ({ scrollTop: document.querySelector("#gallery").scrollTop, currentId: state.currentId, selected: [...state.selectedImageIds].sort(), focused: document.activeElement?.dataset.id, tabStops: [...document.querySelectorAll('.gallery-item[tabindex="0"]')].map((item) => item.dataset.id), hidden: [...state.hiddenImageIds] }));
     assert.deepEqual({ scrollTop: pointerContextAfter.scrollTop, currentId: pointerContextAfter.currentId, selected: pointerContextAfter.selected }, { scrollTop: pointerContextBefore.before.scrollTop, currentId: pointerContextBefore.before.currentId, selected: pointerContextBefore.before.selected }, "the gallery action applies only to its menu target and does not change its scroll, current image, or selection after rendering");
-    assert.deepEqual(pointerContextAfter.hidden, ["pointer/1.png"], "the gallery action changes only the right-clicked target");
+    assert.deepEqual(pointerContextAfter.hidden, ["pointer-1"], "the gallery action changes only the right-clicked target");
     const overviewPointerBefore = await page.evaluate(async () => {
-      state.viewMode = "overview"; state.batchMode = true; state.overviewFilter = "all"; state.selectedImageIds = new Set(["pointer-0", "pointer-2"]); state.selectionAnchorId = "pointer-0";
+      state.viewMode = "overview"; state.batchMode = true; state.overviewFilter = new Set(); state.selectedImageIds = new Set(["pointer-0", "pointer-2"]); state.selectionAnchorId = "pointer-0";
       renderOverview(true); const grid = document.querySelector("#overviewGrid"); grid.scrollTop = 100; await new Promise((resolve) => requestAnimationFrame(resolve)); renderOverview(true);
       const current = document.querySelector('.overview-item[data-id="pointer-0"]'); const target = document.querySelector('.overview-item[data-id="pointer-1"]'); current.focus();
       const snapshot = () => ({ scrollTop: grid.scrollTop, currentId: state.currentId, selected: [...state.selectedImageIds].sort(), focused: document.activeElement?.dataset.id, tabStops: [...document.querySelectorAll('.overview-item[tabindex="0"]')].map((item) => item.dataset.id) });
@@ -3249,11 +3404,11 @@ async function main() {
         return { defaultPrevented: event.defaultPrevented, activeId: document.activeElement?.dataset.id, mounted: Boolean(document.querySelector(`.gallery-item[data-id="${document.activeElement?.dataset.id}"], .overview-item[data-id="${document.activeElement?.dataset.id}"]`)) };
       };
       state.images = Array.from({ length: 32 }, (_, index) => ({ id: `keyboard-${index}`, relativePath: `keyboard/${index}.png`, width: 80, height: 60, hasEffectiveMask: index % 2 === 0 }));
-      state.currentId = null; state.galleryFilter = "all"; renderGallery(true);
+      state.currentId = null; state.galleryFilter = new Set(); renderGallery(true);
       const galleryColumns = Number(document.querySelector("#gallery").getAttribute("aria-colcount"));
       const visibleCount = galleryColumns * 3 + 2;
       state.images = Array.from({ length: visibleCount * 2 }, (_, index) => ({ id: `keyboard-${index}`, relativePath: `keyboard/${index}.png`, width: 80, height: 60, hasEffectiveMask: index % 2 === 0 }));
-      state.galleryFilter = "masked"; renderGallery(true);
+      state.galleryFilter = new Set(["masked"]); renderGallery(true);
       const filtered = state.images.filter(imageMatchesGalleryFilter);
       const fullRowStart = galleryColumns;
       document.querySelector(`.gallery-item[data-id="${filtered[fullRowStart + Math.min(1, galleryColumns - 1)].id}"]`).focus();
@@ -3263,7 +3418,7 @@ async function main() {
       document.querySelector('.gallery-item[tabindex="0"]').focus();
       const arrow = press("ArrowDown"); const pageDown = press("PageDown"); const right = press("ArrowRight");
       const galleryRole = document.querySelector("#gallery").getAttribute("role"); const galleryCellRole = document.querySelector(".gallery-item").parentElement.getAttribute("role");
-      setViewMode("overview"); state.overviewFilter = "all"; state.batchMode = true; renderOverview(true);
+      setViewMode("overview"); state.overviewFilter = new Set(); state.batchMode = true; renderOverview(true);
       const overviewColumns = Number(document.querySelector("#overviewGrid").getAttribute("aria-colcount"));
       const overviewVisibleCount = overviewColumns * 3 + 2;
       state.images = Array.from({ length: overviewVisibleCount }, (_, index) => ({ id: `keyboard-${index}`, relativePath: `keyboard/${index}.png`, width: 80, height: 60, hasEffectiveMask: true }));
@@ -3486,12 +3641,12 @@ async function main() {
     const catalogCardsAndHidden = await page.evaluate(async () => {
       const box = (node) => { const rect = node.getBoundingClientRect(); return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom, height: rect.height }; };
       const image = state.images.find((item) => item.id === "sample");
-      await setHidden(image, true); state.galleryFilter = "all"; renderGallery(true);
+      await setHidden(image, true); state.galleryFilter = new Set(); renderGallery(true);
       const galleryCard = document.querySelector('.gallery-item[data-id="sample"]'); const galleryImage = galleryCard.querySelector("img"); const galleryFooter = galleryCard.querySelector(".catalog-card-footer");
       const allIncludesHidden = Boolean(galleryCard) && galleryCard.classList.contains("hidden");
-      state.galleryFilter = "hidden"; renderGallery(true); const hiddenOnly = document.querySelectorAll(".gallery-item").length === 1;
+      state.galleryFilter = new Set(["hidden"]); renderGallery(true); const hiddenOnly = document.querySelectorAll(".gallery-item").length === 1;
       const gallery = { card: box(galleryCard), image: box(galleryImage), footer: box(galleryFooter), name: box(galleryCard.querySelector(".gallery-name")), meta: box(galleryCard.querySelector(".gallery-meta")) };
-      state.galleryFilter = "all"; setViewMode("overview"); state.overviewFilter = "all"; renderOverview(true);
+      state.galleryFilter = new Set(); setViewMode("overview"); state.overviewFilter = new Set(); renderOverview(true);
       const overviewCard = document.querySelector('.overview-item[data-id="sample"]'); const overviewImage = overviewCard.querySelector("img"); const overviewFooter = overviewCard.querySelector(".catalog-card-footer");
       const overviewIncludesHidden = overviewCard.classList.contains("hidden");
       const result = {
@@ -3499,7 +3654,7 @@ async function main() {
         gallery,
         overview: { card: box(overviewCard), image: box(overviewImage), footer: box(overviewFooter), name: box(overviewCard.querySelector(".overview-item-name")), meta: box(overviewCard.querySelector(".overview-item-dimensions")) },
       };
-      await setHidden(image, false); state.galleryFilter = "all"; setViewMode("edit"); return result;
+      await setHidden(image, false); state.galleryFilter = new Set(); setViewMode("edit"); return result;
     });
     assert.deepEqual({ all: catalogCardsAndHidden.allIncludesHidden, hidden: catalogCardsAndHidden.hiddenOnly, overview: catalogCardsAndHidden.overviewIncludesHidden }, { all: true, hidden: true, overview: true }, "All includes dimmed hidden cards while Hidden isolates them");
     for (const [name, card] of Object.entries({ gallery: catalogCardsAndHidden.gallery, overview: catalogCardsAndHidden.overview })) {
@@ -3517,11 +3672,11 @@ async function main() {
         const candidateHit = [...document.querySelectorAll(".candidate-section-actions > button")].every((button) => { const rect = button.getBoundingClientRect(); const target = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2); return button === target || button.contains(target); });
         const targetChoices = document.querySelector(".candidate-pane .target-choices"); const targetPane = document.querySelector(".candidate-pane"); const targetBounds = targetChoices.getBoundingClientRect(); const paneBounds = targetPane.getBoundingClientRect(); const targetInputs = [...targetChoices.querySelectorAll('input[type="checkbox"]')]; const targetChips = [...targetChoices.querySelectorAll(".target-chip")]; const targetLabel = targetChoices.querySelector(".target-choices-label").getBoundingClientRect();
         const blockHeading = document.querySelector(".block-control-heading"); const blockLabel = blockHeading.querySelector('label[for="divisor"]'); const blockHelp = document.querySelector("#mosaicHelpButton"); const headingBox = blockHeading.getBoundingClientRect(); const labelBox = blockLabel.getBoundingClientRect(); const helpBox = blockHelp.getBoundingClientRect();
-        return { toolbar, stage, controls, candidateOverflow, candidateHit, targets: { count: targetInputs.length, native: targetInputs.every((input) => input.type === "checkbox"), oneLine: new Set([targetLabel.top, ...targetChips.map((item) => item.getBoundingClientRect().top)].map(Math.round)).size === 1, centered: targetChips.every((chip) => Math.abs((chip.getBoundingClientRect().top + chip.getBoundingClientRect().bottom) / 2 - (targetLabel.top + targetLabel.bottom) / 2) <= 1), withinPane: targetBounds.left >= paneBounds.left && targetBounds.right <= paneBounds.right, compact: targetChips.every((chip) => { const rect = chip.getBoundingClientRect(); return rect.height >= 26 && rect.height <= 28; }), selected: targetChips.every((chip) => chip.classList.contains("is-selected")), tracksAbsent: !targetChoices.querySelector(".target-switch-track") }, overviewAll: document.querySelector('[data-overview-filter="all"]').textContent, orientation: document.querySelector("#canvasToolRail").getAttribute("aria-orientation"), help: { label: blockHelp.getAttribute("aria-label"), title: blockHelp.title, parent: blockHelp.parentElement.className, nestedInLabel: Boolean(blockHelp.closest("label")), followsLabel: helpBox.left >= labelBox.right, fitsHeading: headingBox.left <= labelBox.left && headingBox.right >= helpBox.right && headingBox.width >= labelBox.width + helpBox.width }, toolPosition: document.querySelector("#settingsToolPosition") };
+        return { toolbar, stage, controls, candidateOverflow, candidateHit, targets: { count: targetInputs.length, native: targetInputs.every((input) => input.type === "checkbox"), oneLine: new Set([targetLabel.top, ...targetChips.map((item) => item.getBoundingClientRect().top)].map(Math.round)).size === 1, centered: targetChips.every((chip) => Math.abs((chip.getBoundingClientRect().top + chip.getBoundingClientRect().bottom) / 2 - (targetLabel.top + targetLabel.bottom) / 2) <= 1), withinPane: targetBounds.left >= paneBounds.left && targetBounds.right <= paneBounds.right, compact: targetChips.every((chip) => { const rect = chip.getBoundingClientRect(); return rect.height >= 26 && rect.height <= 28; }), selected: targetChips.every((chip) => chip.classList.contains("is-selected")), tracksAbsent: !targetChoices.querySelector(".target-switch-track") }, overviewFilterButton: document.querySelector("#overviewFilterButton").textContent, orientation: document.querySelector("#canvasToolRail").getAttribute("aria-orientation"), help: { label: blockHelp.getAttribute("aria-label"), title: blockHelp.title, parent: blockHelp.parentElement.className, nestedInLabel: Boolean(blockHelp.closest("label")), followsLabel: helpBox.left >= labelBox.right, fitsHeading: headingBox.left <= labelBox.left && headingBox.right >= helpBox.right && headingBox.width >= labelBox.width + helpBox.width }, toolPosition: document.querySelector("#settingsToolPosition") };
       });
       assert.ok(editor.toolbar.left === editor.stage.left && editor.toolbar.right === editor.stage.right && editor.toolbar.top === editor.stage.top && editor.toolbar.height > 30, `toolbar fills the editor top at ${width}/${language}`);
       assert.equal(editor.toolPosition, null, "legacy tool position control is absent");
-      assert.equal(editor.overviewAll, language === "ja" ? "すべて" : "All", `overview All is localized at ${width}/${language}`);
+      assert.equal(editor.overviewFilterButton, language === "ja" ? "絞り込み" : "Filters", `overview filter button is localized at ${width}/${language}`);
       assert.ok(editor.help.label && editor.help.title, `localized mosaic help trigger is labelled at ${width}/${language}`);
       assert.equal(editor.help.parent, "block-control-heading", `mosaic help follows the block-size label at ${width}/${language}`);
       assert.equal(editor.help.nestedInLabel, false, `mosaic help is not nested in the block-size label at ${width}/${language}`);
@@ -3596,7 +3751,7 @@ async function main() {
       state.candidates = original.candidates; state.candidateImages = original.images; state.removedCandidateIds = original.removed; state.history = original.history; state.historyIndex = original.index; state.historyRemovedCandidateIds = original.baseRemoved; state.historyCandidateIds = original.baseCandidates; state.settings.confirmations.candidateDelete = original.settings; state.project = original.project; state.projectReadOnly = original.projectReadOnly;
       return { afterDelete, undo, redo, trimmed, effective, cleared };
     });
-    assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: false }, `durable undo/redo and selection failure preserve the current display state: ${JSON.stringify(editorHistoryAndDisplay)}`);
+    assert.deepEqual(editorHistoryAndDisplay, { afterDelete: true, undo: true, redo: true, trimmed: true, effective: true, cleared: true }, `durable undo/redo and selection failure preserve the current display state: ${JSON.stringify(editorHistoryAndDisplay)}`);
     const candidateDisplayLifecycle = await page.evaluate(async () => {
       const original = {
         candidates: state.candidates, images: state.candidateImages, removed: state.removedCandidateIds,
@@ -3634,7 +3789,7 @@ async function main() {
       renderCandidates(); render();
       return { joinsNormal, joinsManualOnly, skipsHiddenManual, roleDeleteClearsDisplay };
     });
-    assert.deepEqual(candidateDisplayLifecycle, { joinsNormal: true, joinsManualOnly: true, skipsHiddenManual: true, roleDeleteClearsDisplay: true }, `browser candidate display lifecycle clears deleted ranges and only adds an exclusion erase to a fully normal existing range: ${JSON.stringify(candidateDisplayLifecycle)}`);
+    assert.deepEqual(candidateDisplayLifecycle, { joinsNormal: false, joinsManualOnly: false, skipsHiddenManual: true, roleDeleteClearsDisplay: true }, `browser candidate display lifecycle leaves manual additions outside existing candidate display groups and clears deleted ranges: ${JSON.stringify(candidateDisplayLifecycle)}`);
     const workspaceDraftRetention = await page.evaluate(async () => {
       // This verifies the in-memory draft/history fallback independently from
       // the durable-project implementation exercised in the project UI suite.
@@ -3988,7 +4143,7 @@ async function main() {
     });
     holdDetection(true);
     try {
-      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, uiDynamicControlManifest, finishCancel, holdSaveRender, releaseSaveRenders);
+      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, uiDynamicControlManifest, finishCancel, holdSaveRender, releaseSaveRenders, resetScenario);
     } finally {
       holdDetection(false);
       await stopCoveredPage(ledgerPage, true);

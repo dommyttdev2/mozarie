@@ -7,7 +7,8 @@ async function main() {
   try {
     browser = await chromium.launch({ headless: true });
     for (const language of ["ja", "en"]) for (const width of [270, 292, 320]) {
-      const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+      const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+      const page = await context.newPage();
       await page.goto(fixture.url); await page.waitForLoadState("domcontentloaded");
       await page.evaluate(({ language, width }) => {
         document.documentElement.lang = language;
@@ -22,7 +23,7 @@ async function main() {
         ["apply:toggle", "apply", "apply", "apply", "apply:delete"],
         ["exclude:toggle", "exclude", "exclude", "exclude", "exclude:delete"],
       ], `${language}/${width}: range controls retain ON/OFF, detection, applied, padding, delete order`);
-      await page.close();
+      await context.close();
     }
   } finally { await browser?.close(); await closeServer(fixture.server); }
 }

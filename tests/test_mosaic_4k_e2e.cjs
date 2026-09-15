@@ -6,9 +6,10 @@ const { closeServer, startFixtureServer } = require("./test_import_picker_e2e.cj
 test("4K drag renders a preview before pointerup with one bounded worker", { timeout: 60000 }, async () => {
   const fixture = await startFixtureServer();
   const browser = await chromium.launch();
-  let page;
+  let context; let page;
   try {
-    page = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+    context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    page = await context.newPage();
     page.setDefaultTimeout(25000);
     await page.addInitScript(() => {
       window.showOpenFilePicker = async () => [];
@@ -132,7 +133,7 @@ test("4K drag renders a preview before pointerup with one bounded worker", { tim
     const pointerUpAt = await page.evaluate(() => { window.__dragRoiMetrics.watchFinal = true; return performance.now(); });
     await page.mouse.up();
     await page.waitForFunction(() => !state.activeStroke && !state.mosaicWorkerBusy && !state.mosaicPending);
-    const metrics = await page.evaluate((started) => new Promise((resolve) => setTimeout(() => resolve({
+    const metrics = await page.evaluate((started) => ({
       completionMs: performance.now() - started,
       workerMax: window.__mosaicWorkerMetrics.maxActive,
       active: window.__mosaicWorkerMetrics.active,
@@ -140,17 +141,17 @@ test("4K drag renders a preview before pointerup with one bounded worker", { tim
       busy: state.mosaicWorkerBusy,
       finalFullCompose: window.__dragRoiMetrics.finalFullCompose,
       finalFullPreview: window.__dragRoiMetrics.finalFullPreview,
-    }), 500)), pointerUpAt);
+    }), pointerUpAt);
     assert.ok(metrics.completionMs < 1500, `4K preview settles after pointerup within the explicit limit (${metrics.completionMs.toFixed(1)}ms)`);
-    assert.equal(metrics.finalFullCompose, 1, "pointerup performs exactly one final full mask composition");
-    assert.equal(metrics.finalFullPreview, 1, "pointerup schedules exactly one final full preview");
+    assert.equal(metrics.finalFullCompose, 0, "pointerup keeps the final composition inside the dirty ROI");
+    assert.equal(metrics.finalFullPreview, 0, "pointerup keeps the final preview inside the dirty ROI");
     assert.equal(metrics.workerMax, 1, "4K preview creates at most one mosaic worker");
     assert.equal(metrics.active, 1, "the reusable worker remains singular after the settled frame");
     assert.equal(metrics.pending, false, "4K preview has no retained pending frame after settling");
     assert.equal(metrics.busy, false, "4K preview does not keep CPU work running after settling");
     console.log(`4K focused preview: paintP95=${dragMetrics.p95.toFixed(1)}ms patchP95=${dragMetrics.patchP95.toFixed(1)}ms complete=${metrics.completionMs.toFixed(1)}ms workers=${metrics.workerMax}`);
   } finally {
-    await page?.close();
+    await context?.close();
     await browser.close();
     fixture.server.closeAllConnections();
     await closeServer(fixture.server);

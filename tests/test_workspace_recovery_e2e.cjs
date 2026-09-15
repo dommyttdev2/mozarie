@@ -51,7 +51,8 @@ test("workspace recovery page loads translations once and recreates once before 
   t.after(() => new Promise((resolve) => fixture.server.close(resolve)));
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
-  const page = await browser.newPage();
+  const context = await browser.newContext();
+  const page = await context.newPage();
   const pageErrors = [];
   const requests = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
@@ -63,11 +64,12 @@ test("workspace recovery page loads translations once and recreates once before 
   assert.equal(pageErrors.length, 0, `recovery page must not throw: ${pageErrors.join("\n")}`);
   assert.equal(requests.filter((pathname) => /^\/i18n\/(?:ja|en)\.json$/.test(pathname)).length, 1, "translations are requested once");
 
-  const englishPage = await browser.newPage();
+  const englishContext = await browser.newContext();
+  const englishPage = await englishContext.newPage();
   await englishPage.addInitScript(() => localStorage.setItem("mozarie-language", "en"));
   await englishPage.goto(`${fixture.origin}/index.html`, { waitUntil: "networkidle" });
   assert.match(await englishPage.locator("#recreate").innerText(), /recreate/i, "the canonical English recovery page is translated");
-  await englishPage.close();
+  await englishContext.close();
 
   const navigation = page.waitForNavigation({ waitUntil: "domcontentloaded" });
   await page.evaluate(() => {
@@ -78,4 +80,5 @@ test("workspace recovery page loads translations once and recreates once before 
   await page.waitForFunction(() => document.querySelector('meta[name="mozarie-token"]'));
   assert.equal(fixture.recreateRequests(), 1, "recreate POST is sent once");
   assert.equal(pageErrors.length, 0, `reload must not throw: ${pageErrors.join("\n")}`);
+  await context.close();
 });

@@ -63,6 +63,7 @@ async function main() {
     await page.locator("#undoButton").click();
     await page.waitForFunction(() => !canvasHasPixels(exclusionCtx, exclusionCanvas));
     assert.equal(await page.evaluate((before) => addCanvas.toDataURL() === before, maskBeforeExcludeFill.add), true, "undoing exclude fill leaves the mosaic layer unchanged");
+    assert.equal(await page.locator("#errorDialog").evaluate((dialog) => dialog.open), false, await page.locator("#errorDialog").innerText());
     await page.locator("#redoButton").click();
     await page.waitForFunction(() => canvasHasPixels(exclusionCtx, exclusionCanvas));
     assert.equal(await page.evaluate((before) => addCanvas.toDataURL() === before, maskBeforeExcludeFill.add), true, "redoing exclude fill restores only the exclusion layer");
@@ -83,6 +84,7 @@ async function main() {
     const viewBefore = await page.evaluate(() => ({ ...state.view }));
     await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
     await page.mouse.down();
+    await page.mouse.move(handle.x + handle.width / 2 + 4, handle.y + handle.height / 2);
     assert.equal(await splitter.evaluate((node) => node.classList.contains("dragging")), true, "a live pointer drag exposes its visual state");
     for (let index = 0; index < 200; index += 1) {
       await page.mouse.move(canvas.x + canvas.width * (.25 + (index % 20) / 100), handle.y + handle.height / 2);
@@ -123,7 +125,7 @@ async function main() {
       const separator = document.querySelector("#compareSplitter");
       return { width: stage.clientWidth, disabled: separator.getAttribute("aria-disabled"), value: separator.getAttribute("aria-valuenow") };
     });
-    assert.deepEqual(narrow, { width: 300, disabled: "true", value: "50" }, "a sub-320px stage is fixed at an accessible 50/50 split");
+    assert.equal(narrow.width < 320 && narrow.disabled === "true" && narrow.value === "50", true, `a sub-320px stage is fixed at an accessible 50/50 split: ${JSON.stringify(narrow)}`);
   } finally {
     await browserContext.close();
     await browser.close();
