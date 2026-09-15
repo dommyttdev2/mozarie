@@ -578,10 +578,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 succeeded = False
                 try:
                     with STATE.import_staging_gate:
-                        staged_path = self._read_binary_body_to_file(content_length)
-                        STATE.record_import_transfer_bytes(import_session_id, content_length)
-                        requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
+                        staged_path: Path | None = None
                         try:
+                            staged_path = self._read_binary_body_to_file(content_length)
+                            STATE.record_import_transfer_bytes(import_session_id, content_length)
+                            requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
                             # Keep implicit API callers from splitting a
                             # parallel empty-catalog upload across IDs. This
                             # lock only verifies that the browser is still
@@ -589,25 +590,26 @@ class MosaicHandler(BaseHTTPRequestHandler):
                             # decoding and file copy below retain their
                             # parallelism.  A request header never opens or
                             # changes a project.
-                        with STATE.import_lock:
-                            if requested_catalog and STATE.catalog_id != requested_catalog:
-                                raise ClientError("画像追加中にフォルダを切り替えることはできません。", "operation_in_progress")
-                        import_args = {
-                            "name": name, "relative_path": relative_path, "client_key": client_key,
-                            "include_images": False, "transfer_active": True,
-                            "import_session_id": import_session_id,
-                            "import_project_id": expected_project_id,
-                            "import_catalog_generation": expected_catalog_generation,
-                            "source_identity": source_identity or None,
-                            "source_kind": source_kind,
-                            "intent": import_intent,
-                            "mtime_ns": mtime_ns,
-                            "size_bytes": size_bytes,
-                        }
-                        _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
-                        STATE.cleanup_browser_save_files()
-                    finally:
-                        staged_path.unlink(missing_ok=True)
+                            with STATE.import_lock:
+                                if requested_catalog and STATE.catalog_id != requested_catalog:
+                                    raise ClientError("画像追加中にフォルダを切り替えることはできません。", "operation_in_progress")
+                            import_args = {
+                                "name": name, "relative_path": relative_path, "client_key": client_key,
+                                "include_images": False, "transfer_active": True,
+                                "import_session_id": import_session_id,
+                                "import_project_id": expected_project_id,
+                                "import_catalog_generation": expected_catalog_generation,
+                                "source_identity": source_identity or None,
+                                "source_kind": source_kind,
+                                "intent": import_intent,
+                                "mtime_ns": mtime_ns,
+                                "size_bytes": size_bytes,
+                            }
+                            _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
+                            STATE.cleanup_browser_save_files()
+                        finally:
+                            if staged_path is not None:
+                                staged_path.unlink(missing_ok=True)
                     response = {"imported": imported, "catalogId": STATE.catalog_id,
                                 "catalogGeneration": STATE.catalog_snapshot()["catalogGeneration"]}
                     succeeded = True
