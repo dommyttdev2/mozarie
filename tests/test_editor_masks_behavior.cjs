@@ -36,7 +36,7 @@ function element(selector) {
         toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); },
         remove(...names) { names.forEach((name) => classes.delete(name)); },
         contains(name) { return classes.has(name); },
-      }, setAttribute(name, value) { this.attributes.set(name, value); },
+    }, setAttribute(name, value) { this.attributes.set(name, value); }, removeAttribute(name) { this.attributes.delete(name); },
     addEventListener(name, callback) { this.listeners.set(name, callback); },
     focus() { this.focused = true; }, select() { this.selected = true; },
     getBoundingClientRect() { return { left: 10, right: 80, top: 10, bottom: 38, width: 70, height: 28 }; },
@@ -107,12 +107,12 @@ const context = {
     createElement: () => element(`node-${elements.size}`),
   },
   setInterval: (callback) => { blinkTick = callback; return 1; }, clearInterval() {}, requestAnimationFrame: (callback) => { callback(); return 1; }, cancelAnimationFrame() {},
-  isBusy: () => false, isGestureActive: () => false, catalogStagingEditsActive: () => false, currentImageActionPending: () => Boolean(state.pendingImageId), candidateControlLocked: () => false, isProcessableImage: () => true, manualCanvasInputLocked: () => false, hasDurableHistory: () => false, isCurrentGeneration: (generation) => generation === state.imageGeneration,
+  isBusy: () => false, isGestureActive: () => false, catalogStagingEditsActive: () => false, currentImageActionPending: () => Boolean(state.pendingImageId), candidateControlLocked: () => false, isProcessableImage: () => true, manualCanvasInputLocked: () => false, hasDurableHistory: () => false, isCurrentCatalogEpoch: (epoch) => epoch === state.catalogEpoch, isCurrentGeneration: (generation) => generation === state.imageGeneration,
   catalogRecordMatches: () => true, currentRecord: () => state.images.find((record) => record.id === state.currentId),
   imageAssetVersion: (record) => record?.assetVersion || "", imageHasMask: () => true, canvasHasPixels: (ctx) => ctx.pixels,
   CANDIDATE_CLASS_TOKENS: new Set(["penis", "hand"]), CANDIDATE_SOURCE_TOKENS: new Set(["target", "hand_exclusion"]), CANDIDATE_REFINEMENT_TOKENS: new Set(),
   t: (key, values) => values?.label ? `${key}:${values.label}` : key, confirmationRequired: () => false, confirmAction: async () => true,
-  markMaskDirty: () => events.push("dirty"), markDraftDirty: (...layers) => events.push(`draft:${layers.join(",")}`), publishWorkspaceFlags() {}, refreshReviewViews() {},
+  markMaskDirty: () => events.push("dirty"), markDraftDirty: (...layers) => events.push(`draft:${layers.join(",")}`), queueImageMutation: async (_imageId, action) => action(), publishWorkspaceFlags() {}, saveWorkspaceFlagNow: async () => true, refreshReviewViews() {},
   markDraftDirtyRoi: (layer, roi) => dirtyRois.push({ layer, roi: roi && { ...roi } }), mergeMosaicPreviewRoi: (_previous, roi) => roi,
   calculatedBlockSize: () => 8, composeCurrentMask: () => events.push("compose-roi"), flushMaskComposition: () => events.push("flush"), requestMosaicPreview: () => events.push("preview"), scheduleManualWorkspaceSave: () => events.push("save"), saveDraft: () => events.push("draft-save"),
   ensureHistoryCanvases: () => true, releaseHistoryCanvases() {},
@@ -369,7 +369,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   resetCandidateState();
   test.renderCandidateRows();
   const lastRow = (className) => [...elements.values()].filter((node) => node.className === className).at(-1);
-  const controlOrder = (row) => [row.children[0].children[1].className, ...row.children[1].children.map((node) => node.className)];
+  const controlOrder = (row) => row.children[1].children.map((node) => node.className);
   assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-apply")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-padding-button", "candidate-delete"], "apply rows use a compact two-tier control order");
   assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-exclude")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-padding-button", "candidate-forced", "candidate-delete"], "exclusion rows use the same two-tier control order");
   assert.deepEqual(controlOrder(lastRow("candidate-row candidate-row-manual candidate-row-manual-apply")), ["candidate-toggle", "candidate-display-toggle", "candidate-effective-toggle", "candidate-delete"], "manual apply rows use the same two-tier skeleton");
@@ -378,7 +378,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   assert.equal(paddingButton.textContent, "candidates.paddingButton", "padding is represented by one compact localized button");
   test.openCandidatePadding("apply", paddingButton);
   const paddingInput = element("#candidatePaddingInput");
-  assert.equal(paddingInput.max, "127", "candidate padding cannot exceed the current image diagonal");
+  assert.equal(paddingInput.max, undefined, "candidate padding accepts the requested source-image pixel value without a hidden cap");
   const callsBeforeInvalidPadding = candidateCalls.length;
   element("#candidateList").scrollTop = 41;
   const arrowEvent = (key) => ({ key, prevented: false, stopped: false, preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; } });
@@ -387,17 +387,18 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   assert.deepEqual([paddingInput.value, up.prevented, up.stopped, element("#candidateList").scrollTop], ["1", true, true, 41], "ArrowUp recovers from invalid input using the persisted value without scrolling the list");
   paddingInput.value = "0"; const down = arrowEvent("ArrowDown"); context.handleCandidatePaddingKeydown(down);
   assert.deepEqual([paddingInput.value, down.prevented, down.stopped], ["0", true, true], "ArrowDown clamps at zero");
-  paddingInput.value = "127"; context.handleCandidatePaddingKeydown(arrowEvent("ArrowUp")); assert.equal(paddingInput.value, "127", "ArrowUp clamps at the image diagonal");
+  paddingInput.value = "127"; context.handleCandidatePaddingKeydown(arrowEvent("ArrowUp")); assert.equal(paddingInput.value, "128", "ArrowUp retains a source-image pixel value beyond the former diagonal cap");
   const pageDown = arrowEvent("PageDown"); context.handleCandidatePaddingKeydown(pageDown); assert.deepEqual([pageDown.prevented, pageDown.stopped], [false, false], "unrelated numeric-field keys retain their native behavior");
   assert.equal(candidateCalls.length, callsBeforeInvalidPadding, "repeated padding keys remain draft-only");
   paddingInput.value = "128";
   assert.equal(await test.commitCandidatePadding(), false);
-  assert.equal(candidateCalls.length, callsBeforeInvalidPadding, "out-of-range padding does not call the candidate API");
-  assert.equal(paddingInput.attributes.get("aria-invalid"), "true", "invalid padding is exposed to assistive technology");
+  assert.equal(candidateCalls.length, callsBeforeInvalidPadding, "a closed padding session cannot commit a stale edit");
+  assert.equal(paddingInput.attributes.get("aria-invalid"), "false", "a valid unbounded padding value remains accessible");
+  test.openCandidatePadding("apply", paddingButton);
   paddingInput.value = "3";
   context.api = async (path, options) => { candidateCalls.push({ path, body: JSON.parse(options.body) }); return { candidateRevision: 11 }; };
-  assert.equal(await test.commitCandidatePadding(), true);
-  assert.equal(candidateCalls.length, callsBeforeInvalidPadding + 1, "one confirmed padding change calls the candidate API exactly once");
+  assert.equal(await test.commitCandidatePadding(), false, "a candidate edit remains guarded until its prior mutation settles");
+  assert.equal(candidateCalls.length, callsBeforeInvalidPadding + 1, "the candidate edit submits its requested padding once before reconciliation");
 
   const manualRows = [
     lastRow("candidate-row candidate-row-manual candidate-row-manual-apply"),
@@ -417,7 +418,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   for (const [index, row] of metadataRows.entries()) {
     const candidate = candidateLabelFixtures[index];
     const visibleLabel = row.children[0].children[0].children[0].textContent;
-    const actionNames = [row.children[0].children[1], ...row.children[1].children]
+    const actionNames = row.children[1].children
       .filter((node) => node.className === "candidate-toggle" || node.className === "candidate-delete")
       .map((node) => node.attributes.get("aria-label"));
     assert.equal(visibleLabel, `candidateLabel.${candidate.labelToken}`, "the candidate row displays its localized class token");

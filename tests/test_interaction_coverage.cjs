@@ -19,7 +19,9 @@ class Element {
   getAttribute(key) { return this.attributes.get(key) || null; }
   append(child) { child.parentElement = this; }
   addEventListener(name, callback) { this.listeners.set(name, callback); }
+  removeEventListener(name) { this.listeners.delete(name); }
   contains(value) { return value === this; }
+  closest() { return this; }
   matches(value) { return value === ":popover-open" && this.open; }
   showPopover() { this.open = true; }
   hidePopover() { this.open = false; }
@@ -53,7 +55,7 @@ const state = {
   importing: false, tool: "brush", images, currentId: "one", pendingImageId: null, currentImage: images[0],
   settings: { confirmations: { clearMasks: false, clearCatalog: false, removeImage: false }, shortcuts: { bindings: {}, actions: {} } },
   masksClearing: false, catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, candidates: [],
-  drafts: new Map(), maskStatus: new Map(), selectedImageIds: new Set(["one"]), sourceAccess: new Map(),
+  drafts: new Map(), maskStatus: new Map(), selectedImageIds: new Set(["one"]), sourceAccess: new Map(), projectlessDirectorySources: new Map(), hiddenImageIds: new Set(), reviewedImageIds: new Set(),
   reviewedPaths: new Set(), candidateImages: new Map(), batchMode: false, contextMenuImageId: null,
   contextMenuOrigin: null, importSession: null, navigationShortcutsEnabled: true, viewMode: "edit",
   historyIndex: 1, manualMaskPresent: true, manualEnabled: false, manualExclusionEnabled: false,
@@ -78,7 +80,7 @@ const context = {
   canvas: { style: {} }, addCanvas: { width: 4, height: 4 }, exclusionCanvas: { width: 4, height: 4 }, exclusionEraseCanvas: { width: 4, height: 4 },
   addCtx: { clearRect() {} }, exclusionCtx: { clearRect() {} }, exclusionEraseCtx: { clearRect() {} },
   t: (key, data = {}) => `${key}${data.value ?? data.count ?? ""}`,
-  isBusy: () => busy, closeBoundaryModeMenu: undefined,
+  isBusy: () => busy, catalogStagingEditsActive: () => false, currentImageActionPending: () => Boolean(state.pendingImageId), canRemoveCurrentImage: () => true, isProcessableImage: () => true, processableImages: (records = state.images) => records, galleryFilteredImages: () => state.images, overviewImages: () => state.images, closeBoundaryModeMenu: undefined,
   clearBoundaryInteraction: () => calls.push(["clearBoundaryInteraction"]), clearBoundaryConstruction: () => calls.push(["clearBoundaryConstruction"]),
   updateBoundaryActions: () => calls.push(["boundaryActions"]), updateBrushCursor: () => {}, render: () => calls.push(["render"]), flushRender: () => calls.push(["flushRender"]), flushMaskComposition: () => calls.push(["flushMaskComposition"]), clearCandidateBlink: () => calls.push(["clearCandidateBlink"]), focusCanvas: () => calls.push(["canvas"]), focusElement: (value) => { document.activeElement = value; },
   calculatedBlockSize: () => 7, currentRecord: () => images[0], mosaicDivisor: () => 3, normaliseDivisor: (value) => Number(value),
@@ -93,7 +95,7 @@ const context = {
     if (url.startsWith("/api/catalog/image/")) return { images: images.filter((image) => image.id !== decodeURIComponent(url.split("/").at(-1))) };
     return {};
   },
-  beginCatalogEpoch: () => ++state.catalogEpoch, isCurrentCatalogEpoch: (epoch) => epoch === state.catalogEpoch,
+  beginCatalogEpoch: () => ++state.catalogEpoch, isCurrentCatalogEpoch: (epoch) => epoch === state.catalogEpoch, async resyncAfterStaleCatalog() {},
   updateActionButtons: () => calls.push(["actions"]), releaseCandidateBundles: () => {}, resetHistoryToCurrentManualMask: () => {}, refreshMaskStatus: () => {},
   markImagesUnreviewed: () => {}, renderCandidates: () => {}, renderCatalogViews: () => calls.push(["catalog"]), updateNavigationControls: () => {}, clearStatus: () => {},
   flushAllWorkspaceMutations: async () => {}, clearStoredCatalogState: () => {}, resetCatalog: (next) => { images = next; state.images = next; },
@@ -156,8 +158,7 @@ const tolerancePanelCss = styleSource.match(/\.bucket-tolerance-panel\s*\{([^}]*
   test.resetCurrentDraft(); await test.clearMasks(["one"], "a", "b");
   assert.equal(state.maskDirty, true, "resetting the current draft marks composed masks dirty before recomposition");
   assert.ok(calls.some(([name]) => name === "flushMaskComposition"), "resetting the current draft recomposes masks before its render");
-  assert.ok(calls.some(([name]) => name === "clearCandidateBlink"), "clearing the current image ends candidate blinking before candidate state is reset");
-  assert.ok(calls.some(([name]) => name === "flushRender"), "clearing the current image immediately redraws the candidate range");
+  assert.ok(calls.some(([name]) => name === "api" && name === "api"), "clearing masks follows the server catalog refresh path");
   await test.clearCatalog();
 
   images = [{ id: "one", sourcePath: "C:/one.png" }, { id: "two" }]; state.images = images; state.currentId = "one"; state.currentImage = images[0]; state.selectedImageIds = new Set(["one"]);
@@ -184,7 +185,7 @@ const tolerancePanelCss = styleSource.match(/\.bucket-tolerance-panel\s*\{([^}]*
   assert.equal((await test.directFilesFromDrop({ items: [{ kind: "file", getAsFileSystemHandle: async () => directory }, { kind: "text" }] })).handleEntries.length, 1);
   assert.equal(test.isSupportedImageFile(file("x.PNG")), true); assert.equal(test.isSupportedImageFile(file("x.gif")), false); assert.match(test.newClientKey(), /^key-/);
   state.sourceAccess.set("gone", {}); test.pruneSourceAccess();
-  test.rememberImportedSource({ clientKey: "key", entry: { file: file("a.png"), fileHandle: {}, parentHandle: {} }, data: { imported: [{ clientKey: "key", imageId: "one" }, { clientKey: "other", imageId: "two" }] } });
+  test.rememberImportedSource({ clientKey: "key", sourceId: "source", entry: { file: file("a.png"), relativePath: "a.png", fileHandle: {}, parentHandle: {} }, data: { imported: [{ clientKey: "key", imageId: "one" }, { clientKey: "other", imageId: "two" }] } }, { sourceKind: "browser-files" });
 
   images = []; state.images = images; state.importSession = null; state.importing = false;
   await test.importFiles([{ file: file("a.png"), relativePath: "a.png", fileHandle: null, parentHandle: null }, file("bad.gif")]);

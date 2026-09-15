@@ -10,12 +10,12 @@ let rejectFirst = false;
 const state = {
   images: [{ id: "one" }], drafts: new Map(),
   workspaceDraftChains: new Map(), workspaceDraftTimers: new Map(), workspaceMutationErrors: new Map(), draftSaveChains: new Map(),
-  currentId: null, draftDirty: false,
+  currentId: null, draftDirty: false, project: null,
 };
 const context = {
-  state, Map, Set, Promise, Object, Number, encodeURIComponent, window: {}, indexedDB: undefined,
+  state, Map, Set, Promise, Object, Number, encodeURIComponent, crypto: { randomUUID: () => "test-source" }, IDBKeyRange: { only: (value) => value }, window: {}, indexedDB: undefined,
   clearTimeout, setTimeout, queueMicrotask,
-  setStatus() {}, showUserError() {}, saveDraft() {},
+  setStatus() {}, showUserError() {}, saveDraft() {}, hasDurableHistory: () => Boolean(state.project), refreshProjectHistory() {},
   api(url, options = {}) {
     calls.push([url, options.method]);
     if (rejectFirst) { rejectFirst = false; return Promise.reject(new Error("write failed")); }
@@ -23,7 +23,7 @@ const context = {
   },
 };
 vm.runInNewContext(source, context, { filename: workspacePath });
-vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSaves,flushWorkspaceDraft,flushAllWorkspaceMutations,queueWorkspaceMutation,queueWorkspaceFlags,workspaceDraftPayload,directoryCatalogStore,rememberedOutputDirectoryHandle,rememberOutputDirectoryHandle,rememberedProjectSource,rememberedProjectFileSources,rememberedProjectDirectorySources,forgetProjectSources,ensureProjectSourcePermission,catalogForDirectoryHandle,loadWorkspaceDraft,scheduleManualWorkspaceSave};", context, { filename: "test-workspace-exports.js" });
+vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSaves,flushWorkspaceDraft,flushAllWorkspaceMutations,queueWorkspaceMutation,queueWorkspaceFlags,workspaceDraftPayload,directoryCatalogStore,rememberedOutputDirectoryHandle,rememberOutputDirectoryHandle,rememberedProjectSource,rememberedProjectSources,forgetProjectSources,ensureProjectSourcePermission,catalogForDirectoryHandle,loadWorkspaceDraft,scheduleManualWorkspaceSave};", context, { filename: "test-workspace-exports.js" });
 
 (async () => {
   await context.workspaceTest.queueWorkspaceDraft("one", true);
@@ -164,7 +164,7 @@ vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSave
   const originalIndexedDb = context.indexedDB;
   const originalWindowIndexedDb = context.window.indexedDB;
   let createdStores = 0;
-  const openedDb = { createObjectStore() { createdStores += 1; } };
+  const openedDb = { objectStoreNames: { contains: () => false }, createObjectStore() { createdStores += 1; return { indexNames: { contains: () => false }, createIndex() {} }; } };
   context.indexedDB = context.window.indexedDB = {
     open() {
       const request = { result: openedDb };
@@ -173,7 +173,7 @@ vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSave
     },
   };
   assert.equal(await context.workspaceTest.directoryCatalogStore(), openedDb, "a directory database creates its store on first open and returns the opened database");
-  assert.equal(createdStores, 2, "the directory database owns catalog and project-source stores");
+  assert.equal(createdStores, 3, "the directory database owns catalog, project-source, and source-delete stores");
   context.indexedDB = context.window.indexedDB = {
     open() {
       const request = {};
@@ -189,16 +189,17 @@ vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSave
 
   const fileRowsDb = {
     close() {},
-    transaction() { return { objectStore() { return { getAll() { const request = {}; queueMicrotask(() => request.onsuccess()); request.result = [
+    transaction() { return { objectStore() { const getAll = () => { const request = {}; queueMicrotask(() => request.onsuccess()); request.result = [
       { projectId: "project", imageId: "one", sourceId: "source-a", handle: { kind: "file", name: "a.png" } },
       { projectId: "project", imageId: null, sourceId: "source-a", handle: { kind: "directory", name: "folder" } },
       { projectId: "other", imageId: "two", sourceId: "source-b", handle: { kind: "file", name: "b.png" } },
-    ]; return request; } }; } }; },
+    ]; return request; }; return { getAll, index() { return { getAll }; } }; } }; },
   };
   context.indexedDB = context.window.indexedDB = { open() { const request = { result: fileRowsDb }; queueMicrotask(() => request.onsuccess()); return request; } };
   assert.equal((await context.workspaceTest.rememberedProjectSource("project", "source-a", "one")).name, "a.png", "a remembered project source resolves by its durable source and image IDs");
-  assert.equal(JSON.stringify(await context.workspaceTest.rememberedProjectFileSources("project")), JSON.stringify([{ sourceId: "source-a", handle: { kind: "file", name: "a.png" } }]), "browser file handles retain the durable source ID needed to restore the same project images");
-  assert.equal(JSON.stringify(await context.workspaceTest.rememberedProjectDirectorySources("project")), JSON.stringify([{ sourceId: "source-a", handle: { kind: "directory", name: "folder" } }]), "a remembered project directory restores its durable source ID");
+  const rememberedSources = await context.workspaceTest.rememberedProjectSources("project");
+  assert.equal(JSON.stringify(rememberedSources.files), JSON.stringify([{ imageId: "one", sourceId: "source-a", clientKey: null, relativePath: "a.png", handle: { kind: "file", name: "a.png" } }, { imageId: "two", sourceId: "source-b", clientKey: null, relativePath: "b.png", handle: { kind: "file", name: "b.png" } }]), "browser file handles retain their durable image and source IDs");
+  assert.equal(JSON.stringify(rememberedSources.directories), JSON.stringify([{ sourceId: "source-a", handle: { kind: "directory", name: "folder" } }]), "a remembered project directory restores its durable source ID");
   assert.equal(await context.workspaceTest.ensureProjectSourcePermission({ queryPermission: async () => "granted" }), true, "a granted project source opens without another prompt");
   assert.equal(await context.workspaceTest.ensureProjectSourcePermission({ queryPermission: async () => "prompt", requestPermission: async () => "granted" }, true), true, "an explicitly requested project source can obtain browser read permission");
   assert.equal(await context.workspaceTest.ensureProjectSourcePermission({ queryPermission: async () => { throw new Error("denied"); } }), false, "a project source permission failure remains closed");
@@ -206,9 +207,9 @@ vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSave
   const deletedHandleKeys = [];
   const cleanupDb = {
     close() {},
-    transaction(_name, mode) { return { objectStore() { return mode === "readwrite" ? { delete(key) { deletedHandleKeys.push(key); } } : { getAll() { const request = {}; queueMicrotask(() => request.onsuccess()); request.result = [
+    transaction(_name, mode) { return { objectStore() { const getAll = () => { const request = {}; queueMicrotask(() => request.onsuccess()); request.result = [
       { key: "project:source-a:one", projectId: "project" }, { key: "project:dir:root", projectId: "project" }, { key: "other:source-b:two", projectId: "other" },
-    ]; return request; } }; } }; },
+    ]; return request; }; return mode === "readwrite" ? { delete(key) { deletedHandleKeys.push(key); }, index() { return { getAll }; } } : { getAll, index() { return { getAll }; } }; } }; },
   };
   context.indexedDB = context.window.indexedDB = { open() { const request = { result: cleanupDb }; queueMicrotask(() => request.onsuccess()); return request; } };
   await context.workspaceTest.forgetProjectSources("project");

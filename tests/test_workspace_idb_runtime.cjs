@@ -36,7 +36,7 @@ const context = {
   }, setStatus() {}, saveDraft() {},
 };
 vm.runInNewContext(source, context, { filename: workspacePath });
-vm.runInNewContext("globalThis.idbTest={directoryCatalogStore, catalogForDirectoryHandle, rememberedProjectSource, rememberedProjectFileSources, rememberedProjectDirectorySources, forgetProjectSources, rememberedOutputDirectoryHandle};", context, { filename: "test-workspace-idb-exports.js" });
+vm.runInNewContext("globalThis.idbTest={directoryCatalogStore, catalogForDirectoryHandle, rememberedProjectSource, rememberedProjectSources, forgetProjectSources, rememberedOutputDirectoryHandle};", context, { filename: "test-workspace-idb-exports.js" });
 (async () => {
   assert.equal(await context.idbTest.catalogForDirectoryHandle({}), "fresh");
   assert.equal(context.state.project.id, "fresh");
@@ -51,8 +51,7 @@ vm.runInNewContext("globalThis.idbTest={directoryCatalogStore, catalogForDirecto
   assert.equal(await context.idbTest.directoryCatalogStore(), null, "a failed IndexedDB open disables only local handle recall");
   openFails = false; readFails = true;
   assert.equal(await context.idbTest.rememberedProjectSource("fresh", "source"), null, "a failed source lookup behaves as an absent remembered source");
-  assert.deepEqual([...await context.idbTest.rememberedProjectFileSources("fresh")], [], "a failed file-source lookup has no implicit import fallback");
-  assert.deepEqual([...await context.idbTest.rememberedProjectDirectorySources("fresh")], [], "a failed directory-source lookup has no implicit import fallback");
+  assert.deepEqual(await context.idbTest.rememberedProjectSources("fresh"), { files: [], directories: [] }, "a failed source lookup has no implicit import fallback");
   await context.idbTest.forgetProjectSources("fresh");
   assert.equal(await context.idbTest.rememberedOutputDirectoryHandle(), null, "a failed output-handle lookup leaves output selection explicit");
   console.log("test_workspace_idb_runtime: passed");

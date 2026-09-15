@@ -11,8 +11,8 @@ const requests = [];
 const pending = [];
 const state = {
   images: [{ id: "one", relativePath: "one.png", hidden: false, reviewed: false }, { id: "two", relativePath: "two.png", hidden: false, reviewed: false }],
-  hiddenPaths: new Set(), reviewedPaths: new Set(), selectedImageIds: new Set(), batchMode: false,
-  workspaceDraftChains: new Map(), workspaceDraftTimers: new Map(), workspaceMutationErrors: new Map(),
+  hiddenPaths: new Set(), reviewedPaths: new Set(), hiddenImageIds: new Set(), reviewedImageIds: new Set(), selectedImageIds: new Set(), batchMode: false,
+  workspaceDraftChains: new Map(), workspaceDraftTimers: new Map(), workspaceMutationErrors: new Map(), imageMutationChains: new Map(), candidateControlLocks: new Map(),
 };
 const context = {
   state, Map, Set, Promise, Object, String, Boolean, encodeURIComponent,
