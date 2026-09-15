@@ -410,7 +410,7 @@ class UpdaterTests(unittest.TestCase):
                 contents.pop(f"wrapper/{name}")
                 contents[f"wrapper/{name}/child"] = "not a required file"
                 write_archive(archive, contents)
-                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_unexpected_file"))):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_unmanaged"))):
                     updater.extract_archive(archive, root / "out")
 
     def test_safe_extract_rejects_required_directory_files(self):
@@ -424,7 +424,7 @@ class UpdaterTests(unittest.TestCase):
                         contents.pop(path)
                 contents[f"wrapper/{name}"] = "not a required directory"
                 write_archive(archive, contents)
-                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_unexpected_file"))):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_unmanaged"))):
                     updater.extract_archive(archive, root / "out")
 
     def test_safe_extract_rejects_missing_version(self):
@@ -513,7 +513,13 @@ class UpdaterTests(unittest.TestCase):
             try:
                 (output / "root").symlink_to(outside, target_is_directory=True)
             except OSError:
-                self.skipTest("directory symlinks are unavailable")
+                archive = root / "release.zip"
+                with zipfile.ZipFile(archive, "w") as bundle:
+                    bundle.writestr("root/escaped.txt", "bad")
+                with self.assertRaises(updater.UpdateError):
+                    updater.extract_archive(archive, output)
+                self.assertFalse((outside / "escaped.txt").exists())
+                return
 
             archive = root / "release.zip"
             with zipfile.ZipFile(archive, "w") as bundle:
@@ -1073,7 +1079,6 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn(':ready_marker_create_failed', setup)
         self.assertIn('if not exist "%APP_DIR%.venv\\.mozarie-ready" goto :ready_marker_create_failed', setup)
 
-    @unittest.skipUnless(os.name == "nt", "Windows batch behavior")
     def test_run_honors_explicit_mozarie_python_without_creating_a_venv(self):
         root_batch = Path(__file__).parents[1] / "run.bat"
         with tempfile.TemporaryDirectory() as directory:
@@ -1106,7 +1111,6 @@ class UpdaterTests(unittest.TestCase):
         self.assertNotIn("call :create_venv", batch.lower())
         self.assertIn('if not defined MOZARIE_RUNTIME goto :setup_required', batch)
 
-    @unittest.skipUnless(os.name == "nt", "Windows batch behavior")
     def test_run_with_missing_or_invalid_marker_requires_setup(self):
         root_batch = Path(__file__).parents[1] / "run.bat"
         with tempfile.TemporaryDirectory() as directory:
@@ -1149,7 +1153,6 @@ class UpdaterTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(started.read_text(encoding="utf-8"), "ok")
 
-    @unittest.skipUnless(os.name == "nt" and shutil.which("py"), "requires the Windows Python launcher")
     def test_setup_batch_reports_venv_and_running_states_without_marking_ready(self):
         root_batch = Path(__file__).parents[1] / "setup.bat"
         with tempfile.TemporaryDirectory() as directory:
