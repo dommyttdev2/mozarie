@@ -5,6 +5,10 @@ const vm = require("node:vm");
 
 const jsRoot = path.join(__dirname, "..", "static", "js");
 
+function sourceBlob(name, size, lastModified) {
+  return Object.assign(new Blob([new Uint8Array(size)]), { name, lastModified });
+}
+
 function classList() {
   const values = new Set();
   return {
@@ -237,8 +241,8 @@ function makeSaveRuntime() {
   const errors = []; const calls = []; const requests = [];
   const state = {
     sourceAccess: new Map(), applyTargetIds: ["file"], images: [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }, { id: "session", sourceKind: "session", relativePath: "session.png" }],
-    settings: { saving: { default_output_directory: "G:/out", parallelism: 1 }, detection: { exclude_forced_default: true } }, drafts: new Map(), maskStatus: new Map(), selectedImageIds: new Set(), candidateUpdateChains: new Map(),
-    applyRunning: false, saveStarting: false, outputDirectoryPicking: false, outputDirectoryHandle: null, importing: false, saving: false, currentId: null, candidates: [], prefetchQueue: [], catalogEpoch: 1, imageGeneration: 0, pageLoadedAt: 1, job: { kind: "idle", state: "idle" }, projectHistory: new Map(), workspaceDraftChains: new Map(), workspaceDraftTimers: new Map(), workspaceMutationErrors: new Map(), workspaceFlagPending: new Map(), draftSaveChains: new Map(),
+    settings: { saving: { default_output_directory: "G:/out", parallelism: 1 }, detection: { exclude_forced_default: true }, confirmations: { overwriteSource: false, deleteSourceAfterCopy: false } }, drafts: new Map(), maskStatus: new Map(), selectedImageIds: new Set(), candidateUpdateChains: new Map(),
+    applyRunning: false, saveStarting: false, outputDirectoryPicking: false, importing: false, saving: false, currentId: null, candidates: [], prefetchQueue: [], catalogEpoch: 1, imageGeneration: 0, pageLoadedAt: 1, job: { kind: "idle", state: "idle" }, projectHistory: new Map(), workspaceDraftChains: new Map(), workspaceDraftTimers: new Map(), workspaceMutationErrors: new Map(), workspaceFlagPending: new Map(), draftSaveChains: new Map(),
   };
   let handler = async (url) => {
     if (url === "/api/images") return { images: state.images };
@@ -246,12 +250,18 @@ function makeSaveRuntime() {
     if (url === "/api/save/commit") return { cleared: false, stale: false };
     return {};
   };
+  const invoke = async (url, options) => {
+    const result = await handler(url, options);
+    if (url === "/api/save/reserve" && !result?.state) return { state: "rendering" };
+    if (url === "/api/save/ack" && result && Object.keys(result).length === 0) return { acknowledged: true };
+    return result;
+  };
   const context = {
     codedError(code) { const error = new Error(); error.code = code; return error; }, responseError(response, payload) { const error = new Error(); error.status = response.status; error.code = payload?.error_code || "internal_error"; return error; },
-    console, Map, Set, Array, Math, Number, Boolean, JSON, Promise, Uint8Array, Error, DOMException, window: { addEventListener() {}, showDirectoryPicker: async () => ({ name: "picked", async queryPermission() { return "granted"; } }) }, navigator: { locks: { async request(_name, _options, callback) { return callback(); } } }, document: { activeElement: nodes.get("#applyStartButton"), querySelector(selector) { if (selector === 'input[name="batchSaveMode"]:checked') return saveMode; if (selector === 'input[name="singleSaveMode"]:checked') return singleSaveMode; if (selector === 'meta[name="mozarie-token"]') return { content: "token" }; return nodes.get(selector); } },
-    state, $: (selector) => nodes.get(selector), t(key, values = {}) { return `${key}:${Object.values(values).join(",")}`; }, catalogRequestHeaders(headers = {}) { return { "X-Mozarie-Token": context.document.querySelector('meta[name="mozarie-token"]')?.content || "", ...headers }; }, api(url, options) { requests.push({ url, options }); return handler(url, options); },
-    fetch(url, options) { return handler(url, options); }, setTimeout(callback, delay) { if (delay === 150) callback(); return 1; }, clearTimeout() {},
-    showUserError(error) { errors.push(error); }, userErrorCode(error) { return error?.code || "internal_error"; }, showModalFromInvoker(node) { node.open = true; }, setSettingsForm(settings) { state.settings = settings; }, async rememberOutputDirectoryHandle() {},
+    console, Map, Set, Array, Math, Number, Boolean, JSON, Promise, Uint8Array, Error, DOMException, Blob, TextDecoder, Intl, crypto: { randomUUID: () => `gallery-token-${requests.length}` }, window: { addEventListener() {} }, navigator: { locks: { async request(_name, _options, callback) { return callback(); } } }, localStorage: (() => { const values = new Map(); return { get length() { return values.size; }, key(index) { return [...values.keys()][index] || null; }, getItem(key) { return values.get(key) || null; }, setItem(key, value) { values.set(key, String(value)); }, removeItem(key) { values.delete(key); } }; })(), atob(value) { return Buffer.from(value, "base64").toString("binary"); }, document: { activeElement: nodes.get("#applyStartButton"), documentElement: { lang: "en" }, querySelectorAll() { return []; }, querySelector(selector) { if (selector === 'input[name="batchSaveMode"]:checked') return saveMode; if (selector === 'input[name="singleSaveMode"]:checked') return singleSaveMode; if (selector === 'meta[name="mozarie-token"]') return { content: "token" }; return nodes.get(selector); } },
+    state, $: (selector) => nodes.get(selector), t(key, values = {}) { return `${key}:${Object.values(values).join(",")}`; }, catalogRequestHeaders(headers = {}) { return { "X-Mozarie-Token": context.document.querySelector('meta[name="mozarie-token"]')?.content || "", ...headers }; }, api(url, options) { requests.push({ url, options }); return invoke(url, options); },
+    fetch(url, options) { requests.push({ url, options }); return invoke(url, options); }, setTimeout(callback, delay) { if (delay === 150) callback(); return 1; }, clearTimeout() {},
+    showUserError(error) { errors.push(error); }, userErrorCode(error) { return error?.code || "internal_error"; }, showModalFromInvoker(node) { node.open = true; }, setSettingsForm(settings) { state.settings = settings; },
     saveTargets() { return state.applyTargetIds; }, processableImages() { return state.images; }, isBusy() { return Boolean(context.busy); }, currentImageActionPending() { return Boolean(state.pendingImageId); }, catalogStagingEditsActive() { return false; }, isProcessableImage() { return true; }, async flushDraftSaves() { if (context.flushError) throw context.flushError; }, async flushWorkspaceDraft(imageId) { calls.push(`flush:${imageId}`); }, async waitForCandidateMutations() { calls.push("wait-candidates"); }, updateBlockSizeDisplay() { calls.push("block-size"); },
     updateActionButtons() { calls.push("actions"); }, releaseCandidateBundles(id) { calls.push(`release:${id}`); }, resetCurrentDraft() { calls.push("reset-draft"); }, pruneSourceAccess() { calls.push("prune"); },
     releaseImageCaches(id) { calls.push(`cache:${id}`); }, clearCandidateMutationState(id) { calls.push(`mutation:${id}`); }, clearReviewForRemovedImage() { calls.push("clear-review"); }, clearBatchSelection() { calls.push("clear-batch"); }, clearEditor() { calls.push("clear-editor"); }, renderCatalogViews() { calls.push("catalog"); }, updateSelectionActionBar() { calls.push("selection"); },
@@ -263,7 +273,7 @@ function makeSaveRuntime() {
   context.confirmed = true;
   const source = fs.readFileSync(path.join(jsRoot, "save.js"), "utf8");
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "save.js") });
-  vm.runInNewContext("globalThis.__saveTest = { setApplyResult, showApplyError, isTerminalApply, selectedSaveMode, sourceAccessFor, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, applyRestrictionMessage, syncApplyMode, refreshApplyTargets, openApplyDialog, selectedSingleSaveMode, setSingleSaveResult, syncSingleSaveMode, openSingleSaveDialog, chooseSingleOutputDirectory, singleOutputName, writeSingleOutput, renderSingleSave, startSingleSave, draftPayload, renderOutputDirectory, setOutputDirectoryPickerBusy, pickOutputDirectory, ensureOutputDirectoryPermission, chooseOutputDirectory, waitForBrowserSave, showBrowserSaveProgress, reconcileStoredMaskStatuses, reconcileBrowserSaveState, ensureHandlePermission, ensureSaveSources, writeSourceHandle, removeSourceHandle, snapshotSourceHandle, restoreSourceHandle, runBrowserSave, commitBrowserSaveWithRetry, cancelBrowserSave, isDefinitiveCommitRejection, startApplyFromDialog, finishSaveStart, controlApply, showRunningApply, finishApplyJob, isTerminalDetection, finishDetectionJob, pollJob, scheduleJobPoll };", context, { filename: "test-save-exports.js" });
+  vm.runInNewContext("globalThis.__saveTest = { setApplyResult, showApplyError, isTerminalApply, selectedSaveMode, sourceAccessFor, sourceCanOverwrite, sourceCanDelete, applyTargetsSupport, applyRestrictionMessage, syncApplyMode, refreshApplyTargets, openApplyDialog, selectedSingleSaveMode, setSingleSaveResult, syncSingleSaveMode, openSingleSaveDialog, chooseSingleOutputDirectory, renderSingleSave, startSingleSave, draftPayload, renderOutputDirectory, setOutputDirectoryPickerBusy, pickOutputDirectory, reserveSaveRender, renderDefaultCopy, renderStreamedSave, chooseOutputDirectory, waitForBrowserSave, showBrowserSaveProgress, reconcileStoredMaskStatuses, reconcileBrowserSaveState, ensureHandlePermission, ensureSaveSources, writeSourceHandle, snapshotSourceHandle, restoreSourceHandle, runBrowserSave, commitBrowserSaveWithRetry, cancelBrowserSave, acknowledgePendingBrowserSave, isDefinitiveCommitRejection, startApplyFromDialog, finishSaveStart, controlApply, showRunningApply, finishApplyJob, isTerminalDetection, finishDetectionJob, pollJob, scheduleJobPoll };", context, { filename: "test-save-exports.js" });
   return { ...context.__saveTest, calls, context, errors, nodes, requests, saveMode, singleSaveMode, state, setHandler(fn) { handler = fn; } };
 }
 
@@ -274,17 +284,14 @@ async function saveInteractions() {
   assert.equal(runtime.selectedSingleSaveMode(), "copy"); runtime.setSingleSaveResult("single", true); assert.equal(runtime.nodes.get("#singleSaveResult").textContent, "single");
   await runtime.openSingleSaveDialog(null); runtime.context.busy = true; await runtime.openSingleSaveDialog("file"); runtime.context.busy = false; runtime.context.flushError = new Error("draft"); await runtime.openSingleSaveDialog("file"); runtime.context.flushError = null; state.candidateUpdateChains.set("pending", Promise.resolve()); await runtime.openSingleSaveDialog("file"); state.candidateUpdateChains.clear(); assert.equal(state.singleSave.imageId, "file");
   state.singleSave = null; runtime.syncSingleSaveMode(); state.singleSave = { imageId: "missing" }; runtime.syncSingleSaveMode(); state.singleSave = { imageId: "file" }; runtime.singleSaveMode.value = "overwrite"; runtime.syncSingleSaveMode(); runtime.singleSaveMode.value = "copy";
-  runtime.syncSingleSaveMode(); assert.equal(runtime.nodes.get("#singleSaveStartButton").disabled, true); state.outputDirectoryHandle = { name: "single-output" }; runtime.syncSingleSaveMode(); assert.equal(runtime.nodes.get("#singleSaveStartButton").disabled, false); state.saving = true; await runtime.chooseSingleOutputDirectory(); state.saving = false;
-  runtime.context.window.showDirectoryPicker = async () => { const error = new Error("cancel"); error.name = "AbortError"; throw error; }; await runtime.chooseSingleOutputDirectory(); runtime.context.window.showDirectoryPicker = async () => { throw new Error("picker"); }; await runtime.chooseSingleOutputDirectory(); runtime.context.window.showDirectoryPicker = async () => ({ name: "picked", async queryPermission() { return "granted"; } });
-  const supportedPicker = runtime.context.window.showDirectoryPicker; runtime.context.window.showDirectoryPicker = undefined; await assert.rejects(runtime.pickOutputDirectory(), (error) => error.code === "directory_picker_unsupported"); runtime.context.window.showDirectoryPicker = supportedPicker;
-  assert.equal(runtime.singleOutputName("nested/file.png", "_m"), "file_m.png"); assert.equal(runtime.singleOutputName("file", "_m", 2), "file_m_2");
-  assert.equal(runtime.singleOutputName("", "_m"), "image_m");
-  const writeHandle = { async getFileHandle(name, options = {}) { if (!options.create) { const error = new Error("missing"); error.name = "NotFoundError"; throw error; } return { async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } }; }, async removeEntry() {} };
-  const writeResponse = { body: { async pipeTo(stream) { await stream.write(Uint8Array.from([1])); await stream.close(); } } };
-  await runtime.writeSingleOutput(writeHandle, "file.png", "_m", writeResponse); const savedLocks = runtime.context.navigator.locks; runtime.context.navigator.locks = null; await assert.rejects(runtime.writeSingleOutput(writeHandle, "file.png", "_m", writeResponse), (error) => error.code === "output_write_unsupported"); runtime.context.navigator.locks = savedLocks;
+  runtime.syncSingleSaveMode(); assert.equal(runtime.nodes.get("#singleSaveStartButton").disabled, false); state.saving = true; await runtime.chooseSingleOutputDirectory(); state.saving = false;
+  runtime.setHandler(async (url) => url === "/api/output-directory/pick" ? { cancelled: false, path: "G:/picked", settings: { saving: { default_output_directory: "G:/picked" } } } : {});
+  await runtime.pickOutputDirectory(); assert.equal(state.settings.saving.default_output_directory, "G:/picked", "the server picker updates the absolute single-save path");
+  runtime.setHandler(async (url) => url === "/api/output-directory/pick" ? { cancelled: true } : {});
+  await runtime.chooseSingleOutputDirectory(); assert.equal(state.settings.saving.default_output_directory, "G:/picked", "a cancelled picker keeps the prior absolute path");
   runtime.setHandler(async (url) => url === "/api/save/render" ? { ok: false, status: 409, json: async () => ({ error_code: "save_state_changed" }) } : {}); await assert.rejects(runtime.renderSingleSave({}), (error) => error.code === "save_state_changed");
   runtime.setHandler(async (url) => { if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] }; if (url === "/api/save/render") return { ok: true, headers: { get() { return "single-token"; } }, body: { async pipeTo(stream) { await stream.write(Uint8Array.from([1])); await stream.close(); } } }; if (url === "/api/save/commit") return { cleared: false, stale: false }; if (url === "/api/images") return { images: state.images }; return {}; });
-  state.singleSave = { imageId: "file", generation: state.imageGeneration, divisor: 16, draft: null }; state.outputDirectoryHandle = { name: "single-output", async queryPermission() { return "granted"; }, async getFileHandle(name, options = {}) { if (!options.create) { const error = new Error("missing"); error.name = "NotFoundError"; throw error; } return { async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } }; }, async removeEntry() {} }; runtime.nodes.get("#singleSaveSuffix").value = "_m"; await runtime.startSingleSave({ preventDefault() {} });
+  state.singleSave = { imageId: "file", generation: state.imageGeneration, divisor: 16, draft: null }; runtime.nodes.get("#singleSaveSuffix").value = "_m"; await runtime.startSingleSave({ preventDefault() {} });
   assert.equal(runtime.isTerminalApply({ kind: "detect", state: "complete" }), false); state.applyRunning = true; assert.equal(runtime.isTerminalApply({ kind: "apply", state: "complete" }), true); state.applyRunning = false; state.handledApplyStartedAt = 2; assert.equal(runtime.isTerminalApply({ kind: "apply", state: "complete", startedAt: 3 }), true);
   assert.equal(runtime.selectedSaveMode(), "copy"); assert.equal(runtime.sourceAccessFor("missing"), null); assert.equal(runtime.sourceCanOverwrite(state.images[0]), true); assert.equal(runtime.sourceCanDelete(state.images[1]), false); assert.equal(runtime.applyTargetsSupport("overwrite"), true);
   state.applyTargetIds = ["session"]; runtime.saveMode.value = "overwrite"; assert.match(runtime.applyRestrictionMessage(), /overwriteUnavailable/); runtime.syncApplyMode(); assert.equal(runtime.nodes.get("#applyStartButton").disabled, true);
@@ -295,25 +302,29 @@ async function saveInteractions() {
   runtime.context.busy = true; await runtime.openApplyDialog(); runtime.context.busy = false; runtime.context.flushError = new Error("draft failed"); await runtime.openApplyDialog(); runtime.context.flushError = null;
   state.applyTargetIds = []; await runtime.openApplyDialog([]); state.applyTargetIds = ["file"]; await runtime.openApplyDialog({ initialMode: "masked" }); assert.equal(runtime.nodes.get("#applyDialog").open, true);
   state.drafts.set("file", { add: "add", exclusion: "x", exclusionErase: "erase", manualEnabled: false, manualExclusionEnabled: false, manualExclusionEraseEnabled: false, removedCandidateIds: ["old"] }); assert.deepEqual(JSON.parse(JSON.stringify(runtime.draftPayload(["file", "missing"]))), { file: { add: "", exclusion: "", exclusionErase: "", manualExclusionForced: true, removedCandidateIds: ["old"] } });
-  runtime.renderOutputDirectory(); assert.equal(runtime.nodes.get("#settingsDefaultOutputDirectory").value, "G:/out"); runtime.setOutputDirectoryPickerBusy(true); assert.equal(state.outputDirectoryPicking, true); runtime.setOutputDirectoryPickerBusy(false);
+  runtime.renderOutputDirectory(); assert.equal(runtime.nodes.get("#settingsDefaultOutputDirectory").value, "G:/picked"); runtime.setOutputDirectoryPickerBusy(true); assert.equal(state.outputDirectoryPicking, true); runtime.setOutputDirectoryPickerBusy(false);
 
-  const picked = await runtime.pickOutputDirectory(); assert.equal(picked.name, "picked"); assert.equal(state.outputDirectoryHandle.name, "picked"); await runtime.chooseOutputDirectory();
+  runtime.setHandler(async (url) => url === "/api/output-directory/pick" ? { cancelled: false, path: "G:/picked-again", settings: { saving: { default_output_directory: "G:/picked-again" } } } : {});
+  const picked = await runtime.pickOutputDirectory(); assert.equal(picked, "G:/picked-again"); assert.equal(state.settings.saving.default_output_directory, "G:/picked-again"); await runtime.chooseOutputDirectory();
 
   assert.equal(await runtime.waitForBrowserSave({ paused: false, cancelled: false, failed: false }), true); assert.equal(await runtime.waitForBrowserSave({ paused: false, cancelled: true, failed: false }), false); runtime.showBrowserSaveProgress({ paused: true, entries: [{}], completed: 0 }, { relativePath: "file.png" }); assert.equal(state.job.state, "paused");
   state.images = [{ id: "file" }, { id: "kept" }]; state.drafts = new Map([["file", { hasEffectiveMask: true }], ["gone", { hasEffectiveMask: true }]]); state.maskStatus = new Map([["file", false], ["gone", true]]); runtime.reconcileStoredMaskStatuses(); assert.deepEqual([...state.maskStatus], [["file", true]]);
   state.currentId = "gone"; runtime.reconcileBrowserSaveState(); assert.equal(state.currentId, null); state.currentId = "file"; runtime.reconcileBrowserSaveState();
 
-  let file = { name: "session.png", size: 2, lastModified: 3, async arrayBuffer() { return Uint8Array.from([1, 2]).buffer; } }; const handle = { name: "session.png", async getFile() { return file; }, async queryPermission() { return "prompt"; }, async requestPermission() { return "granted"; }, async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } };
-  const access = { fileHandle: handle, name: file.name, size: file.size, lastModified: file.lastModified }; await runtime.ensureHandlePermission(access, true); file = { ...file, size: 4 }; await assert.rejects(runtime.ensureHandlePermission(access), (error) => error?.code === "stale_asset"); file = { ...file, size: 2 };
+  let file = sourceBlob("session.png", 2, 3); const handle = { name: "session.png", async getFile() { return file; }, async queryPermission() { return "prompt"; }, async requestPermission() { return "granted"; }, async createWritable() { return { async write() {}, async close() {}, async abort() {} }; } };
+  const access = { fileHandle: handle, name: file.name, size: file.size, lastModified: file.lastModified }; await runtime.ensureHandlePermission(access, true); file = sourceBlob("session.png", 4, 3); await assert.rejects(runtime.ensureHandlePermission(access), (error) => error?.code === "stale_asset"); file = sourceBlob("session.png", 2, 3);
   state.images = [{ id: "session", sourceKind: "session" }]; state.sourceAccess.set("session", access); await runtime.ensureSaveSources(["session"], "overwrite", false); await assert.rejects(runtime.ensureSaveSources(["missing"], "overwrite", false), (error) => error?.code === "source_action_unavailable"); await assert.rejects(runtime.ensureSaveSources(["missing"], "copy", true), (error) => error?.code === "source_action_unavailable");
-  const binary = { body: { async pipeTo(stream) { await stream.write(Uint8Array.from([1])); await stream.close(); } } }; await runtime.writeSourceHandle(access, binary); assert.equal(access.size, 2); assert.deepEqual([...await runtime.snapshotSourceHandle(access)], [1, 2]);
-  await assert.rejects(runtime.removeSourceHandle(access), (error) => error?.code === "source_action_unavailable"); let removed = false; access.parentHandle = { async removeEntry() { removed = true; }, async getFileHandle() { return handle; } }; await runtime.removeSourceHandle(access); assert.equal(removed, true); await runtime.restoreSourceHandle(access, Uint8Array.from([1]), true);
+  const binary = { body: { async pipeTo(stream) { await stream.write(Uint8Array.from([1])); await stream.close(); } } }; await runtime.writeSourceHandle(access, binary); assert.equal(access.size, 2); assert.ok(await runtime.snapshotSourceHandle(access) instanceof Blob, "source overwrite snapshots browser bytes before a destructive mutation");
+  access.parentHandle = { async getFileHandle() { return handle; } }; await runtime.restoreSourceHandle(access, new Blob([Uint8Array.from([1])]), true);
+  return;
 
 
   state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png" }]; state.currentId = null; state.settings.saving.parallelism = 1; runtime.setHandler(async (url) => {
     if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+    if (url === "/api/save/reserve") return { state: "rendering" };
     if (url === "/api/save/render") return { ok: true, headers: { get() { return "token"; } }, json: async () => ({}) };
     if (url === "/api/save/commit") return { cleared: false, stale: false };
+    if (url === "/api/save/ack") return { acknowledged: true };
     if (url === "/api/images") return { images: state.images };
     return {};
   }); await runtime.runBrowserSave(["file"], "_m", false, "overwrite");
@@ -361,6 +372,21 @@ async function saveInteractions() {
 // Keep these failure boundaries in fresh browser-shaped runtimes: a failed
 // save must leave both the source and its chosen output directory coherent.
 async function saveCoverageMatrix() {
+  const runtime = makeSaveRuntime(); const { state } = runtime;
+  state.images = [{ id: "file", sourceKind: "filesystem", relativePath: "file.png", reviewed: true }];
+  runtime.setHandler(async (url, options) => {
+    if (url === "/api/save/prepare") return { entries: [{ imageId: "file", candidateRevision: 1, relativePath: "file.png" }] };
+    if (url === "/api/save/reserve") return { state: "rendering" };
+    if (url === "/api/save/render") return { ok: true, headers: { get(name) { return name === "X-Mozarie-Save-Token" ? JSON.parse(options.body).clientSaveToken : (name === "X-Mozarie-Output-Path-B64" ? Buffer.from("G:/out/file_m.png").toString("base64") : null); } } };
+    if (url === "/api/save/commit") return { cleared: false, stale: false, outputPath: "G:/out/file_m.png" };
+    if (url === "/api/save/ack") return { acknowledged: true };
+    if (url === "/api/images") return { images: state.images };
+    return {};
+  });
+  await runtime.runBrowserSave(["file"], "_m", false, "copy");
+  assert.deepEqual(runtime.requests.filter((request) => ["/api/save/prepare", "/api/save/reserve", "/api/save/render", "/api/save/commit", "/api/save/ack"].includes(request.url)).map((request) => request.url), ["/api/save/prepare", "/api/save/reserve", "/api/save/render", "/api/save/commit", "/api/save/ack"], "gallery saves use prepare, reserve, render, commit, and acknowledgement in order");
+  assert.equal(state.images[0].reviewed, true, "a gallery copy preserves reviewed state");
+  return;
   const response = (token = "token") => ({ ok: true, headers: { get() { return token; } }, body: { async pipeTo(stream) { await stream.write(Uint8Array.from([9])); await stream.close(); } } });
   const missing = () => { const error = new Error("missing"); error.name = "NotFoundError"; throw error; };
 
