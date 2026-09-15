@@ -637,8 +637,8 @@ class DetectionMixin:
             hand_mask = np.asarray(segment.get("_confirmed_hand", np.zeros_like(source_mask)) > 0, dtype=np.uint8)
             coordinates = np.argwhere(source_mask > 0)
             if not len(coordinates):
-                segment["refinement"] = "sam_fallback"
-                refined_segments.append(segment)
+                # No detector pixels means there is no APPLY evidence to
+                # preserve or refine. Do not publish an empty PNG candidate.
                 continue
             top, left = coordinates.min(axis=0)
             bottom, right = coordinates.max(axis=0) + 1
