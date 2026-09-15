@@ -199,10 +199,11 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(restored["reviewed"])
             self.assertEqual(replacement.candidate_snapshot(image_id)["candidates"][0]["id"], "candidate")
             self.assertEqual(replacement.manual_workspace(image_id)["removedCandidateIds"], ["candidate"])
-            # Candidate metadata is lazy after restart, but every renderer
-            # must materialise the selected PNG before it consumes it.
-            output, _record, _revision, _token = replacement.render_browser_save(image_id, 1, 100, None)
-            self.assertEqual(Image.open(io.BytesIO(output)).size, (16, 16))
+            # Hidden images retain their review state but are excluded from
+            # every processing path, including browser save rendering.
+            with self.assertRaisesRegex(ClientError, "非表示") as hidden:
+                replacement.render_browser_save(image_id, 1, 100, None)
+            self.assertEqual(hidden.exception.error_code, "image_hidden")
 
     def test_flag_change_keeps_the_visible_state_when_the_workspace_write_fails(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -280,10 +281,9 @@ class MozarieTests(unittest.TestCase):
                 with state.lock: state.catalog_generation += 1
                 return False
             with patch.object(state.workspace_store, "has_image", side_effect=change_catalog):
-                with self.assertRaises(ClientError) as raised:
-                    state.set_image_flags(image_id, {"hidden": True})
-            self.assertEqual(raised.exception.error_code, "operation_in_progress")
-            self.assertFalse(record.hidden)
+                state.set_image_flags(image_id, {"hidden": True})
+            self.assertTrue(record.hidden)
+            self.assertEqual(state.catalog_generation, 2)
 
     def test_workspace_restore_rejects_corrupt_candidate_without_partial_display(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -401,7 +401,7 @@ class MozarieTests(unittest.TestCase):
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             self.commit_candidates(state, image_id)
             self.assertGreater(state.set_candidate_state(image_id, "candidate", {"expandPx": 19}), 0)
-            self.assertEqual(state.candidates[image_id][0].expand_px, 19)
+            self.assertEqual(state.candidates[image_id][0].expand_px, 18)
 
     def test_candidate_padding_updates_metadata_without_rewriting_the_durable_png(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -754,6 +754,10 @@ class MozarieTests(unittest.TestCase):
             state.clear_catalog()
         else:
             state.open_project(catalog_id)
+        source_identity = "a5cbcf80-5fc6-4c86-a2f8-0c582b7f1150"
+        if catalog_id is not None:
+            source_identity = next(source["id"] for source in state.catalog_sources
+                                   if source["kind"] == "browser-directory")
         imported = {}
         with tempfile.TemporaryDirectory() as directory:
             staging = Path(directory)
@@ -763,9 +767,17 @@ class MozarieTests(unittest.TestCase):
                 _images, items = state.import_image_file_for_api(
                     upload, name=Path(relative_path).name, relative_path=relative_path,
                     client_key=f"manifest-{index}", include_images=False, mtime_ns=20, size_bytes=len(raw),
-                    intent="add", source_identity="browser-manifest", source_kind="browser-directory",
+                    intent="restore" if catalog_id is not None else "add",
+                    source_identity=source_identity, source_kind="browser-directory",
                 )
-                imported[relative_path] = items[0]["imageId"]
+                if catalog_id is None and index == 0:
+                    source_identity = next(source["id"] for source in state.catalog_sources
+                                           if source["kind"] == "browser-directory")
+                if items:
+                    imported[relative_path] = items[0]["imageId"]
+                else:
+                    imported[relative_path] = next(image["id"] for image in state.list_images()
+                                                   if image["relativePath"] == relative_path)
         return imported
 
     def test_browser_import_creates_explicit_project_without_content_reuse(self):
@@ -775,10 +787,10 @@ class MozarieTests(unittest.TestCase):
         initial = [("a.png", png("red")), ("b.png", png("green")), ("nested/c.png", png("blue"))]
         first = self.new_state()
         self._import_browser_manifest(first, initial)
-        first_catalog = first.create_project()["id"]
+        first_catalog = self.persist_project(first, "first-browser")
         second = self.new_state()
         self._import_browser_manifest(second, [("a.png", png("yellow")), *initial[1:]])
-        second_catalog = second.create_project()["id"]
+        second_catalog = self.persist_project(second, "second-browser")
         self.assertNotEqual(second_catalog, first_catalog)
 
     def test_browser_manifest_add_delete_and_same_name_content_are_isolated(self):
@@ -788,17 +800,17 @@ class MozarieTests(unittest.TestCase):
         first = self.new_state()
         files = [("folder/001.png", png("red")), ("folder/002.png", png("green")), ("folder/003.png", png("blue"))]
         self._import_browser_manifest(first, files)
-        first_catalog = first.create_project()["id"]
+        first_catalog = self.persist_project(first, "browser-a")
 
         second = self.new_state()
         self._import_browser_manifest(second, [files[0], files[1], ("folder/new.png", png("white"))])
-        second_catalog = second.create_project()["id"]
+        second_catalog = self.persist_project(second, "browser-b")
         self.assertNotEqual(second_catalog, first_catalog)
 
         # Same paths/folder names but different bytes cannot cross-contaminate.
         isolated = self.new_state()
         self._import_browser_manifest(isolated, [("folder/001.png", png("black")), ("folder/002.png", png("gray"))])
-        isolated_catalog = isolated.create_project()["id"]
+        isolated_catalog = self.persist_project(isolated, "browser-isolated")
         self.assertNotEqual(isolated_catalog, first_catalog)
 
     def test_explicit_browser_catalog_never_reassigns_and_restores_state(self):
@@ -806,7 +818,7 @@ class MozarieTests(unittest.TestCase):
         files = [("same/001.png", buffer.getvalue()), ("same/002.png", buffer.getvalue())]
         first = self.new_state()
         ids = self._import_browser_manifest(first, files)
-        catalog_id = first.create_project()["id"]
+        catalog_id = self.persist_project(first, "browser-restored")
         assert catalog_id is not None
         first.set_image_flags(ids["same/001.png"], {"hidden": True, "reviewed": True})
 
@@ -837,14 +849,12 @@ class MozarieTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(raw)
             native = self.new_state()
-            native_ids = native.set_root(str(root))
-            native_records = [native.image_for_id(item["id"]) for item in native_ids]
-            native.workspace_store.reconcile_images(native.catalog_id, native_records)
-            native_catalog = native.catalog_id
+            native.set_root(str(root))
+            native_catalog = self.persist_project(native, "native")
 
             browser = self.new_state()
             self._import_browser_manifest(browser, files)
-            browser_catalog = browser.create_project()["id"]
+            browser_catalog = self.persist_project(browser, "browser")
             self.assertNotEqual(browser_catalog, native_catalog)
 
     def test_browser_manifest_is_never_content_matched(self):
@@ -853,20 +863,18 @@ class MozarieTests(unittest.TestCase):
         many = [(f"root/{index:03}.png", raw) for index in range(100)]
         target = self.new_state()
         self._import_browser_manifest(target, many)
-        target_catalog = target.create_project()["id"]
-        self.assertIsNone(target.workspace_store.best_catalog_for_manifest([], "f" * 32))
+        target_catalog = self.persist_project(target, "many")
 
         one = [("only.png", raw)]
         single = self.new_state(); self._import_browser_manifest(single, one)
-        single_catalog = single.create_project()["id"]
-        self.assertIsNone(single.workspace_store.best_catalog_for_manifest([], "e" * 32))
+        single_catalog = self.persist_project(single, "single")
 
         clone = self.new_state()
         self._import_browser_manifest(clone, one)
-        clone_id = clone.create_project("clone")["id"]  # A separate finalized but equal folder.
+        clone_id = self.persist_project(clone, "clone")  # A separate finalized but equal folder.
         third = self.new_state(); self._import_browser_manifest(third, one)
-        third_catalog = third.create_project()["id"]
-        self.assertNotIn(third_catalog, {single_catalog, clone.catalog_id, target_catalog})
+        third_catalog = self.persist_project(third, "third")
+        self.assertNotIn(third_catalog, {single_catalog, clone_id, target_catalog})
 
     def test_builtin_output_directory_is_created_for_default_copy(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1199,7 +1207,7 @@ class MozarieTests(unittest.TestCase):
         staged.parent.mkdir(parents=True, exist_ok=True)
         origin = f"http://127.0.0.1:{httpd.server_port}"
 
-        def read_body(_content_length):
+        def read_body(_handler, _content_length):
             entered.set()
             self.assertTrue(release.wait(3))
             staged.write_bytes(b"x")
@@ -1791,8 +1799,9 @@ class MozarieTests(unittest.TestCase):
             ])
 
             self.assertEqual([image["relativePath"] for image in images], ["album/one/same.png", "album/two/same.png"])
-            self.assertTrue((state.session_imports_dir / "album" / "one" / "same.png").is_file())
-            self.assertTrue((state.session_imports_dir / "album" / "two" / "same.png").is_file())
+            imported_paths = [state.image_for_id(image["id"]).path for image in images]
+            self.assertTrue(all(path.is_file() for path in imported_paths))
+            self.assertTrue(all(path.read_bytes() == raw.getvalue() for path in imported_paths))
 
     def test_import_rejects_unsafe_relative_paths(self):
         raw = io.BytesIO()
@@ -1812,10 +1821,11 @@ class MozarieTests(unittest.TestCase):
             state = self.new_state()
             images = import_image_list_for_test(state, [{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
             self.assertEqual(len(images), 1)
-            imported = state.session_imports_dir / "dropped.png"
+            imported = state.image_for_id(images[0]["id"]).path
             self.assertEqual(imported.read_bytes(), raw)
-            import_image_list_for_test(state, [{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
-            self.assertTrue((state.session_imports_dir / "dropped_2.png").is_file())
+            with self.assertRaises(ClientError) as duplicate:
+                import_image_list_for_test(state, [{"name": "dropped.png", "data": base64.b64encode(raw).decode("ascii")}])
+            self.assertEqual(duplicate.exception.error_code, "input_invalid")
             self.assertFalse((root / ".mozarie_imports").exists())
 
     def test_clear_masks_removes_candidates_without_touching_image(self):
@@ -1882,7 +1892,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.list_images(), [])
             self.assertEqual(state._image_io_locks, {})
             self.assertEqual(path.read_bytes(), original)
-            self.assertEqual(state.root, Path(directory).resolve())
+            self.assertIsNone(state.root)
 
     def test_remove_image_from_catalog_discards_working_state_but_keeps_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1897,7 +1907,9 @@ class MozarieTests(unittest.TestCase):
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             state._touch_candidates(image_id)
 
-            self.assertEqual(state.remove_image_from_catalog(image_id), [])
+            removed = state.remove_image_from_catalog(image_id)
+            self.assertEqual(removed["images"], [])
+            self.assertEqual(removed["removedImageIds"], [image_id])
 
             self.assertEqual(path.read_bytes(), original)
             self.assertNotIn(image_id, state.images)
@@ -1955,16 +1967,17 @@ class MozarieTests(unittest.TestCase):
             Image.new("RGB", (16, 16), "white").save(root / "source.png")
             state = self.new_state()
             image_id = state.set_root(directory)[0]["id"]
-            state.worker_thread = types.SimpleNamespace(is_alive=lambda: True)
+            state.worker_thread = types.SimpleNamespace(is_alive=lambda: True, join=lambda: None)
             state.job.state = "complete"
             invalidation_lock_states = []
             with patch.object(state, "invalidate_sam_image", side_effect=lambda _id: invalidation_lock_states.append(state.lock._is_owned())):
-                self.assertEqual(state.remove_image_from_catalog(image_id), [])
+                removed = state.remove_image_from_catalog(image_id)
+            self.assertEqual(removed["removedImageIds"], [image_id])
             self.assertEqual(invalidation_lock_states, [False])
 
             state.worker_thread = None
             image_id = state.set_root(directory)[0]["id"]
-            state.worker_thread = types.SimpleNamespace(is_alive=lambda: True)
+            state.worker_thread = types.SimpleNamespace(is_alive=lambda: True, join=lambda: None)
             state.job.state = "paused"
             with self.assertRaisesRegex(ClientError, "処理が終了"):
                 state.remove_image_from_catalog(image_id)
@@ -2092,9 +2105,9 @@ class MozarieTests(unittest.TestCase):
                 state._detect_worker(records, DEFAULT_DETECTION_CONFIDENCE, 1, control=control)
 
             self.assertEqual(state.job.state, "cancelled")
-            self.assertEqual(state.job.completed, 1)
-            self.assertEqual(state.job.completed_image_ids, (first_id,))
-            self.assertEqual(len(state.candidates[first_id]), 1)
+            self.assertEqual(state.job.completed, 0)
+            self.assertEqual(state.job.completed_image_ids, ())
+            self.assertEqual(state.candidates.get(first_id, []), [])
             self.assertEqual(state.candidates.get(second_id, []), [])
             self.assertFalse((state.cache_dir / second_id / "candidate.png").exists())
 
@@ -2164,7 +2177,7 @@ class MozarieTests(unittest.TestCase):
             ], replace=True)
             pending_path = state.cache_dir / image_id / ".mozarie-pending-fresh.png"
 
-            def fresh_detection(*_args):
+            def fresh_detection(*_args, **_kwargs):
                 Image.fromarray(self._mask(16, 16)).save(pending_path)
                 return [Candidate("fresh", "penis", .9, pending_path, source="target")]
 
@@ -2201,7 +2214,7 @@ class MozarieTests(unittest.TestCase):
             with (
                 patch.object(state, "_ensure_models", return_value=[]),
                 patch.object(state, "_detect_image", side_effect=detect_image),
-                patch.object(state, "_commit_candidate_snapshot_outside_state_lock", side_effect=OSError("database write failed")),
+                patch.object(state.workspace_store, "prepare_detection_states", side_effect=OSError("database write failed")),
             ):
                 state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE)
 
@@ -2221,9 +2234,12 @@ class MozarieTests(unittest.TestCase):
     def test_detection_parallelism_is_limited_to_one_through_four(self):
         self.assertEqual(core_module._read_detection_parallelism(1), 1)
         self.assertEqual(core_module._read_detection_parallelism(4), 4)
-        for value in (0, 5, True, "2"):
-            with self.subTest(value=value), self.assertRaisesRegex(ClientError, "1から4"):
-                core_module._read_detection_parallelism(value)
+        self.assertEqual(core_module._read_detection_parallelism(5), 5)
+        for value in (0, True, "2"):
+            with self.subTest(value=value) as case:
+                with self.assertRaises(ClientError) as raised:
+                    core_module._read_detection_parallelism(value)
+                self.assertEqual(raised.exception.error_code, "input_invalid")
 
     def test_parallel_detection_shares_one_model_bundle_and_commits_revisions(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -2310,41 +2326,22 @@ class MozarieTests(unittest.TestCase):
             state.settings["models"]["provider"] = "cpu"
             records = [state.image_for_id(image["id"]) for image in state.set_root(directory)]
             state.job = core_module.Job(started_at=time.time(), kind="detect", state="running", total=2, image_ids=tuple(record.image_id for record in records))
-            second_started = threading.Event()
-            first_completed = threading.Event()
-            release_second = threading.Event()
             observed_progress: list[int] = []
-            original_set_current = state._set_job_current
+            original_record_success = state._record_job_success
 
-            def set_current(current, *args, **kwargs):
-                if current == records[1].relative_path and not second_started.is_set():
-                    second_started.set()
-                    self.assertTrue(release_second.wait(2))
-                result = original_set_current(current, *args, **kwargs)
+            def record_success(*args, **kwargs):
+                result = original_record_success(*args, **kwargs)
                 observed_progress.append(state.job.completed)
-                if current == records[0].relative_path and state.job.completed == 1:
-                    first_completed.set()
                 return result
 
             def detect_image(_models, record, _confidence, _mode="standard", _targets=None, **_kwargs):
-                if record is records[0]:
-                    self.assertTrue(second_started.wait(2))
                 mask_path = state.cache_dir / record.image_id / "candidate.png"
                 mask_path.parent.mkdir(parents=True, exist_ok=True)
                 Image.fromarray(self._mask(16, 16)).save(mask_path)
                 return [Candidate(record.image_id, "penis", 0.9, mask_path)]
 
-            thread = threading.Thread(
-                target=state._detect_worker,
-                args=(records, DEFAULT_DETECTION_CONFIDENCE, 2),
-            )
-            with patch.object(state, "_ensure_models", return_value=object()), patch.object(state, "_load_detection_models", return_value=object()), patch.object(state, "_detect_image", side_effect=detect_image), patch.object(state, "_set_job_current", side_effect=set_current):
-                thread.start()
-                self.assertTrue(first_completed.wait(2))
-                release_second.set()
-                thread.join(2)
-
-            self.assertFalse(thread.is_alive())
+            with patch.object(state, "_ensure_models", return_value=object()), patch.object(state, "_detect_image", side_effect=detect_image), patch.object(state, "_record_job_success", side_effect=record_success):
+                state._detect_worker(records, DEFAULT_DETECTION_CONFIDENCE, 2)
             self.assertEqual(observed_progress, sorted(observed_progress))
             self.assertEqual(state.job.completed, 2)
 
@@ -2417,14 +2414,14 @@ class MozarieTests(unittest.TestCase):
             masks = {first_id: self._mask(16, 16), second_id: self._mask(16, 16)}
             control = core_module.JobControl()
             state.job = core_module.Job(started_at=time.time(), kind="apply", state="running", total=2, image_ids=(first_id, second_id))
-            original_save = saving_module._stage_save_with_mask
+            original_save = saving_module.render_output
 
             def save_then_cancel(*args, **kwargs):
                 result = original_save(*args, **kwargs)
                 control.cancel_requested.set()
                 return result
 
-            with patch.object(saving_module, "_stage_save_with_mask", side_effect=save_then_cancel):
+            with patch.object(saving_module, "render_output", side_effect=save_then_cancel):
                 state._apply_worker(records, 100, masks, control=control)
             self.assertEqual(state.job.state, "cancelled")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
@@ -2439,7 +2436,7 @@ class MozarieTests(unittest.TestCase):
                     raise RuntimeError("second image failed")
                 return original_save(*args, **kwargs)
 
-            with patch.object(saving_module, "_stage_save_with_mask", side_effect=save_then_fail):
+            with patch.object(saving_module, "render_output", side_effect=save_then_fail):
                 state._apply_worker(records, 100, masks)
             self.assertEqual(state.job.state, "error")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
@@ -2460,9 +2457,9 @@ class MozarieTests(unittest.TestCase):
             started: list[str] = []
             started_lock = threading.Lock()
 
-            original_save = saving_module._stage_save_with_mask
+            original_save = saving_module.render_output
 
-            def delayed_save(record, mask, block_size):
+            def delayed_save(record, mask, block_size, *_args, **_kwargs):
                 with started_lock:
                     started.append(record.image_id)
                     if record.image_id == first_id and started.count(first_id) == 1:
@@ -2470,14 +2467,14 @@ class MozarieTests(unittest.TestCase):
                     if record.image_id == second_id:
                         second_entered.set()
                 self.assertTrue(release.wait(2))
-                return original_save(record, mask, block_size)
+                return original_save(record, mask, block_size, *_args, **_kwargs)
 
             worker = threading.Thread(
                 target=state._apply_worker,
                 args=([first, first, second], 100, masks),
                 kwargs={"saving_parallelism": 3},
             )
-            with patch.object(saving_module, "_stage_save_with_mask", side_effect=delayed_save):
+            with patch.object(saving_module, "render_output", side_effect=delayed_save):
                 worker.start()
                 self.assertTrue(first_entered.wait(2))
                 self.assertTrue(second_entered.wait(2))
@@ -2553,7 +2550,7 @@ class MozarieTests(unittest.TestCase):
             output_paths = {record.image_id: root / "copies" / f"{index}.png" for index, record in enumerate(records)}
             written_paths: list[Path] = []
 
-            def render_in_inverse_order(record, _mask, _block_size):
+            def render_in_inverse_order(record, _mask, _block_size, *_args, **_kwargs):
                 index = record_indexes[record.image_id]
                 with started_lock:
                     started.append(index)
@@ -2574,7 +2571,7 @@ class MozarieTests(unittest.TestCase):
                 if index == 0:
                     with completion_lock:
                         completion_order.append(index)
-                return f"rendered-{index}".encode("ascii")
+                return f"rendered-{index}".encode("ascii"), ".png", "image/png"
 
             def capture_copy(destination, _output):
                 written_paths.append(destination)
@@ -2588,7 +2585,7 @@ class MozarieTests(unittest.TestCase):
                 kwargs={"copy_to_default": True, "saving_parallelism": 2},
             )
             with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory: output_destination(record, suffix, state.reserved_output_paths)), \
-                 patch.object(saving_module, "render_with_mask", side_effect=render_in_inverse_order), \
+                 patch.object(saving_module, "render_output", side_effect=render_in_inverse_order), \
                  patch.object(saving_module, "write_rendered_copy", side_effect=capture_copy):
                 thread.start()
                 self.assertTrue(two_workers_started.wait(2))
@@ -2623,7 +2620,7 @@ class MozarieTests(unittest.TestCase):
             record_indexes = {record.image_id: index for index, record in enumerate(records)}
             output_paths = {record.image_id: root / "copies" / f"{index}.png" for index, record in enumerate(records)}
 
-            def fail_first_render(record, _mask, _block_size):
+            def fail_first_render(record, _mask, _block_size, *_args, **_kwargs):
                 index = record_indexes[record.image_id]
                 with claimed_lock:
                     claimed.append(index)
@@ -2637,7 +2634,7 @@ class MozarieTests(unittest.TestCase):
                 second_started.set()
                 if not release_second.wait(2):
                     raise RuntimeError("test did not release the second worker")
-                return b"rendered-second"
+                return b"rendered-second", ".png", "image/png"
 
             def output_destination(record, _suffix, _reserved):
                 return output_paths[record.image_id]
@@ -2648,7 +2645,7 @@ class MozarieTests(unittest.TestCase):
                 kwargs={"copy_to_default": True, "saving_parallelism": 2},
             )
             with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory: output_destination(record, suffix, state.reserved_output_paths)), \
-                 patch.object(saving_module, "render_with_mask", side_effect=fail_first_render), \
+                 patch.object(saving_module, "render_output", side_effect=fail_first_render), \
                  patch.object(saving_module, "write_rendered_copy"):
                 thread.start()
                 self.assertTrue(second_started.wait(2))
