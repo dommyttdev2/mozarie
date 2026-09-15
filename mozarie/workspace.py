@@ -22,6 +22,7 @@ from typing import Any, Callable, Iterator
 from PIL import Image, UnidentifiedImageError
 import numpy as np
 
+from .image_io import open_image
 from .masks import compose_masks, expand_mask
 
 
@@ -347,7 +348,7 @@ class WorkspaceStore:
         if not isinstance(raw, bytes) or not raw.startswith(b"\x89PNG\r\n\x1a\n"):
             raise ValueError("workspace mask is not a PNG")
         try:
-            with Image.open(io.BytesIO(raw)) as image:
+            with open_image(io.BytesIO(raw)) as image:
                 if image.format != "PNG":
                     raise ValueError("workspace mask is not a PNG")
                 image.load()
@@ -1773,7 +1774,7 @@ class WorkspaceStore:
         if before == after: return None
         source = before if before is not None else after
         assert source is not None
-        with Image.open(io.BytesIO(source)) as image: width, height = image.size
+        with open_image(io.BytesIO(source)) as image: width, height = image.size
         if roi is None:
             left, top, right, bottom = 0, 0, width, height
         else:
@@ -1782,7 +1783,7 @@ class WorkspaceStore:
                 raise ValueError("workspace manual dirty region is invalid")
         def pixels(raw: bytes | None) -> np.ndarray:
             if raw is None: return np.zeros((bottom - top, right - left), dtype=np.uint8)
-            with Image.open(io.BytesIO(raw)) as image:
+            with open_image(io.BytesIO(raw)) as image:
                 if image.size != (width, height):
                     raise ValueError("workspace manual mask dimensions are invalid")
                 return np.asarray(image.crop((left, top, right, bottom)).convert("L"), dtype=np.uint8) > 0
@@ -1815,14 +1816,14 @@ class WorkspaceStore:
             raise ValueError("workspace history is invalid")
         if raw is None: canvas = np.zeros((height, width), dtype=np.uint8)
         else:
-            with Image.open(io.BytesIO(raw)) as image:
+            with open_image(io.BytesIO(raw)) as image:
                 if image.size != (width, height):
                     raise ValueError("workspace history is invalid")
                 canvas = (np.asarray(image.convert("L"), dtype=np.uint8) > 0).astype(np.uint8) * 255
         delta = WorkspaceStore._unpack_blob(encoded)
         WorkspaceStore._require_png_mask(delta)
         assert delta is not None
-        with Image.open(io.BytesIO(delta)) as image: region = (np.asarray(image.convert("L"), dtype=np.uint8) > 0)
+        with open_image(io.BytesIO(delta)) as image: region = (np.asarray(image.convert("L"), dtype=np.uint8) > 0)
         if region.shape != (box_height, box_width):
             raise ValueError("workspace history is invalid")
         canvas[top:top + box_height, left:left + box_width] ^= region.astype(np.uint8) * 255

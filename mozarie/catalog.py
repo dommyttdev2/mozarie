@@ -27,7 +27,7 @@ from .core import (
     safe_import_relative_path, torch_module,
 )
 from .domain import Candidate, CandidateRole
-from .image_io import _valid_color, decode_draft_masks, draft_manual_exclusion_forced, inspect_import_image, oriented_image_size, unique_session_import_destination
+from .image_io import _valid_color, decode_draft_masks, draft_manual_exclusion_forced, inspect_import_image, open_image, oriented_image_size, unique_session_import_destination
 from .masks import compose_masks, expand_mask, union_mask
 from .runtime import patch_directml_sam_prompt_encoder, runtime_backend, torch_device
 from .workspace import ProjectNameAlreadyExistsError, ProjectSourceNoMatchError, ProjectSourcePathConflictError, ProjectSourceUnavailableError, WorkspaceStore, native_source_identity
@@ -849,7 +849,7 @@ class CatalogMixin:
         if sample is None: sample = next((manual.get(key) for key in ("add", "exclusion", "erase") if manual.get(key)), None)
         if sample:
             try:
-                with Image.open(io.BytesIO(base64.b64decode(str(sample), validate=True))) as mask_image:
+                with open_image(io.BytesIO(base64.b64decode(str(sample), validate=True))) as mask_image:
                     width, height = mask_image.size
             except (OSError, ValueError, binascii.Error) as exc:
                 raise ClientError("保存済みマスクが正しくありません。", "workspace_write_failed") from exc
@@ -873,7 +873,7 @@ class CatalogMixin:
                 continue
             try: raw = base64.b64decode(str(candidate["mask"]), validate=True)
             except (KeyError, ValueError, binascii.Error) as exc: raise ClientError("保存済みマスクが正しくありません。", "workspace_write_failed") from exc
-            with Image.open(io.BytesIO(raw)) as image: mask = expand_mask(np.asarray(image.convert("L"), dtype=np.uint8), int(candidate.get("expandPx", 0)))
+            with open_image(io.BytesIO(raw)) as image: mask = expand_mask(np.asarray(image.convert("L"), dtype=np.uint8), int(candidate.get("expandPx", 0)))
             if mask.shape != shape:
                 raise ValueError("apply mask dimensions do not match the source image" if candidate.get("role") == CandidateRole.APPLY.value else "exclude mask dimensions do not match the source image")
             if candidate.get("role") == CandidateRole.APPLY.value:
@@ -918,7 +918,7 @@ class CatalogMixin:
         if raw is None:
             return None
         try:
-            with Image.open(io.BytesIO(raw)) as image:
+            with open_image(io.BytesIO(raw)) as image:
                 if image.format != "PNG" or image.size != (width, height):
                     raise ValueError("workspace mask is invalid")
                 return np.asarray(image.convert("L"), dtype=np.uint8)
@@ -934,7 +934,7 @@ class CatalogMixin:
             sample = next((manual.get(key) for key in ("add", "exclusion", "erase") if manual.get(key)), None)
         if sample is not None:
             try:
-                with Image.open(io.BytesIO(sample)) as mask_image:
+                with open_image(io.BytesIO(sample)) as mask_image:
                     width, height = mask_image.size
             except OSError as exc:
                 raise ClientError("保存済みマスクが正しくありません。", "workspace_write_failed") from exc
@@ -2246,7 +2246,7 @@ class CatalogMixin:
                             candidates = [item for item in self.candidates.get(image_id, []) if item.candidate_id != candidate_id]
                             self._commit_candidate_snapshot(image_id, candidates, replace=True)
                     raise StaleMaskError("検出候補は既に更新されています。") from exc
-        with Image.open(io.BytesIO(raw_mask)) as mask_image:
+        with open_image(io.BytesIO(raw_mask)) as mask_image:
             alpha = mask_image.convert("L").point(lambda value: 255 if value else 0)
             alpha = Image.fromarray(expand_mask(np.asarray(alpha, dtype=np.uint8), candidate.expand_px))
             rgba = Image.new("RGBA", alpha.size, (255, 255, 255, 0))

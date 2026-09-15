@@ -1039,6 +1039,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                                     raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
                             os.replace(temporary_path, thumbnail_path)
                             temporary_path = None
+                        except (MemoryError, OSError) as exc:
+                            raise ClientError("サムネイルを作成できませんでした。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
                         finally:
                             if temporary_path is not None:
                                 temporary_path.unlink(missing_ok=True)

@@ -18,7 +18,7 @@ from .core import (
 )
 from .config import SettingsError, validate_output_directory_ready
 from .image_io import (
-    _assert_source_stat_matches, _stage_record_replacement, _stage_save_with_mask, calculate_block_size, read_stable_source_bytes, render_with_mask, render_output, output_format_matches_source,
+    _assert_source_stat_matches, _stage_record_replacement, _stage_save_with_mask, calculate_block_size, open_image, read_stable_source_bytes, render_with_mask, render_output, output_format_matches_source,
     decode_draft_masks, draft_manual_exclusion_forced, save_with_mask,
     unique_session_import_destination, write_rendered_copy,
 )
@@ -264,7 +264,7 @@ class SavingMixin:
                 for candidate in candidates:
                     try:
                         self.materialize_candidate_mask(candidate, image_id)
-                        with Image.open(candidate.mask_path) as mask_image:
+                        with open_image(candidate.mask_path) as mask_image:
                             candidate_mask = expand_mask(np.asarray(mask_image.convert("L"), dtype=np.uint8), candidate.expand_px)
                     except FileNotFoundError as exc:
                         with self.lock:
