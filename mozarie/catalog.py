@@ -1736,8 +1736,8 @@ class CatalogMixin:
             self._discard_browser_save_token_unchecked(token)
         LOGGER.info("ブラウザー保存を置換: 未確定=%d件", len(pending))
 
-    def _prune_browser_save_receipts_for_image_unchecked(self, image_id: str) -> None:
-        """Discard terminal receipts superseded by this image's next commit."""
+    def _clear_browser_save_receipts_for_image_unchecked(self, image_id: str) -> None:
+        """Discard every prior terminal receipt when this image commits again."""
         for token, receipt in tuple(self.browser_save_receipts.items()):
             if receipt.image_id == image_id:
                 self.browser_save_receipts.pop(token, None)
