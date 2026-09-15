@@ -1081,14 +1081,14 @@ async function runHandleOverwriteChangedDuringRenderCase() {
 
 async function runRepeatedHandleOverwriteCase() {
   const image = { id: "image-1", sourceKind: "session", relativePath: "source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
-  let sourceFile = { name: "source.png", size: 12, lastModified: 34 };
+  let sourceFile = { name: "source.png", size: 12, lastModified: 34, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } };
   let writes = 0;
   const sourceHandle = {
     async getFile() { return sourceFile; },
     async createWritable() {
       return {
         async write() {},
-        async close() { writes += 1; sourceFile = { name: "source.png", size: 3, lastModified: 34 + writes }; },
+        async close() { writes += 1; sourceFile = { name: "source.png", size: 3, lastModified: 34 + writes, async arrayBuffer() { return Uint8Array.from([4, 5, 6]).buffer; } }; },
         async abort() {},
       };
     },
@@ -1099,11 +1099,11 @@ async function runRepeatedHandleOverwriteCase() {
 
   await runtime.ensureSaveSources([image.id], "overwrite", false);
   await runtime.runBrowserSave([image.id], "_censored", false, "overwrite");
-  assert.deepEqual({ name: access.name, size: access.size, lastModified: access.lastModified }, sourceFile);
+  assert.deepEqual({ name: access.name, size: access.size, lastModified: access.lastModified }, { name: sourceFile.name, size: sourceFile.size, lastModified: sourceFile.lastModified });
   await runtime.ensureSaveSources([image.id], "overwrite", false);
   await runtime.runBrowserSave([image.id], "_censored", false, "overwrite");
   assert.equal(writes, 2);
-  assert.deepEqual({ name: access.name, size: access.size, lastModified: access.lastModified }, sourceFile);
+  assert.deepEqual({ name: access.name, size: access.size, lastModified: access.lastModified }, { name: sourceFile.name, size: sourceFile.size, lastModified: sourceFile.lastModified });
 }
 
 async function runHandleDeleteAfterCopyCase() {
@@ -1121,10 +1121,10 @@ async function runQueuedHandleChangeCases() {
   const first = { id: "image-1", sourceKind: "session", relativePath: "first.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
   const second = { id: "image-2", sourceKind: "session", relativePath: "second.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
   for (const mode of ["overwrite", "copy"]) {
-    let secondFile = { name: "second.png", size: 12, lastModified: 34 };
+    let secondFile = { name: "second.png", size: 12, lastModified: 34, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } };
     let secondAction = false;
     const firstHandle = {
-      async getFile() { return { name: "first.png", size: 12, lastModified: 34 }; },
+      async getFile() { return { name: "first.png", size: 12, lastModified: 34, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } }; },
       async createWritable() { return { async write() {}, async close() {}, async abort() {} }; },
       async remove() {},
     };
