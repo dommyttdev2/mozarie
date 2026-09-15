@@ -12,7 +12,7 @@ from unittest.mock import Mock, patch
 import numpy as np
 from PIL import Image
 
-from mozarie.core import BrowserSaveReceipt, BrowserSaveToken, ClientError, ImageRecord, Job, JobControl, SAVE_TOKEN_TTL_SECONDS
+from mozarie.core import BrowserSaveReceipt, BrowserSaveToken, ClientError, ImageRecord, Job, JobControl
 from mozarie.domain import Candidate, CandidateRole
 import mozarie.jobs as jobs_module
 from mozarie.jobs import JobsMixin
@@ -43,6 +43,8 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state.session_imports_dir = None
         state.image_io_lock = lambda _image_id: threading.RLock()
         state._has_active_worker = lambda: False
+        state._assert_request_catalog_expectation = lambda *_args, **_kwargs: None
+        state._assert_catalog_mutable = lambda *_args, **_kwargs: None
         state._job_is_current = lambda generation, catalog: generation in (None, 1) and catalog in (None, 1)
         state._candidate_revision = lambda _image_id: 1
         state._allowed_root_for_record = lambda record, root, session: root
@@ -68,6 +70,8 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state.workspace_store = Mock()
         state.image_io_lock = lambda _image_id: threading.RLock()
         state._has_active_worker = lambda: False
+        state._assert_catalog_mutable = lambda *_args, **_kwargs: None
+        state._assert_image_editable = lambda *_args, **_kwargs: None
         state._candidate_revision = lambda image_id: state.candidate_revisions.get(image_id, 1)
         state.image_snapshot = lambda image_id: __import__("dataclasses").replace(state.images[image_id])
         state._records_for_ids_with_catalog = lambda ids: ([state.images[item] for item in ids], state.catalog_generation)
@@ -82,7 +86,6 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state._take_browser_save_cleanup_unchecked = lambda: []
         state._unlink_browser_save_cleanup = lambda _items: None
         state._discard_browser_save_tokens_for_image_unchecked = lambda _image: None
-        state.cleanup_expired_browser_save_tokens = lambda: None
         state._encode_workspace_mask = lambda value: value
         return state
 
@@ -444,10 +447,6 @@ class JobsSavingCoverageTests(unittest.TestCase):
             state._has_active_worker = lambda: True
             with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "active", "keep")
             state._has_active_worker = lambda: False
-            state.browser_save_tokens["expired"] = BrowserSaveToken(
-                record.image_id, 1, (1, 1), 1, time.monotonic() - SAVE_TOKEN_TTL_SECONDS - 1, None
-            )
-            with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "expired", "keep")
             state.browser_save_tokens["changed"] = BrowserSaveToken(record.image_id, 1, (1, 1), 2, time.monotonic(), None)
             with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "changed", "keep")
             # The second locked lookup must reject a receipt that arrived after
