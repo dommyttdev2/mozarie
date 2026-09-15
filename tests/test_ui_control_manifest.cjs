@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { controls, dynamicControls, scenarioContracts } = require("./ui-control-manifest.cjs");
+const { controls, dynamicControls, dynamicSurfaceContracts, scenarioContracts } = require("./ui-control-manifest.cjs");
 
 const html = fs.readFileSync(path.join(__dirname, "..", "static", "index.html"), "utf8");
 const resultKinds = new Set(["api", "canvas", "dialog", "disabled", "dom", "download", "history", "navigation", "value"]);
@@ -31,6 +31,13 @@ for (const control of dynamicControls) {
   assert.match(control.assertionId, new RegExp(`^${control.scenario}:`), `${control.selector} needs a stable browser-ledger assertion id`);
   assert.equal(control.predicateId, control.assertionId, `${control.selector} must bind its manifest assertion to one predicate registry id`);
   assert.ok(control.expected, "dynamic controls need an expected result");
+}
+for (const surface of dynamicSurfaceContracts) {
+  assert.ok(dynamicControls.some((control) => control.selector === surface.selector), `${surface.selector} needs an interaction contract`);
+  const source = fs.readFileSync(path.join(__dirname, "..", surface.source), "utf8");
+  for (const marker of surface.markers) {
+    assert.ok(source.includes(marker), `${surface.selector} is missing its product surface marker: ${marker}`);
+  }
 }
 for (const [scenario, contract] of Object.entries(scenarioContracts)) {
   assert.ok(scenarios.has(scenario), `unknown scenario contract ${scenario}`);

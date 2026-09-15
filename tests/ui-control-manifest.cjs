@@ -124,13 +124,39 @@ const dynamicControls = [
     ["[data-candidate-effective-toggle]", "click", "canvas", "candidate", "editor", "candidate:data-candidate-effective-toggle", "changes effective candidate visibility"],
     ["[data-overview-filter]", "change", "navigation", "overview", "overview", "overview:data-overview-filter", "filters the overview fixture"],
     ["[data-selection-action]", "click", "api", "overview", "overview", "overview:data-selection-action", "applies an isolated selection action"],
+    ["[data-project-sort]", "click", "navigation", "workspace", "workspace", "workspace:data-project-sort", "sorts the project table"],
+    ["[data-project-action]", "click", "api", "workspace", "workspace", "workspace:data-project-action", "opens, exports, or deletes the selected project"],
     [".gallery-item", "click", "navigation", "gallery", "workspace", "gallery:gallery-item", "selects the isolated gallery image"],
     [".overview-item", "click", "navigation", "overview", "overview", "overview:overview-item", "selects the isolated overview image"],
     ["[data-model-download]", "click", "dialog", "settings", "settings", "settings:data-model-download", "opens the model download dialog"],
     ["[data-model-help]", "click", "dialog", "settings", "settings", "settings:data-model-help", "opens model help"],
     ["[data-model-picker]", "click", "dialog", "settings", "settings", "settings:data-model-picker", "uses the picker fixture"],
     ["input[name=settingsSamVariant]", "change", "value", "settings", "settings", "settings:settingsSamVariant", "selects the SAM variant"],
+    ["[data-shortcut-action]", "keyboard", "value", "settings", "settings", "settings:data-shortcut-action", "updates one shortcut binding"],
+    ["[data-shortcut-enabled]", "change", "value", "settings", "settings", "settings:data-shortcut-enabled", "enables one shortcut action"],
+    [".candidate-row .candidate-toggle", "click", "dom", "candidate", "editor", "candidate:candidate-toggle", "toggles one candidate row"],
+    [".candidate-row .candidate-display-toggle", "click", "canvas", "candidate", "editor", "candidate:candidate-display-toggle", "shows one candidate row range"],
+    [".candidate-row .candidate-effective-toggle", "click", "canvas", "candidate", "editor", "candidate:candidate-effective-toggle", "shows one candidate row effective range"],
+    [".candidate-row .candidate-padding-button", "click", "dialog", "candidate", "editor", "candidate:candidate-padding-button", "opens one candidate row padding control"],
+    [".candidate-row .candidate-forced", "click", "dom", "candidate", "editor", "candidate:candidate-forced", "toggles one exclusion candidate force state"],
+    [".candidate-row .candidate-delete", "click", "api", "candidate", "editor", "candidate:candidate-delete", "removes one candidate row"],
   ].map(([selector, action, resultKind, scenario, fixture, assertionId, expected]) => ({ selector, action, resultKind, scenario, fixture, assertionId, predicateId: assertionId, expected })),
+];
+
+// Dynamic controls cannot be discovered from the static id sweep.  These
+// markers tie each manifest contract to the DOM template or generator that
+// creates it, so a removed operation fails this compact contract check.
+const dynamicSurfaceContracts = [
+  { selector: "[data-project-sort]", source: "static/index.html", markers: ['data-project-sort="name"', 'data-project-sort="created"', 'data-project-sort="updated"'] },
+  { selector: "[data-project-action]", source: "static/js/app.js", markers: ["button.dataset.projectAction = action", 'projectActionButton(project, "open"', 'projectActionButton(project, "mosaic"', 'projectActionButton(project, "exclude"', 'projectActionButton(project, "delete"'] },
+  { selector: "[data-shortcut-action]", source: "static/js/settings.js", markers: ["input.dataset.shortcutAction = action", "input.addEventListener(\"keydown\""] },
+  { selector: "[data-shortcut-enabled]", source: "static/js/settings.js", markers: ["enabled.dataset.shortcutEnabled = action"] },
+  { selector: ".candidate-row .candidate-toggle", source: "static/js/editor-masks.js", markers: ['button.className = "candidate-toggle"', "actionRow.append(enabled"] },
+  { selector: ".candidate-row .candidate-display-toggle", source: "static/js/editor-masks.js", markers: ['button.className = "candidate-display-toggle"'] },
+  { selector: ".candidate-row .candidate-effective-toggle", source: "static/js/editor-masks.js", markers: ['button.className = "candidate-effective-toggle"'] },
+  { selector: ".candidate-row .candidate-padding-button", source: "static/js/editor-masks.js", markers: ['button.className = "candidate-padding-button"'] },
+  { selector: ".candidate-row .candidate-forced", source: "static/js/editor-masks.js", markers: ['button.className = "candidate-forced"'] },
+  { selector: ".candidate-row .candidate-delete", source: "static/js/editor-masks.js", markers: ['remove.className = "candidate-delete"'] },
 ];
 
 const scenarioContracts = Object.fromEntries([...new Set([...controls, ...dynamicControls].map((control) => control.scenario))].map((scenario) => {
@@ -144,5 +170,6 @@ const scenarioContracts = Object.fromEntries([...new Set([...controls, ...dynami
 module.exports = {
   controls,
   dynamicControls,
+  dynamicSurfaceContracts,
   scenarioContracts,
 };
