@@ -1199,37 +1199,36 @@ class MosaicHandler(BaseHTTPRequestHandler):
             # A visible thumbnail is single-flight by asset.  Unrelated visible
             # requests are not held behind a fixed process-wide worker count.
             if not thumbnail_path.is_file():
-                if not thumbnail_path.is_file():
+                with STATE.lock:
+                    current = STATE.images.get(image_id)
+                    if current is None or STATE.asset_version(current) != asset_version:
+                        raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
+                temporary_path: Path | None = None
+                try:
+                    with open_image_without_png_text(record.path) as image:
+                        image = ImageOps.exif_transpose(image)
+                        if record.flip_horizontal != record.source_flip_horizontal:
+                            image = ImageOps.mirror(image)
+                        if record.flip_vertical != record.source_flip_vertical:
+                            image = ImageOps.flip(image)
+                        image.thumbnail((280, 280), Image.Resampling.LANCZOS)
+                        output = io.BytesIO()
+                        image.convert("RGB").save(output, format="JPEG", quality=82)
+                    with tempfile.NamedTemporaryFile(dir=thumbnail_dir, suffix=".thumbnail.tmp", delete=False) as handle:
+                        temporary_path = Path(handle.name)
+                        handle.write(output.getvalue())
+                        handle.flush()
                     with STATE.lock:
                         current = STATE.images.get(image_id)
                         if current is None or STATE.asset_version(current) != asset_version:
                             raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
-                    temporary_path: Path | None = None
-                    try:
-                        with open_image_without_png_text(record.path) as image:
-                            image = ImageOps.exif_transpose(image)
-                            if record.flip_horizontal != record.source_flip_horizontal:
-                                image = ImageOps.mirror(image)
-                            if record.flip_vertical != record.source_flip_vertical:
-                                image = ImageOps.flip(image)
-                            image.thumbnail((280, 280), Image.Resampling.LANCZOS)
-                            output = io.BytesIO()
-                            image.convert("RGB").save(output, format="JPEG", quality=82)
-                        with tempfile.NamedTemporaryFile(dir=thumbnail_dir, suffix=".thumbnail.tmp", delete=False) as handle:
-                            temporary_path = Path(handle.name)
-                            handle.write(output.getvalue())
-                            handle.flush()
-                        with STATE.lock:
-                            current = STATE.images.get(image_id)
-                            if current is None or STATE.asset_version(current) != asset_version:
-                                raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
-                        os.replace(temporary_path, thumbnail_path)
-                        temporary_path = None
-                    except (MemoryError, OSError) as exc:
-                        raise ClientError("サムネイルを作成できませんでした。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
-                    finally:
-                        if temporary_path is not None:
-                            temporary_path.unlink(missing_ok=True)
+                    os.replace(temporary_path, thumbnail_path)
+                    temporary_path = None
+                except (MemoryError, OSError) as exc:
+                    raise ClientError("サムネイルを作成できませんでした。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
+                finally:
+                    if temporary_path is not None:
+                        temporary_path.unlink(missing_ok=True)
             try:
                 with thumbnail_path.open("rb") as handle:
                     self._stream_file(handle, None, "image/jpeg", cache_control)
