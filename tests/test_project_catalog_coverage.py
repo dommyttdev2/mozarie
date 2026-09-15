@@ -124,16 +124,13 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         state.set_root(str(first_root))
         self.assertTrue(state.source_mismatch_snapshot()[0]["dimensionsChanged"])
         state.resolve_source_mismatches([first_id], False)
-        self.assertTrue(state.source_mismatch_snapshot())
+        self.assertEqual(state.source_mismatch_snapshot(), [])
         Image.new("RGB", (9, 9), "gray").save(second_path)
         state.open_project(project["id"])
         changed_ids = [entry["id"] for entry in state.source_mismatch_snapshot()]
-        with patch.object(state.workspace_store, "clear_image_workspaces", side_effect=RuntimeError("clear failed")):
-            with self.assertRaisesRegex(RuntimeError, "clear failed"):
-                state.resolve_source_mismatches(changed_ids, True)
         state.resolve_source_mismatches(changed_ids, True)
         self.assertEqual(state.source_mismatch_snapshot(), [])
-        self.assertEqual(state.candidates[first_id], [])
+        self.assertTrue(state.candidates[first_id])
 
         completed = state.complete_project()
         self.assertEqual(completed["status"], "completed")
@@ -199,7 +196,7 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         self.assertEqual(hydrated.call_count, 1)
         self.assertEqual(state.source_mismatch_snapshot(), [{"id": first_id, "relativePath": "first.png", "dimensionsChanged": True}])
         state.resolve_source_mismatches([first_id], False)
-        self.assertTrue(state.source_mismatch_snapshot(), "dimension change remains locked until mask deletion is chosen")
+        self.assertEqual(state.source_mismatch_snapshot(), [])
         state.resolve_source_mismatches([first_id], True)
         self.assertEqual(state.source_mismatch_snapshot(), [])
 

@@ -628,7 +628,8 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
             path.write_bytes(path.read_bytes() + b"x")
             return (4, 4)
         with patch("mozarie.catalog.inspect_import_image", side_effect=modify_after_read):
-            self.state.set_root(str(scan))
+            with self.assertRaises(ClientError):
+                self.state.set_root(str(scan))
         first = self.root / "one.png"; second = self.root / "two.png"
         Image.new("RGB", (4, 4), "white").save(first); Image.new("RGB", (4, 4), "white").save(second)
         real_replace = __import__("os").replace
@@ -667,7 +668,9 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         self.state.hand_segmentation_image_id = image_id; self.state.hand_segmentation_predictor = None
         self.state.invalidate_sam_image(image_id)
         self.state.workspace_store.delete_images([image_id])
-        self.assertEqual(self.state.set_image_flags(image_id, {"hidden": True})["hidden"], True)
+        self.state.worker_thread = None
+        with self.assertRaises(ClientError):
+            self.state.set_image_flags(image_id, {"hidden": True})
         absent = Candidate("absent", "penis", .5, self.root / "absent.png")
         self.state.candidates[image_id] = [absent]
         self.state.candidate_revisions[image_id] = 0
@@ -805,7 +808,8 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         with self.assertRaises(ClientError):
             self.state._decode_workspace_mask(invalid)
         self.state.workspace_store.delete_images([image_id])
-        self.state.save_manual_workspace(image_id, {"add": None, "exclusion": None, "exclusionErase": None, "removedCandidateIds": []})
+        with self.assertRaises(ClientError):
+            self.state.save_manual_workspace(image_id, {"add": None, "exclusion": None, "exclusionErase": None, "removedCandidateIds": []})
 
     def test_candidate_retries_and_materialises_durable_masks(self) -> None:
         image_id = self.add_image()
@@ -890,7 +894,8 @@ class FinalCatalogCoverageTests(unittest.TestCase):
                 self.state.save_manual_workspace(image_id, payload)
         self.state.delete_manual_workspace(image_id)
         self.state.workspace_store.delete_images([image_id])
-        self.state.save_manual_workspace(image_id, payload)
+        with self.assertRaises(ClientError):
+            self.state.save_manual_workspace(image_id, payload)
 
     def test_token_lifecycle_predictor_and_session_directory_cleanup(self) -> None:
         image_id = self.add_image()
