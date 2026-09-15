@@ -125,24 +125,39 @@ class SavingMixin:
         rendered_dir = self._browser_response_directory()
         staged_path: Path | None = None
         try:
-            with record.path.open("rb") as source:
-                before = source.stat()
-                if (before.st_mtime_ns, before.st_size) != fingerprint:
-                    raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
-                try:
-                    with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=suffix, delete=False) as destination:
-                        staged_path = Path(destination.name)
-                        while chunk := source.read(IO_CHUNK_BYTES):
-                            destination.write(chunk)
-                        destination.flush()
-                except OSError as exc:
-                    raise ClientError(
-                        "保存用の一時ファイルへ書き込めませんでした。空き容量と書込権限を確認してください。",
-                        "save_write_failed",
-                    ) from exc
-                after = source.stat()
-                if (after.st_mtime_ns, after.st_size) != fingerprint:
-                    raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+            try:
+                with record.path.open("rb") as source:
+                    before = source.stat()
+                    if (before.st_mtime_ns, before.st_size) != fingerprint:
+                        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+                    try:
+                        with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=suffix, delete=False) as destination:
+                            staged_path = Path(destination.name)
+                            while True:
+                                try:
+                                    chunk = source.read(IO_CHUNK_BYTES)
+                                except OSError as exc:
+                                    raise ClientError(
+                                        "元画像を読み込めません。画像を再読み込みしてください。",
+                                        "stale_asset",
+                                    ) from exc
+                                if not chunk:
+                                    break
+                                destination.write(chunk)
+                            destination.flush()
+                    except OSError as exc:
+                        raise ClientError(
+                            "保存用の一時ファイルへ書き込めませんでした。空き容量と書込権限を確認してください。",
+                            "save_write_failed",
+                        ) from exc
+                    after = source.stat()
+                    if (after.st_mtime_ns, after.st_size) != fingerprint:
+                        raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
+            except OSError as exc:
+                raise ClientError(
+                    "元画像を読み込めません。画像を再読み込みしてください。",
+                    "stale_asset",
+                ) from exc
             result = staged_path
             staged_path = None
             return result
