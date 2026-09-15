@@ -213,6 +213,8 @@ class CatalogMixin:
                          prehydrated: dict[str, tuple[int, list[Candidate]]] | None = None,
                          publish_catalog_id: str | None = None,
                          publish_workspace_id: str | None = None,
+                         publish_active_workspace_id: str | None = None,
+                         discard_workspace_id: str | None = None,
                          publish_read_only: bool = False,
                          publish_source_mismatches: dict[str, bool] | None = None,
                          publish_sources: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
@@ -251,6 +253,10 @@ class CatalogMixin:
                     self.catalog_id = None
                     self.workspace_id = publish_workspace_id
                     self.project_read_only = False
+                if publish_active_workspace_id is not None:
+                    self.workspace_store.publish_active_projectless_catalog(
+                        publish_active_workspace_id, discard_workspace_id,
+                    )
                 if publish_source_mismatches is not None:
                     self.source_mismatches = dict(publish_source_mismatches)
                 self._invalidate_sam_cache()
@@ -538,6 +544,8 @@ class CatalogMixin:
         try:
             images = self._replace_catalog(root, records, detach_project=not inherit_current_catalog, prehydrated=prehydrated,
                                            publish_workspace_id=catalog_id if previous_catalog_id is None else None,
+                                           publish_active_workspace_id=created_projectless_id,
+                                           discard_workspace_id=previous_workspace_id if previous_catalog_id is None else None,
                                            publish_source_mismatches=publish_mismatches if catalog_id is not None else None,
                                            publish_sources=publish_sources)
         except Exception:
@@ -546,13 +554,6 @@ class CatalogMixin:
             raise
         with self.lock:
             self.project_read_only = completed
-        # Once the new unnamed workspace is visible, the old one is no longer
-        # reachable. Delete it last so a publication failure never loses work.
-        if created_projectless_id is not None:
-            self.workspace_store.publish_active_projectless_catalog(
-                created_projectless_id,
-                previous_workspace_id if previous_catalog_id is None else None,
-            )
         return images
 
     def relink_project_native_source(self, project_id: str, source_id: str, raw_path: str) -> dict[str, Any]:
