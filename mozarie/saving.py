@@ -81,13 +81,7 @@ class SavingMixin:
         with self.output_destination_lock:
             self.reserved_output_paths.discard(destination)
 
-    def _stage_browser_response_source(
-        self,
-        record: ImageRecord,
-        fingerprint: tuple[int, int],
-        suffix: str,
-    ) -> Path:
-        """Copy one unchanged source to a response file without a bytes buffer."""
+    def _browser_response_directory(self) -> Path:
         rendered_dir = self.cache_dir / "browser-save"
         try:
             rendered_dir.mkdir(parents=True, exist_ok=True)
@@ -96,6 +90,39 @@ class SavingMixin:
                 "保存用の一時ファイルを作成できませんでした。空き容量と書込権限を確認してください。",
                 "save_write_failed",
             ) from exc
+        return rendered_dir
+
+    def _stage_browser_response_output(self, output: bytes, suffix: str) -> Path:
+        """Stage rendered browser output and remove a partial file on failure."""
+        staged_path: Path | None = None
+        try:
+            try:
+                with tempfile.NamedTemporaryFile(
+                    dir=self._browser_response_directory(), suffix=suffix, delete=False,
+                ) as destination:
+                    staged_path = Path(destination.name)
+                    destination.write(output)
+                    destination.flush()
+            except OSError as exc:
+                raise ClientError(
+                    "保存用の一時ファイルへ書き込めませんでした。空き容量と書込権限を確認してください。",
+                    "save_write_failed",
+                ) from exc
+            result = staged_path
+            staged_path = None
+            return result
+        finally:
+            if staged_path is not None:
+                staged_path.unlink(missing_ok=True)
+
+    def _stage_browser_response_source(
+        self,
+        record: ImageRecord,
+        fingerprint: tuple[int, int],
+        suffix: str,
+    ) -> Path:
+        """Copy one unchanged source to a response file without a bytes buffer."""
+        rendered_dir = self._browser_response_directory()
         staged_path: Path | None = None
         try:
             with record.path.open("rb") as source:
@@ -276,13 +303,8 @@ class SavingMixin:
                     # second response-sized browser buffer.  Overwrites keep
                     # their staged file until commit; copy saves discard it as
                     # soon as the response finishes streaming.
-                    rendered_dir = self.cache_dir / "browser-save"
-                    rendered_dir.mkdir(parents=True, exist_ok=True)
-                    with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=output_suffix, delete=False) as handle:
-                        rendered_path = Path(handle.name)
-                        assert output is not None
-                        handle.write(output)
-                        handle.flush()
+                    assert output is not None
+                    rendered_path = self._stage_browser_response_output(output, output_suffix)
                     response_path = rendered_path
                     response_path_is_temporary = copy_to_browser
                     output = None
