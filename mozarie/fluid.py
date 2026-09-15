@@ -50,21 +50,33 @@ def expand_white_fluid_mask(
 
     # ``floodFill`` uses a mask two pixels larger than the source image.  A
     # non-zero entry blocks traversal, so pre-fill every pixel outside the
-    # permitted region.  Every component gets a fresh work mask: one accepted
-    # deposit must not prevent another from reaching its own colour region.
+    # permitted region.  Clear only the marked result rectangle after each
+    # component so one work mask can be reused without blocking later fills.
     source = np.ascontiguousarray(pixels)
     expanded = np.zeros_like(seeds, dtype=bool)
-    component_count, labels = cv2.connectedComponents(np.asarray(seeds, dtype=np.uint8), connectivity=4)
+    flood_mask = np.pad(np.asarray(~allowed, dtype=np.uint8), 1, constant_values=1)
+    component_count, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        np.asarray(seeds, dtype=np.uint8), connectivity=4,
+    )
     flags = 4 | cv2.FLOODFILL_FIXED_RANGE | cv2.FLOODFILL_MASK_ONLY | (2 << 8)
     difference = (tolerance, tolerance, tolerance)
     for label in range(1, component_count):
-        coordinates = np.argwhere(labels == label)
-        colors = source[coordinates[:, 0], coordinates[:, 1]].astype(np.int32)
+        left, top, width, height, _area = stats[label]
+        local_labels = labels[top:top + height, left:left + width]
+        coordinates = np.argwhere(local_labels == label)
+        colors = source[top + coordinates[:, 0], left + coordinates[:, 1]].astype(np.int32)
         median = np.median(colors, axis=0)
         row, column = coordinates[np.argmin(np.sum((colors - median) ** 2, axis=1))]
-        flood_mask = np.pad(np.asarray(~allowed, dtype=np.uint8), 1, constant_values=1)
-        cv2.floodFill(source, flood_mask, (int(column), int(row)), 0, difference, difference, flags)
-        expanded |= flood_mask[1:-1, 1:-1] == 2
+        filled, _image, flood_mask, (fill_left, fill_top, fill_width, fill_height) = cv2.floodFill(
+            source, flood_mask, (int(left + column), int(top + row)), 0, difference, difference, flags,
+        )
+        if not filled:
+            continue
+        mask_region = flood_mask[fill_top + 1:fill_top + fill_height + 1, fill_left + 1:fill_left + fill_width + 1]
+        expanded_region = expanded[fill_top:fill_top + fill_height, fill_left:fill_left + fill_width]
+        marked = mask_region == 2
+        expanded_region |= marked
+        mask_region[marked] = 0
     # Preserve every accepted seed even if its representative colour is an
     # outlier for the remainder of that component.
     return np.asarray(expanded | seeds, dtype=np.uint8) * 255
