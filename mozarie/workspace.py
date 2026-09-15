@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from PIL import Image, UnidentifiedImageError
 import numpy as np
@@ -25,13 +25,14 @@ import numpy as np
 from .masks import compose_masks, expand_mask
 
 
-def _chunks(db: sqlite3.Connection, values: list[str], *, reserved_binds: int = 0) -> list[list[str]]:
+def _chunks(db: sqlite3.Connection, values: list[str], *, reserved_binds: int = 0) -> Iterator[list[str]]:
     """Split one IN clause by this connection's actual bind-variable limit."""
     limit = db.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
     available = limit - reserved_binds
     if available < 1:
         raise sqlite3.OperationalError("SQLite bind-variable limit is too small")
-    return [values[index:index + available] for index in range(0, len(values), available)]
+    for index in range(0, len(values), available):
+        yield values[index:index + available]
 
 
 def native_source_identity(root: Path | str) -> str:

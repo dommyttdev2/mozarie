@@ -70,6 +70,7 @@ MESSAGES = {
         "downloading_progress": "ダウンロード中: {megabytes} MB",
         "archive_download": "更新ファイルをダウンロードできませんでした。",
         "archive_invalid_path": "更新ZIPに不正なパスが含まれています。",
+        "archive_unmanaged": "更新ZIPにMozarie本体以外のファイルが含まれています。",
         "archive_symlink": "更新ZIPにシンボリックリンクが含まれています。",
         "archive_invalid_count": "更新ZIPの内容が正しくありません。",
         "archive_extract": "更新ZIPを展開できませんでした。",
@@ -112,6 +113,7 @@ MESSAGES = {
         "downloading_progress": "Downloading: {megabytes} MB",
         "archive_download": "Could not download the update archive.",
         "archive_invalid_path": "The update archive contains an invalid path.",
+        "archive_unmanaged": "The update archive contains files outside Mozarie.",
         "archive_symlink": "The update archive contains a symbolic link.",
         "archive_invalid_count": "The update archive contents are invalid.",
         "archive_extract": "Could not extract the update archive.",
@@ -292,6 +294,35 @@ def _require_free_space(destination: Path, required: int) -> None:
         raise UpdateError(tr("archive_disk_space")) from exc
 
 
+def _managed_size(root: Path) -> int:
+    """Count the installed files that must coexist with their backup."""
+    total = 0
+    for relative in MANAGED_FILES:
+        path = root / relative
+        if path.is_file():
+            total += path.stat().st_size
+    for relative in MANAGED_DIRECTORIES:
+        directory = root / relative
+        if directory.is_dir():
+            total += sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
+    return total
+
+
+def _storage_key(path: Path) -> str:
+    return str(path.resolve().anchor).casefold()
+
+
+def _require_update_storage(temporary_root: Path, extracted_size: int, app_dir: Path) -> None:
+    """Reserve extraction, rollback, and the incoming managed copy before writing."""
+    requirements: dict[str, tuple[Path, int]] = {}
+    for root, required in ((temporary_root, extracted_size), (app_dir.parent, _managed_size(app_dir) + extracted_size)):
+        key = _storage_key(root)
+        anchor, accumulated = requirements.get(key, (root, 0))
+        requirements[key] = (anchor, accumulated + required)
+    for root, required in requirements.values():
+        _require_free_space(root, required)
+
+
 def download_archive(url: str, destination: Path, expected_digest: str, expected_size: int,
                      opener: Callable[..., Any] = urllib.request.urlopen) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "Mozarie-Updater"})
@@ -340,39 +371,75 @@ def _safe_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
     return path
 
 
-def extract_archive(archive: Path, destination: Path) -> Path:
+def _managed_archive_member(path: PurePosixPath, *, is_directory: bool) -> bool:
+    name = path.as_posix()
+    if name in MANAGED_FILES:
+        return not is_directory
+    if name in MANAGED_DIRECTORIES:
+        return is_directory
+    if any(name.startswith(f"{directory}/") for directory in MANAGED_DIRECTORIES):
+        return True
+    return is_directory and any(file.startswith(f"{name}/") for file in MANAGED_FILES)
+
+
+def _archive_plan(archive: Path) -> tuple[str, list[tuple[str, PurePosixPath, int, bool]], int]:
+    with zipfile.ZipFile(archive) as bundle:
+        infos = bundle.infolist()
+        if not infos:
+            raise UpdateError(tr("archive_invalid_count"))
+        entries = [(info, _safe_member_path(info)) for info in infos]
+        roots = {path.parts[0] for _info, path in entries}
+        if len(roots) != 1:
+            raise UpdateError(tr("archive_missing_app"))
+        source_name = roots.pop()
+        planned: list[tuple[str, PurePosixPath, int, bool]] = []
+        names: set[str] = set()
+        extracted_size = 0
+        for info, path in entries:
+            if info.filename in names:
+                raise UpdateError(tr("archive_invalid_count"))
+            names.add(info.filename)
+            member = PurePosixPath(*path.parts[1:])
+            if not member.parts:
+                if not info.is_dir():
+                    raise UpdateError(tr("archive_missing_app"))
+                continue
+            if not _managed_archive_member(member, is_directory=info.is_dir()):
+                raise UpdateError(tr("archive_unmanaged"))
+            planned.append((info.filename, member, info.file_size, info.is_dir()))
+            if not info.is_dir():
+                extracted_size += info.file_size
+        return source_name, planned, extracted_size
+
+
+def extract_archive(archive: Path, destination: Path, app_dir: Path = APP_DIR) -> Path:
     try:
         destination_root = destination.resolve()
+        source_name, entries, extracted_size = _archive_plan(archive)
+        _require_update_storage(destination_root, extracted_size, app_dir)
         with zipfile.ZipFile(archive) as bundle:
-            infos = bundle.infolist()
-            if not infos:
-                raise UpdateError(tr("archive_invalid_count"))
-            for info in infos:
-                relative = _safe_member_path(info)
-                target = destination_root.joinpath(*relative.parts).resolve()
+            source_root = destination_root / source_name
+            source_root.mkdir(parents=True, exist_ok=False)
+            for name, relative, expected_size, is_directory in entries:
+                target = source_root.joinpath(*relative.parts).resolve()
                 if not target.is_relative_to(destination_root):
                     raise UpdateError(tr("archive_invalid_path"))
-                if info.is_dir():
+                if is_directory:
                     target.mkdir(parents=True, exist_ok=True)
                     continue
-                _require_free_space(destination_root, info.file_size)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with bundle.open(info) as source, target.open("wb") as output:
+                with bundle.open(name) as source, target.open("wb") as output:
                     written = 0
                     while chunk := source.read(1024 * 1024):
                         output.write(chunk)
                         written += len(chunk)
-                    if written != info.file_size:
+                    if written != expected_size:
                         raise UpdateError(tr("archive_extract"))
     except UpdateError:
         raise
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         raise UpdateError(tr("archive_extract")) from exc
 
-    children = list(destination_root.iterdir())
-    if len(children) != 1 or not children[0].is_dir():
-        raise UpdateError(tr("archive_missing_app"))
-    source_root = children[0]
     required_files = tuple(source_root / relative for relative in MANAGED_FILES)
     required_directories = tuple(source_root / relative for relative in MANAGED_DIRECTORIES)
     if not all(path.is_file() for path in required_files) or not all(path.is_dir() for path in required_directories):
@@ -611,7 +678,7 @@ def _perform_update(
         url, digest, size = release_archive(release)
         download_archive(url, archive, digest, size, opener)
         print(tr("verifying"))
-        source_root = extract_archive(archive, extracted)
+        source_root = extract_archive(archive, extracted, app_dir)
         archive_version = read_local_version(source_root)
         if parse_version(archive_version) != parse_version(latest_raw):
             raise UpdateError(tr("archive_version_mismatch"))
