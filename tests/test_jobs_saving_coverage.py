@@ -420,7 +420,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
                 return b"png"
             state._has_active_worker = lambda: workers[0]
             with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", side_effect=after_render):
-                with self.assertRaises(ClientError): state.render_browser_save(record.image_id, 1, 2, {})
+                self.assertIsNone(state.render_browser_save(record.image_id, 1, 2, {}).output)
             state._has_active_worker = lambda: False
             state._issue_browser_save_token_unchecked = Mock(side_effect=ClientError("x", "x"))
             with patch("mozarie.saving.decode_draft_masks", return_value=(np.ones((2, 3), dtype=np.uint8), None, None)), patch("mozarie.saving.render_with_mask", return_value=b"png"):
