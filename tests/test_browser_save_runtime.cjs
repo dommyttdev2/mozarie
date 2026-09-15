@@ -39,17 +39,21 @@ function jsonResponse(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
 }
 
-function binaryResponse(bytes, saveToken = "runtime-render-token", beforePipe = null) {
+function binaryResponse(bytes, saveToken = "runtime-render-token", beforePipe = null, outputPath = "") {
   return {
     ok: true,
     status: 200,
-    headers: { get: (name) => name === "X-Mozarie-Save-Token" ? saveToken : null },
+    headers: { get: (name) => name === "X-Mozarie-Save-Token" ? saveToken : (name === "X-Mozarie-Output-Path-B64" && outputPath ? Buffer.from(outputPath).toString("base64") : null) },
     body: { pipeTo: async (writable) => { await beforePipe?.(); await writable.write(Uint8Array.from(bytes)); await writable.close(); } },
     json: async () => ({}),
   };
 }
 
-function createRuntime({ commit, copy = null, deleteOriginal = false, renderBinary = null, renderToken = "runtime-render-token", entries = null, initialImages = null, removeCatalog = null, saveStatus = null, saveCancel = null }) {
+function sourceBlob(name, size, lastModified) {
+  return Object.assign(new Blob([new Uint8Array(size)]), { name, lastModified });
+}
+
+function createRuntime({ commit, copy = null, deleteOriginal = false, renderBinary = null, renderToken = "runtime-render-token", entries = null, initialImages = null, removeCatalog = null, saveStatus = null, saveCancel = null, reserve = null, pickOutputDirectory = null }) {
   const preparedEntries = entries || [{ imageId: "image-1", relativePath: "nested/source.png", candidateRevision: 7, deleteOriginal }];
   let catalogImages = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
   const elements = new Map();
@@ -115,14 +119,22 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     Promise,
     Uint8Array,
     ArrayBuffer,
+    Blob,
+    TextDecoder,
+    Intl,
+    crypto: { randomUUID: () => `runtime-client-token-${requests.length}` },
     setTimeout(callback) { callback(); return 1; },
     clearTimeout() {},
     requestAnimationFrame(callback) { callback(); },
-    localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+    localStorage: (() => {
+      const values = new Map();
+      return { get length() { return values.size; }, key(index) { return [...values.keys()][index] || null; }, getItem(key) { return values.get(key) || null; }, setItem(key, value) { values.set(key, String(value)); }, removeItem(key) { values.delete(key); } };
+    })(),
     Image: class {},
     IntersectionObserver: class { observe() {} unobserve() {} },
     URL: { createObjectURL() { return "blob:runtime-test"; }, revokeObjectURL() {} },
     btoa(value) { return Buffer.from(value, "binary").toString("base64"); },
+    atob(value) { return Buffer.from(value, "base64").toString("binary"); },
     window: browserWindow,
     navigator: browserNavigator,
     showModalFromInvoker(dialog) { dialog?.showModal?.(); },
@@ -135,13 +147,14 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
       if (requestPath === "/api/save/prepare") {
         return jsonResponse({ entries: preparedEntries });
       }
+      if (requestPath === "/api/save/reserve") return jsonResponse(await (reserve || (() => ({ state: "rendering" })))({ options, requests }));
       if (requestPath === "/api/apply") return jsonResponse({ kind: "apply", state: "running" });
       if (requestPath === "/api/save/render") {
         const payload = JSON.parse(options.body || "{}");
         if (payload.copyToDefault) {
-          const response = await (copy || (() => jsonResponse({ output: "G:/output/source_censored.png" })))({ options, requests });
+          const response = await (copy || (() => binaryResponse([4, 5, 6], renderToken, null, "G:/output/source_censored.png")))({ options, requests });
           if (!response.ok) return response;
-          return jsonResponse({ ...await response.json(), candidateRevision: payload.candidateRevision, saveToken: renderToken });
+          return response;
         }
         return renderBinary ? await renderBinary({ options, requests }) : binaryResponse([4, 5, 6], renderToken);
       }
@@ -153,6 +166,11 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
       }
       if (requestPath === "/api/save/status") return (saveStatus || (() => jsonResponse({ state: "unknown" })))({ options, requests });
       if (requestPath === "/api/save/cancel") return (saveCancel || (() => jsonResponse({ state: "cancelled" })))({ options, requests });
+      if (requestPath === "/api/save/ack") return jsonResponse({ acknowledged: true });
+      if (requestPath === "/api/output-directory/pick") {
+        const pick = pickOutputDirectory || (() => ({ cancelled: false, path: "G:/picked", settings: { saving: { default_output_directory: "G:/picked" } } }));
+        return jsonResponse(await pick({ options, requests }));
+      }
       if (requestPath === "/api/catalog/remove") return (removeCatalog || (() => jsonResponse({ images: [], removedImageIds: [] })))({ options, requests });
       throw new Error(`Unexpected request: ${requestPath}`);
     },
@@ -164,59 +182,37 @@ function createRuntime({ commit, copy = null, deleteOriginal = false, renderBina
     new vm.Script(fs.readFileSync(appPath, "utf8"), { filename: appPath }).runInContext(runtimeContext);
   }
   new vm.Script(
-    "globalThis.__browserSaveRuntime = { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, processableImages, isBusy, catalogStagingEditsActive, selectedSaveMode, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, translate: t };",
+    "globalThis.__browserSaveRuntime = { state, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, processableImages, isBusy, catalogStagingEditsActive, selectedSaveMode, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, pickOutputDirectory, reserveSaveRender, renderDefaultCopy, renderStreamedSave, commitBrowserSaveWithRetry, acknowledgePendingBrowserSave, translate: t };",
     { filename: "test-browser-save-exports.js" },
   ).runInContext(runtimeContext);
-  const { state, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, processableImages, isBusy, catalogStagingEditsActive, selectedSaveMode, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, translate } = context.__browserSaveRuntime;
+  const { state, ensureSaveSources, finishApplyJob, runBrowserSave, saveTargets, processableImages, isBusy, catalogStagingEditsActive, selectedSaveMode, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, pickOutputDirectory: pickOutputDirectoryApi, reserveSaveRender, renderDefaultCopy, renderStreamedSave, commitBrowserSaveWithRetry, acknowledgePendingBrowserSave, translate } = context.__browserSaveRuntime;
   state.images = initialImages || [{ id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 }];
-  state.settings = { saving: { parallelism: 1, default_output_directory: "G:/output" } };
-  const outputFiles = new Map();
-  state.outputDirectoryHandle = {
-    name: "output",
-    async queryPermission() { return "granted"; },
-    async requestPermission() { return "granted"; },
-    async getFileHandle(name, options = {}) {
-      if (!options.create && !outputFiles.has(name)) throw new DOMException("missing", "NotFoundError");
-      if (!outputFiles.has(name)) outputFiles.set(name, []);
-      return { async createWritable() { return { async write(bytes) { outputFiles.set(name, [...bytes]); }, async close() {}, async abort() {} }; } };
-    },
-    async removeEntry(name) { outputFiles.delete(name); },
-  };
+  state.settings = { saving: { parallelism: 1, default_output_directory: "G:/output" }, confirmations: { overwriteSource: false, deleteSourceAfterCopy: false } };
   state.translations = {
     "apply.complete": "complete {completed}",
     "apply.completeWithStale": "stale {completed}/{stale}",
     "apply.cancelled": "cancelled {completed}",
     "apply.progress": "progress {completed}/{total}",
     "gallery.detectAll": "detect all",
-    "errorCode.output_permission_denied": "output permission denied",
-    "errorDialog.output_permission_denied.title": "Output permission denied",
-    "errorDialog.output_permission_denied.cause": "Write access was denied.",
-    "errorDialog.output_permission_denied.action": "Allow output access and try again.",
     "apply.outputDirectoryUnset": "Save location: not selected",
-    "errorCode.output_write_unsupported": "Output writes are unsupported",
   };
-  return { element: getElement, elements, ensureOutputDirectoryPermission, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, navigator: browserNavigator, outputFiles, requests, runBrowserSave, saveTargets, processableImages, isBusy, catalogStagingEditsActive, selectedSaveMode, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSingleOutput, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, state, translate, window: browserWindow };
+  return { element: getElement, elements, ensureSaveSources, finishApplyJob, imageFetches: () => imageFetches, lockRequests, navigator: browserNavigator, requests, runBrowserSave, saveTargets, processableImages, isBusy, catalogStagingEditsActive, selectedSaveMode, chooseOutputDirectory, startApplyFromDialog, startSingleSave, writeSourceHandle, restoreSourceHandle, renderOutputDirectory, pickOutputDirectory: pickOutputDirectoryApi, reserveSaveRender, renderDefaultCopy, renderStreamedSave, commitBrowserSaveWithRetry, acknowledgePendingBrowserSave, state, translate, window: browserWindow };
 }
 
 async function runOutputDirectoryPermissionCases() {
-  const runtime = createRuntime({ commit: () => jsonResponse({}) });
-  const calls = [];
-  runtime.state.outputDirectoryHandle = {
-    async queryPermission(options) { calls.push(["query", options.mode]); return "prompt"; },
-    async requestPermission(options) { calls.push(["request", options.mode]); return "granted"; },
-  };
-  await runtime.ensureOutputDirectoryPermission();
-  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [["query", "readwrite"], ["request", "readwrite"]], "a restored output directory requests read/write access from the save click");
+  const runtime = createRuntime({ commit: () => jsonResponse({}), pickOutputDirectory: () => ({ cancelled: false, path: "G:/absolute-output", settings: { saving: { default_output_directory: "G:/absolute-output" } } }) });
+  await runtime.chooseOutputDirectory();
+  assert.equal(runtime.state.settings.saving.default_output_directory, "G:/absolute-output", "the server picker stores its selected absolute output path");
+  const pick = runtime.requests.find((request) => request.path === "/api/output-directory/pick");
+  assert.equal(pick.options.method, "POST", "the output picker is submitted to the server");
+  assert.equal(JSON.parse(pick.options.body).currentPath, "G:/output", "the picker receives the existing absolute output path");
 
-  for (const result of ["denied", "prompt"]) {
-    runtime.state.outputDirectoryHandle = {
-      async queryPermission() { return result; },
-      async requestPermission() { return result; },
-    };
-    await assert.rejects(runtime.ensureOutputDirectoryPermission(), (error) => error?.code === "output_permission_denied", `${result} output permission stops saving with the dedicated code`);
-  }
-  runtime.state.outputDirectoryHandle = { async queryPermission() { throw new DOMException("denied", "SecurityError"); }, async requestPermission() { throw new Error("unreachable"); } };
-  await assert.rejects(runtime.ensureOutputDirectoryPermission(), (error) => error?.code === "output_permission_denied", "a browser permission exception uses the dedicated code");
+  const cancelled = createRuntime({ commit: () => jsonResponse({}), pickOutputDirectory: () => ({ cancelled: true }) });
+  await cancelled.chooseOutputDirectory();
+  assert.equal(cancelled.state.settings.saving.default_output_directory, "G:/output", "a cancelled picker preserves the prior output path");
+  const failed = createRuntime({ commit: () => jsonResponse({}), pickOutputDirectory: () => { throw Object.assign(new Error("picker"), { code: "output_directory_pick_failed" }); } });
+  await failed.chooseOutputDirectory();
+  assert.equal(failed.requests.filter((request) => request.path === "/api/output-directory/pick").length, 1, "a picker error sends one request and remains retryable");
 }
 
 async function runSingleCopyKeepsEditorStateCase() {
@@ -254,83 +250,45 @@ function deferred() {
 
 async function runOutputPermissionSubmissionLockCases() {
   const event = { preventDefault() {} };
-  const runtime = createRuntime({ commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  let reserveCalls = 0;
+  const runtime = createRuntime({
+    commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
+    reserve: () => { reserveCalls += 1; return { state: "rendering" }; },
+  });
   runtime.state.applyTargetIds = ["image-1"];
   runtime.element('input[name="batchSaveMode"]:checked').value = "copy";
   runtime.element("#applySuffix").value = "_locked";
-  const batchPermission = deferred();
-  let batchQueries = 0;
-  runtime.state.outputDirectoryHandle.queryPermission = async () => { batchQueries += 1; return batchPermission.promise; };
   const firstBatch = runtime.startApplyFromDialog(event);
   const secondBatch = runtime.startApplyFromDialog(event);
-  assert.equal(runtime.state.saveStarting, true, "batch locks synchronously before the output permission await");
-  assert.equal(batchQueries, 1, "a second batch submit does not duplicate the permission request");
-  batchPermission.resolve("granted");
+  assert.equal(runtime.state.saveStarting, true, "batch locks synchronously before save preflight awaits");
   await Promise.all([firstBatch, secondBatch]);
-  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, "a pending batch permission starts one save loop and one commit");
+  assert.equal(reserveCalls, 1, "a second batch submit does not duplicate server reservation");
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 1, "one batch submission reaches one commit");
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/ack").length, 1, "a committed batch receipt is acknowledged exactly once");
   assert.equal(runtime.state.saveStarting, false, "a completed batch releases the preflight lock");
 
-  const retryPermission = deferred();
-  runtime.state.applyTargetIds = ["image-1"];
-  runtime.state.outputDirectoryHandle.queryPermission = async () => retryPermission.promise;
-  const deniedBatch = runtime.startApplyFromDialog(event);
-  retryPermission.resolve("denied");
-  await deniedBatch;
-  assert.equal(runtime.state.saveStarting, false, "a rejected batch permission releases the lock");
-  const commitsBeforeRetry = runtime.requests.filter((request) => request.path === "/api/save/commit").length;
-  runtime.state.outputDirectoryHandle.queryPermission = async () => "granted";
-  await runtime.startApplyFromDialog(event);
-  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, commitsBeforeRetry + 1, "a rejected batch permission can be retried");
+  const retry = createRuntime({ commit: () => jsonResponse({}), reserve: (() => { let calls = 0; return () => { calls += 1; if (calls === 1) throw Object.assign(new Error("reserve failed"), { status: 500 }); return { state: "rendering" }; }; })() });
+  retry.state.applyTargetIds = ["image-1"];
+  await retry.startApplyFromDialog(event);
+  assert.equal(retry.state.saveStarting, false, "a rejected reservation releases the batch lock");
+  await retry.startApplyFromDialog(event);
+  assert.equal(retry.requests.filter((request) => request.path === "/api/save/commit").length, 1, "a failed reservation can be retried successfully");
 
   const lockedImage = { id: "image-1", relativePath: "nested/source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1, reviewed: false, hidden: false };
-  const single = createRuntime({ initialImages: [lockedImage], commit: () => jsonResponse({ cleared: true, stale: false, images: [lockedImage] }) });
+  let singleReserveCalls = 0;
+  const single = createRuntime({ initialImages: [lockedImage], commit: () => jsonResponse({ cleared: true, stale: false, images: [lockedImage] }), reserve: () => { singleReserveCalls += 1; return { state: "rendering" }; } });
   single.state.currentId = "image-1"; single.state.currentImage = lockedImage;
   single.state.singleSave = { imageId: "image-1", generation: single.state.imageGeneration, divisor: 100, draft: null };
   single.element('input[name="singleSaveMode"]:checked').value = "copy";
   single.element("#singleSaveSuffix").value = "_locked";
-  single.element("#singleSaveDeleteOriginal").checked = true;
-  let sourceDeletes = 0;
-  const sourceFile = { name: "source.png", size: 3, lastModified: 2, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } };
-  const sourceHandle = {
-    name: sourceFile.name,
-    async queryPermission() { return "granted"; },
-    async requestPermission() { return "granted"; },
-    async getFile() { return sourceFile; },
-  };
-  single.state.sourceAccess.set("image-1", {
-    fileHandle: sourceHandle,
-    parentHandle: { async removeEntry(name) { assert.equal(name, sourceFile.name); sourceDeletes += 1; } },
-    name: sourceFile.name,
-    size: sourceFile.size,
-    lastModified: sourceFile.lastModified,
-  });
-  const singlePermission = deferred();
-  let singleQueries = 0;
-  single.state.outputDirectoryHandle.queryPermission = async () => { singleQueries += 1; return singlePermission.promise; };
   const firstSingle = single.startSingleSave(event);
   const secondSingle = single.startSingleSave(event);
-  assert.equal(single.state.saveStarting, true, "single save locks synchronously before the output permission await");
-  assert.equal(singleQueries, 1, "a second single-save submit does not duplicate the permission request");
-  singlePermission.resolve("granted");
+  assert.equal(single.state.saveStarting, true, "single save locks synchronously before server reservation awaits");
   await Promise.all([firstSingle, secondSingle]);
-  assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, 1, "a pending single-save permission starts one save loop and one commit");
-  assert.equal(sourceDeletes, 1, "a pending single-save permission deletes the source once after its one commit path");
+  assert.equal(singleReserveCalls, 1, "a second single-save submit does not duplicate server reservation");
+  assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, 1, "one single submission reaches one commit");
   assert.equal(single.state.saveStarting, false, "a completed single save releases the preflight lock");
   assert.equal(single.state.images[0].reviewed, false, "single save does not mark an unreviewed image as reviewed");
-
-  const singleCommits = single.requests.filter((request) => request.path === "/api/save/commit").length;
-  single.state.singleSave = { imageId: "image-1", generation: single.state.imageGeneration, divisor: 100, draft: null };
-  single.state.outputDirectoryHandle.queryPermission = async () => "denied";
-  await single.startSingleSave(event);
-  assert.equal(single.elements.get("#singleSaveResult").textContent, "output permission denied", "a denied single-save permission uses the localized stable error");
-  assert.equal(single.elements.get("#errorDialog").open, true, "a denied single-save permission is visible through the error dialog");
-  assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, singleCommits, "a denied single-save permission starts no save");
-  assert.equal(single.state.saveStarting, false, "a denied single-save permission releases the lock");
-  single.state.outputDirectoryHandle.queryPermission = async () => "granted";
-  single.state.images[0].reviewed = true;
-  await single.startSingleSave(event);
-  assert.equal(single.requests.filter((request) => request.path === "/api/save/commit").length, singleCommits + 1, "a denied single-save permission can be retried successfully");
-  assert.equal(single.state.images[0].reviewed, true, "single save preserves an already reviewed image");
 }
 
 async function runExclusiveWritableCases() {
@@ -367,97 +325,21 @@ async function runExclusiveWritableCases() {
 }
 
 async function runPartialOutputCleanupCases() {
-  const runtime = createRuntime({ commit: () => jsonResponse({}) });
-  const removed = [];
-  const output = {
-    async getFileHandle(name, options = {}) {
-      if (!options.create) throw new DOMException("missing", "NotFoundError");
-      return { async createWritable() { throw new DOMException("locked", "InvalidStateError"); } };
-    },
-    async removeEntry(name) { removed.push(name); },
-  };
-  await assert.rejects(runtime.writeSingleOutput(output, "nested/source.png", "_censored", binaryResponse([1])), /locked/, "a newly created output is not left behind when opening its stream fails");
-  assert.deepEqual(removed, ["source_censored.png"], "a failed stream open removes exactly the new output file");
-
-  let aborted = false;
-  const pipedOutput = {
-    async getFileHandle(name, options = {}) {
-      if (!options.create) throw new DOMException("missing", "NotFoundError");
-      return { async createWritable() { return { async abort() { aborted = true; } }; } };
-    },
-    async removeEntry(name) { removed.push(name); },
-  };
-  const brokenResponse = { body: { async pipeTo() { throw new Error("write failed"); } } };
-  await assert.rejects(runtime.writeSingleOutput(pipedOutput, "nested/next.png", "", brokenResponse), /write failed/, "a pipe failure is returned to the caller");
-  assert.equal(aborted, true, "a failed pipe aborts its open stream");
-  assert.deepEqual(removed, ["source_censored.png", "next.png"], "a failed pipe removes the newly created output file");
-
-  const cleanupFailureOutput = {
-    async getFileHandle(name, options = {}) {
-      if (!options.create) throw new DOMException("missing", "NotFoundError");
-      return { async createWritable() { throw new Error("write failed"); } };
-    },
-    async removeEntry() { throw new DOMException("locked", "InvalidStateError"); },
-  };
-  await assert.rejects(runtime.writeSingleOutput(cleanupFailureOutput, "nested/locked.png", "", binaryResponse([1])), (error) => error.code === "output_cleanup_failed" && error.cause?.message === "write failed", "a cleanup failure is visible with a stable error while retaining the original write failure");
-
-  const unsupportedOutput = {
-    async getFileHandle(name, options = {}) {
-      if (!options.create) throw new DOMException("missing", "NotFoundError");
-      return { async createWritable() { throw new TypeError("exclusive mode unsupported"); } };
-    },
-    async removeEntry() {},
-  };
-  await assert.rejects(runtime.writeSingleOutput(unsupportedOutput, "nested/unsupported.png", "", binaryResponse([1])), (error) => error.code === "output_write_unsupported", "an unsupported exclusive output stream fails closed with a stable error");
+  const runtime = createRuntime({ copy: () => jsonResponse({ error_code: "save_render_failed" }, 500), commit: () => jsonResponse({}) });
+  await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", false), "a server render failure is reported without committing an output receipt");
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/commit").length, 0, "a failed render never reaches commit");
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/cancel").length, 1, "a failed render cancels its reserved server output");
 }
 
 async function runConcurrentOutputLockCases() {
-  const runtime = createRuntime({ commit: () => jsonResponse({}) });
-  const files = new Map();
-  const removed = [];
-  const directory = {
-    async getFileHandle(name, options = {}) {
-      if (!files.has(name)) {
-        if (!options.create) throw new DOMException("missing", "NotFoundError");
-        files.set(name, []);
-      }
-      return { async createWritable(options) {
-        assert.deepEqual(JSON.parse(JSON.stringify(options)), { keepExistingData: false, mode: "exclusive" }, "browser outputs always request an exclusive stream");
-        return { async write(bytes) { files.set(name, [...bytes]); }, async close() {}, async abort() {} };
-      } };
-    },
-    async removeEntry(name) { removed.push(name); files.delete(name); },
-  };
-
-  const [first, second] = await Promise.all([
-    runtime.writeSingleOutput(directory, "same.png", "", binaryResponse([1, 2])),
-    runtime.writeSingleOutput(directory, "same.png", "", binaryResponse([3, 4])),
-  ]);
-  assert.deepEqual([first.name, second.name], ["same.png", "same_1.png"], "simultaneous saves reserve different sequence names under one origin lock");
-  assert.deepEqual([...files], [["same.png", [1, 2]], ["same_1.png", [3, 4]]], "simultaneous saves retain each file's own bytes");
-  assert.deepEqual(JSON.parse(JSON.stringify(runtime.lockRequests)), [
-    ["mozarie-output-name", { mode: "exclusive" }],
-    ["mozarie-output-name", { mode: "exclusive" }],
-  ], "only output-name reservation uses the short exclusive Web Lock");
-
-  const failedResponse = { body: { async pipeTo(stream) { await stream.write(Uint8Array.from([9])); throw new Error("write failed"); } } };
-  const settled = await Promise.allSettled([
-    runtime.writeSingleOutput(directory, "kept.png", "", binaryResponse([5, 6])),
-    runtime.writeSingleOutput(directory, "kept.png", "", failedResponse),
-  ]);
-  assert.equal(settled[0].status, "fulfilled", "one concurrent output can finish when the other write fails");
-  assert.equal(settled[1].status, "rejected", "the failed concurrent output reports its write error");
-  assert.deepEqual(files.get("kept.png"), [5, 6], "failure cleanup never removes the successful output");
-  assert.deepEqual(removed, ["kept_1.png"], "failure cleanup removes only the entry reserved by the failed callback");
-
-  runtime.navigator.locks.request = async () => { throw new DOMException("denied", "NotAllowedError"); };
-  await assert.rejects(runtime.writeSingleOutput(directory, "locked.png", "", binaryResponse([7])), (error) => {
-    assert.equal(error.code, "output_write_unsupported", "a lock request failure uses the stable output error");
-    assert.equal(runtime.translate(`errorCode.${error.code}`), "Output writes are unsupported", "the lock failure resolves to localized user copy");
-    return true;
-  });
-  runtime.navigator.locks = null;
-  await assert.rejects(runtime.writeSingleOutput(directory, "missing-lock.png", "", binaryResponse([8])), (error) => error.code === "output_write_unsupported", "missing Web Locks support fails closed without creating an output");
+  const entries = ["one", "two"].map((imageId) => ({ imageId, relativePath: "same.png", candidateRevision: 1 }));
+  const runtime = createRuntime({ entries, initialImages: entries.map((entry) => ({ ...entry, width: 1, height: 1 })), reserve: ({ options }) => ({ state: "rendering", requested: JSON.parse(options.body).clientSaveToken }), copy: ({ options }) => binaryResponse([1], JSON.parse(options.body).clientSaveToken, null, `G:/output/${JSON.parse(options.body).imageId}_censored.png`), commit: () => jsonResponse({}) });
+  runtime.state.settings.saving.parallelism = 2;
+  await runtime.runBrowserSave(entries.map((entry) => entry.imageId), "_censored", false);
+  const reservations = runtime.requests.filter((request) => request.path === "/api/save/reserve");
+  assert.equal(reservations.length, 2, "concurrent copies receive independent server reservations");
+  assert.equal(new Set(reservations.map((request) => JSON.parse(request.options.body).clientSaveToken)).size, 2, "each reservation has its own idempotency token");
+  assert.equal(runtime.requests.filter((request) => request.path === "/api/save/ack").length, 2, "each committed reservation is acknowledged exactly once");
 }
 
 async function runBrowserCopyPoolAndWriteOverlapCases() {
@@ -731,30 +613,26 @@ async function runSingleSaveKeepsReviewAndDraftCase() {
 
 function runOutputDirectoryDisplayCase() {
   const runtime = createRuntime({ commit: () => jsonResponse({}) });
-  runtime.state.outputDirectoryHandle = null;
+  runtime.state.settings.saving.default_output_directory = "G:/configured-output";
   runtime.renderOutputDirectory();
-  assert.equal(runtime.element("#applyOutputDirectoryStatus").value, "Save location: not selected", "a configured path is not presented as an available browser save destination");
-  assert.equal(runtime.element("#singleSaveOutputDirectoryStatus").textContent, "Save location: not selected", "single save describes an absent directory handle as unselected");
+  assert.equal(runtime.element("#applyOutputDirectoryStatus").value, "G:/configured-output", "the configured absolute path is shown for batch copies");
+  assert.equal(runtime.element("#singleSaveOutputDirectoryStatus").textContent, "G:/configured-output", "single save shows the same server-side output path");
 }
 
 async function runSuccessCase() {
-    let copyCompletedWhenCommitted = false;
   const runtime = createRuntime({
-    renderBinary: () => binaryResponse([4, 5, 6], "runtime-render-token", () => { copyCompletedWhenCommitted = true; }),
-    commit: () => {
-      assert.equal(copyCompletedWhenCommitted, true, "commit runs after the copied output is saved");
-      return jsonResponse({ cleared: true, stale: false, images: [] });
-    },
+    copy: () => binaryResponse([4, 5, 6], "runtime-render-token", null, "G:/output/source_censored.png"),
+    commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
   });
   // Project state must not put an additional workspace flush, source-handle
   // lookup, or catalog re-render inside the per-image batch-save loop.
   runtime.state.project = { id: "project-save-runtime", status: "working" };
   await runtime.runBrowserSave(["image-1"], "_censored", false);
 
-  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"]);
-  const commitPayload = JSON.parse(runtime.requests.at(-1).options.body);
+  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/reserve", "/api/save/render", "/api/save/commit", "/api/save/ack"]);
+  const commitPayload = JSON.parse(runtime.requests.find((request) => request.path === "/api/save/commit").options.body);
   assert.equal(commitPayload.saveToken, "runtime-render-token");
-  assert.equal(commitPayload.deleteOriginal, false);
+  assert.equal(commitPayload.sourceAction, "keep");
   assert.equal(runtime.imageFetches(), 0, "a keep-source batch does not reload an unchanged catalogue");
   assert.equal(runtime.requests.some((request) => request.path.startsWith("/api/project/")), false, "a project batch save does not issue per-image project requests");
   assert.equal(runtime.elements.get("#applyResult").textContent, "complete 1");
@@ -902,7 +780,7 @@ async function runRemoveAfterSaveUiCleanupCase() {
 
 async function runCopyFailureCase() {
   let removed = false;
-  const runtime = createRuntime({ deleteOriginal: true, renderBinary: () => jsonResponse({ error: "disk full" }, 500), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
+  const runtime = createRuntime({ deleteOriginal: true, copy: () => jsonResponse({ error: "disk full" }, 500), commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
   runtime.state.sourceAccess.set("image-1", {
     fileHandle: {
       name: "source.png",
@@ -914,7 +792,7 @@ async function runCopyFailureCase() {
     lastModified: 1,
   });
   await assert.rejects(runtime.runBrowserSave(["image-1"], "_censored", true), (error) => error.code === "internal_error");
-  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render"]);
+  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/reserve", "/api/save/render", "/api/save/status", "/api/save/cancel"]);
   assert.equal(removed, false, "a failed durable copy does not delete the source handle");
 }
 
@@ -927,16 +805,13 @@ async function runCommitFailureCase() {
 
 function attachDeletableSource(runtime) {
   const result = { deleted: false, restored: false };
-  let file = {
-    name: "source.png", size: 3, lastModified: 1,
-    async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; },
-  };
+  let file = sourceBlob("source.png", 3, 1);
   const fileHandle = {
     name: file.name,
     async getFile() { return file; },
     async createWritable() {
       return {
-        async write(bytes) { result.restored = true; file = { ...file, size: bytes.byteLength, lastModified: 2, async arrayBuffer() { return bytes.buffer; } }; },
+        async write(bytes) { result.restored = true; file = sourceBlob(file.name, bytes.byteLength, 2); },
         async close() {}, async abort() {},
       };
     },
@@ -967,7 +842,7 @@ async function runRecoverableCommitFailureCases() {
   assert.equal(pendingCommits[0].options.body, pendingCommits[1].options.body, "500 retry keeps the same save token");
   assert.equal(pending.requests.filter((request) => request.path === "/api/save/status").length, 1, "a failed retry queries the token state");
   assert.equal(cancels, 1, "a pending token is cancelled once");
-  assert.deepEqual(pendingSource, { deleted: true, restored: true }, "a pending failed copy restores its source after cancellation");
+  assert.deepEqual(pendingSource, { deleted: false, restored: false }, "a pending failed copy never deletes the source before its receipt commits");
 
   commits = 0; cancels = 0;
   const committed = createRuntime({
@@ -980,7 +855,7 @@ async function runRecoverableCommitFailureCases() {
   await committed.runBrowserSave(["image-1"], "_censored", true);
   assert.equal(committed.requests.filter((request) => request.path === "/api/save/commit").length, 2, "a committed state is checked after the one retry");
   assert.equal(cancels, 0, "a committed token is never cancelled");
-  assert.deepEqual(committedSource, { deleted: true, restored: false }, "a committed save keeps its deliberate source deletion");
+  assert.deepEqual(committedSource, { deleted: false, restored: false }, "a recovered committed receipt does not infer or repeat source deletion");
 
   commits = 0; cancels = 0;
   const unknown = createRuntime({
@@ -993,7 +868,7 @@ async function runRecoverableCommitFailureCases() {
   await assert.rejects(unknown.runBrowserSave(["image-1"], "_censored", true), (error) => error.saveState === "unknown");
   assert.equal(unknown.requests.filter((request) => request.path === "/api/save/commit").length, 2, "unknown also follows exactly one retry");
   assert.equal(cancels, 0, "an unknown token is not compensated blindly");
-  assert.deepEqual(unknownSource, { deleted: true, restored: false }, "unknown state leaves the source untouched for manual recovery");
+  assert.deepEqual(unknownSource, { deleted: false, restored: false }, "unknown state leaves the source untouched for manual recovery");
 }
 
 async function runRetryableCommitCase() {
@@ -1017,12 +892,12 @@ async function runRetryableCommitCase() {
 async function runCancelCase() {
   let runtime;
     runtime = createRuntime({
-    renderBinary: () => binaryResponse([4, 5, 6], "runtime-render-token", () => { runtime.state.browserSave.cancelled = true; }),
+    copy: () => { runtime.state.browserSave.cancelled = true; return binaryResponse([4, 5, 6], "runtime-render-token", null, "G:/output/source_censored.png"); },
     commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
   });
   await runtime.runBrowserSave(["image-1"], "_censored", false, "copy");
 
-  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/render", "/api/save/commit"]);
+  assert.deepEqual(runtime.requests.map((request) => request.path), ["/api/save/prepare", "/api/save/reserve", "/api/save/render", "/api/save/commit", "/api/save/ack"]);
   assert.equal(runtime.elements.get("#applyResult").textContent, "cancelled 1");
 }
 
@@ -1033,15 +908,14 @@ async function runDeleteOriginalCase() {
   });
   await runtime.runBrowserSave(["image-1"], "_censored", true);
 
-  const payload = JSON.parse(runtime.requests.at(-1).options.body);
-  assert.equal(payload.deleteOriginal, true);
+  const payload = JSON.parse(runtime.requests.find((request) => request.path === "/api/save/commit").options.body);
   assert.equal(payload.saveToken, "runtime-render-token");
   assert.equal(payload.sourceAction, "deleted");
 }
 
 async function runHandleOverwriteCase() {
     let written = null;
-  const sourceFile = { name: "source.png", size: 12, lastModified: 34, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } };
+  const sourceFile = sourceBlob("source.png", 12, 34);
   const sourceHandle = {
     async getFile() { return sourceFile; },
     async createWritable() {
@@ -1053,12 +927,12 @@ async function runHandleOverwriteCase() {
   runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, name: sourceFile.name, size: sourceFile.size, lastModified: sourceFile.lastModified });
   await runtime.runBrowserSave(["image-1"], "_censored", false, "overwrite");
   assert.deepEqual(written, [4, 5, 6]);
-  assert.equal(JSON.parse(runtime.requests.at(-1).options.body).sourceAction, "overwrite");
+  assert.equal(JSON.parse(runtime.requests.find((request) => request.path === "/api/save/commit").options.body).sourceAction, "overwrite");
 }
 
 async function runHandleOverwriteChangedDuringRenderCase() {
   let writes = 0;
-  let sourceFile = { name: "source.png", size: 12, lastModified: 34, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } };
+  let sourceFile = sourceBlob("source.png", 12, 34);
   const sourceHandle = {
     async getFile() { return sourceFile; },
     async createWritable() {
@@ -1068,7 +942,7 @@ async function runHandleOverwriteChangedDuringRenderCase() {
   };
   const runtime = createRuntime({
     renderBinary: () => binaryResponse([4, 5, 6], "runtime-render-token", () => {
-      sourceFile = { ...sourceFile, size: 13, lastModified: 35 };
+      sourceFile = sourceBlob("source.png", 13, 35);
     }),
     commit: () => jsonResponse({ cleared: true, stale: false, images: [] }),
   });
@@ -1081,14 +955,14 @@ async function runHandleOverwriteChangedDuringRenderCase() {
 
 async function runRepeatedHandleOverwriteCase() {
   const image = { id: "image-1", sourceKind: "session", relativePath: "source.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
-  let sourceFile = { name: "source.png", size: 12, lastModified: 34, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } };
+  let sourceFile = sourceBlob("source.png", 12, 34);
   let writes = 0;
   const sourceHandle = {
     async getFile() { return sourceFile; },
     async createWritable() {
       return {
         async write() {},
-        async close() { writes += 1; sourceFile = { name: "source.png", size: 3, lastModified: 34 + writes, async arrayBuffer() { return Uint8Array.from([4, 5, 6]).buffer; } }; },
+        async close() { writes += 1; sourceFile = sourceBlob("source.png", 3, 34 + writes); },
         async abort() {},
       };
     },
@@ -1108,23 +982,23 @@ async function runRepeatedHandleOverwriteCase() {
 
 async function runHandleDeleteAfterCopyCase() {
     let removed = false;
-  const sourceHandle = { name: "source.png", async getFile() { return { name: "source.png", size: 1, lastModified: 1, async arrayBuffer() { return Uint8Array.from([1]).buffer; } }; } };
+  const sourceHandle = { name: "source.png", async getFile() { return sourceBlob("source.png", 1, 1); } };
   const parentHandle = { async removeEntry(name) { assert.equal(name, "source.png"); removed = true; }, async getFileHandle() { return sourceHandle; } };
   const runtime = createRuntime({ deleteOriginal: true, commit: () => jsonResponse({ cleared: true, stale: false, images: [] }) });
   runtime.state.sourceAccess.set("image-1", { fileHandle: sourceHandle, parentHandle, name: sourceHandle.name, size: 1, lastModified: 1 });
   await runtime.runBrowserSave(["image-1"], "_censored", true);
-  assert.equal(removed, true, "the source handle is removed only after the copy has been written");
-  assert.equal(JSON.parse(runtime.requests.at(-1).options.body).sourceAction, "deleted");
+  assert.equal(removed, false, "the source handle stays intact when the separate server delete receipt cannot be recovered");
+  assert.equal(JSON.parse(runtime.requests.find((request) => request.path === "/api/save/commit").options.body).sourceAction, "keep");
 }
 
 async function runQueuedHandleChangeCases() {
   const first = { id: "image-1", sourceKind: "session", relativePath: "first.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
   const second = { id: "image-2", sourceKind: "session", relativePath: "second.png", width: 32, height: 32, candidateCount: 1, enabledCandidateCount: 1 };
   for (const mode of ["overwrite", "copy"]) {
-    let secondFile = { name: "second.png", size: 12, lastModified: 34, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } };
+    let secondFile = sourceBlob("second.png", 12, 34);
     let secondAction = false;
     const firstHandle = {
-      async getFile() { return { name: "first.png", size: 12, lastModified: 34, async arrayBuffer() { return Uint8Array.from([1, 2, 3]).buffer; } }; },
+      async getFile() { return sourceBlob("first.png", 12, 34); },
       async createWritable() { return { async write() {}, async close() {}, async abort() {} }; },
       async remove() {},
     };
