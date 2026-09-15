@@ -286,7 +286,10 @@ def release_archive(release: dict[str, Any]) -> tuple[str, str, int]:
 
 def _require_free_space(destination: Path, required: int) -> None:
     try:
-        if shutil.disk_usage(destination).free < required:
+        anchor = destination
+        while not anchor.exists() and anchor.parent != anchor:
+            anchor = anchor.parent
+        if shutil.disk_usage(anchor).free < required:
             raise UpdateError(tr("archive_disk_space"))
     except UpdateError:
         raise
