@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import time
 import uuid
@@ -152,7 +153,11 @@ class SavingMixin:
             extension = record.path.suffix.lower() if output_format == "original" else f".{output_format}"
             destination = self._reserve_output_destination(replace(record, path=record.path.with_suffix(extension)), suffix, configured_output_directory)
             staged = destination.parent / ".mozarie-staging" / f"{client_save_token}.stage"
-            self.save_journal.reserve(client_save_token, image_id, revision, destination, staged)
+            try:
+                self.save_journal.reserve(client_save_token, image_id, revision, destination, staged)
+            except (OSError, sqlite3.Error):
+                self._release_output_destination(destination)
+                raise
             try:
                 staged.parent.mkdir(parents=True, exist_ok=True)
                 with staged.open("xb") as handle:
@@ -697,8 +702,10 @@ class SavingMixin:
                         workspace_committed = True
                         # The receipt was inserted in the Workspace transaction.
                         # A journal write after this point is best effort only.
-                        try: self.save_journal.decide_commit(save_token)
-                        except OSError: pass
+                        try:
+                            self.save_journal.decide_commit(save_token)
+                        except (OSError, sqlite3.Error) as exc:
+                            LOGGER.warning("保存ジャーナルの確定記録を保留しました: %s", exc)
                 except Exception:
                     if workspace_committed:
                         # The workspace receipt is the irreversible boundary.
@@ -758,11 +765,16 @@ class SavingMixin:
                     thumbnail_path.unlink(missing_ok=True)
                 if rendered_path is not None:
                     rendered_path.unlink(missing_ok=True)
-                try: self.save_journal.finish(save_token, cleared, not cleared, deleted, response_generation)
-                except OSError: pass
+                try:
+                    self.save_journal.finish(save_token, cleared, not cleared, deleted, response_generation)
+                except (OSError, sqlite3.Error) as exc:
+                    LOGGER.warning("保存ジャーナルの完了記録を保留しました: %s", exc)
                 # Keep the receipt authoritative while journal-owned cleanup
                 # removes only this token's quarantine and private stage.
-                self.save_journal.recover_token(save_token, lambda _token: durable_save_receipt)
+                try:
+                    self.save_journal.recover_token(save_token, lambda _token: durable_save_receipt)
+                except (OSError, sqlite3.Error) as exc:
+                    LOGGER.warning("保存ジャーナルの回復を保留しました: %s", exc)
                 if source_action != "keep":
                     self.invalidate_sam_image(image_id)
                 return {"cleared": cleared, "stale": not cleared, "deleted": deleted,
@@ -805,9 +817,13 @@ class SavingMixin:
     def acknowledge_browser_save(self, save_token: str) -> dict[str, Any]:
         receipt = self.workspace_store.browser_save_receipt(save_token)
         if receipt is not None:
-            if not self.save_journal.recover_token(save_token, lambda _token: receipt):
-                return {"acknowledged": False}
-            if not self.save_journal.acknowledge(save_token):
+            try:
+                if not self.save_journal.recover_token(save_token, lambda _token: receipt):
+                    return {"acknowledged": False}
+                if not self.save_journal.acknowledge(save_token):
+                    return {"acknowledged": False}
+            except (OSError, sqlite3.Error) as exc:
+                LOGGER.warning("保存ジャーナルの確認応答を保留しました: %s", exc)
                 return {"acknowledged": False}
             # A second acknowledgement after the journal deletion is safe:
             # the Workspace receipt remains the authority until this succeeds.
@@ -829,7 +845,10 @@ class SavingMixin:
         with self.import_lock:
             receipt = self.workspace_store.browser_save_receipt(save_token)
             if receipt is not None:
-                self.save_journal.recover_token(save_token, lambda _token: receipt)
+                try:
+                    self.save_journal.recover_token(save_token, lambda _token: receipt)
+                except (OSError, sqlite3.Error) as exc:
+                    LOGGER.warning("保存ジャーナルの回復を保留しました: %s", exc)
                 return {"state": "committed"}
             with self.lock:
                 self._assert_request_catalog_expectation()
@@ -1006,7 +1025,10 @@ class SavingMixin:
                                 live_record.source_flip_vertical = live_record.flip_vertical
                                 live_record.transform_revision += 1
                             if save_token is not None:
-                                self.save_journal.decide_commit(save_token)
+                                try:
+                                    self.save_journal.decide_commit(save_token)
+                                except (OSError, sqlite3.Error) as exc:
+                                    LOGGER.warning("保存ジャーナルの確定記録を保留しました: %s", exc)
                             self._record_job_success(index, record.image_id, str(output_path), job_generation, catalog_generation)
                     except Exception:
                         if save_token is not None and not workspace_committed:
@@ -1017,8 +1039,11 @@ class SavingMixin:
                             output_path.unlink(missing_ok=True)
                         raise
                     if save_token is not None and durable_apply_receipt is not None:
-                        if self.save_journal.recover_token(save_token, lambda _token: durable_apply_receipt) and self.save_journal.acknowledge(save_token):
-                            self.workspace_store.acknowledge_browser_save_receipt(save_token)
+                        try:
+                            if self.save_journal.recover_token(save_token, lambda _token: durable_apply_receipt) and self.save_journal.acknowledge(save_token):
+                                self.workspace_store.acknowledge_browser_save_receipt(save_token)
+                        except (OSError, sqlite3.Error) as exc:
+                            LOGGER.warning("保存ジャーナルの後処理を保留しました: %s", exc)
                         for thumbnail_path in (self.cache_dir / "thumbnails").glob(f"{record.image_id}-*.jpg"):
                             thumbnail_path.unlink(missing_ok=True)
                     if not no_effect:

@@ -6581,6 +6581,59 @@ class MozarieTests(unittest.TestCase):
             with state.workspace_store._connect() as db:
                 self.assertEqual(db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()["candidate_revision"], 0)
 
+    def test_browser_save_reserve_failure_releases_the_output_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); output = root / "output"; output.mkdir()
+            source = root / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(output)
+            image_id = state.set_root(str(root))[0]["id"]
+
+            with patch.object(state.save_journal, "reserve", side_effect=sqlite3.OperationalError("journal locked")):
+                with self.assertRaises(sqlite3.OperationalError):
+                    state.reserve_browser_save(image_id, 0, "save-token", copy_to_default=True, suffix="_censored", output_format="original", keep_metadata=True)
+
+            self.assertEqual(state.reserved_output_paths, set())
+
+    def test_startup_keeps_workspace_available_when_journal_recovery_is_locked(self):
+        with patch.object(SaveJournal, "recover", side_effect=sqlite3.OperationalError("journal locked")):
+            state = self.new_state()
+
+        self.assertEqual(state.list_images(), [])
+
+    def test_browser_render_retries_after_journal_stage_failure_without_publishing_pending_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            state.reserve_browser_save(image_id, 0, "save-token", copy_to_default=False, suffix="_censored", output_format="original", keep_metadata=True)
+
+            with patch.object(state.save_journal, "update_stage", side_effect=sqlite3.OperationalError("journal locked")):
+                with self.assertRaises(sqlite3.OperationalError):
+                    state.render_browser_save(image_id, 0, 100, None, client_save_token="save-token")
+
+            self.assertEqual(state.browser_save_tokens["save-token"].state, "rendering")
+            retried = state.render_browser_save(image_id, 0, 100, None, client_save_token="save-token")
+            self.assertEqual(state.browser_save_tokens["save-token"].state, "pending")
+            self.assertTrue(state.commit_browser_save(image_id, retried.candidate_revision, retried.save_token, "keep")["cleared"])
+
+    def test_browser_overwrite_keeps_the_committed_receipt_when_journal_finishing_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            revision = state._touch_candidates(image_id)
+            rendered = state.render_browser_save(image_id, revision, 100, None)
+
+            with patch.object(state.save_journal, "finish", side_effect=sqlite3.OperationalError("journal locked")), \
+                    patch.object(state.save_journal, "recover_token", side_effect=sqlite3.OperationalError("journal locked")):
+                committed = state.commit_browser_save(image_id, rendered.candidate_revision, rendered.save_token, "overwrite")
+
+            self.assertTrue(committed["cleared"])
+            self.assertIsNotNone(state.workspace_store.browser_save_receipt(rendered.save_token))
+            self.assertEqual(state.browser_save_status(image_id, revision, rendered.save_token, "overwrite")["state"], "committed")
+            self.assertTrue(state.commit_browser_save(image_id, rendered.candidate_revision, rendered.save_token, "overwrite")["cleared"])
+
     def test_pending_browser_copy_token_can_be_checked_and_cancelled(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -7225,6 +7278,22 @@ class MozarieTests(unittest.TestCase):
             self.assertTrue(committed["deleted"])
             self.assertFalse(state.workspace_store.has_image(image_id))
             self.assertFalse(source.exists())
+
+    def test_browser_copy_delete_stays_committed_when_journal_decision_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); output = root / "output"; output.mkdir()
+            source = root / "source.png"; Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); state.settings["saving"]["default_output_directory"] = str(output)
+            image_id = state.set_root(str(root))[0]["id"]
+            rendered = state.render_browser_save(image_id, 0, 100, None, copy_to_default=True)
+
+            with patch.object(state.save_journal, "decide_commit", side_effect=sqlite3.OperationalError("journal locked")):
+                committed = state.commit_browser_save(image_id, rendered.candidate_revision, rendered.save_token, "deleted")
+
+            self.assertTrue(committed["deleted"])
+            self.assertFalse(source.exists())
+            self.assertNotIn(image_id, state.images)
+            self.assertIsNotNone(state.workspace_store.browser_save_receipt(rendered.save_token))
 
     def test_browser_save_uses_one_candidate_snapshot_when_candidates_change_during_render(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -7872,9 +7941,10 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             state._touch_candidates(image_id)
             state.job = core_module.Job(started_at=time.time(), kind="apply", state="running", total=1, image_ids=(image_id,))
 
-            with patch.object(state.save_journal, "recover_token", return_value=False):
+            with patch.object(state.save_journal, "recover_token", side_effect=sqlite3.OperationalError("journal locked")):
                 state._apply_worker([record], 100, {image_id: self._mask(16, 16)})
 
+            self.assertEqual(state.job.state, "complete")
             receipts = state.workspace_store.apply_save_receipts()
             self.assertEqual(len(receipts), 1)
             receipt = receipts[0]; token = str(receipt["token"])
@@ -7899,10 +7969,10 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             state._touch_candidates(image_id)
             state.job = core_module.Job(started_at=time.time(), kind="apply", state="running", total=1, image_ids=(image_id,))
 
-            with patch.object(state.save_journal, "decide_commit", side_effect=OSError("journal locked")):
+            with patch.object(state.save_journal, "decide_commit", side_effect=sqlite3.OperationalError("journal locked")):
                 state._apply_worker([record], 100, {image_id: self._mask(16, 16)})
 
-            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.job.state, "complete")
             stat = source.stat()
             live_record = state.image_for_id(image_id)
             self.assertEqual(live_record.asset_fingerprint(), (stat.st_mtime_ns, stat.st_size))

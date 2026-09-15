@@ -1774,12 +1774,12 @@ class CatalogMixin:
                               output_fingerprint=output_fingerprint, output_destination=output_destination,
                               state="pending", allow_copy_action=allow_copy_action, no_effect=no_effect,
                               output_format=output_format, keep_metadata=keep_metadata)
-            self.browser_save_tokens[token] = details
             self.save_journal.update_stage(token, output_path or rendered_path, output_fingerprint)
+            self.browser_save_tokens[token] = details
             return token
         if existing is not None:
             raise ClientError("保存確認トークンが重複しています。保存をやり直してください。", "save_state_changed")
-        self.browser_save_tokens[token] = BrowserSaveToken(
+        details = BrowserSaveToken(
             image_id=record.image_id, candidate_revision=revision, source_fingerprint=source_fingerprint,
             catalog_generation=catalog_generation, issued_at=time.monotonic(), rendered_path=rendered_path,
             output_path=output_path, output_fingerprint=output_fingerprint, output_destination=output_destination,
@@ -1789,6 +1789,7 @@ class CatalogMixin:
             source_flip_horizontal=record.source_flip_horizontal, source_flip_vertical=record.source_flip_vertical,
         )
         self.save_journal.update_stage(token, output_path or rendered_path, output_fingerprint)
+        self.browser_save_tokens[token] = details
         return token
 
     @staticmethod

@@ -366,6 +366,23 @@ class SaveRecoveryTests(unittest.TestCase):
             del owner, journal
             gc.collect()
 
+    def test_ack_keeps_receipt_when_journal_is_temporarily_unavailable(self):
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw); journal = SaveJournal(root); store = WorkspaceStore(root)
+            store.commit_save("image", clear_workspace=False, save_receipt=receipt())
+            journal.reserve("token", "image", 1, None, None)
+            journal.finish("token", True, False, False, 3)
+            owner = _AckOwner(journal, store)
+
+            with mock.patch.object(journal, "recover_token", side_effect=sqlite3.OperationalError("journal locked")):
+                self.assertEqual(SavingMixin.acknowledge_browser_save(owner, "token"), {"acknowledged": False})
+
+            self.assertIsNotNone(store.browser_save_receipt("token"))
+            self.assertEqual(SavingMixin.acknowledge_browser_save(owner, "token"), {"acknowledged": True})
+            self.assertIsNone(store.browser_save_receipt("token"))
+            del owner, journal
+            gc.collect()
+
     def test_legacy_cleanup_pending_uses_workspace_receipt_not_note_text(self):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw); db_path = root / "save-journal.sqlite3"
