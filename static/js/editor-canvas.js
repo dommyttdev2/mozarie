@@ -348,6 +348,7 @@ async function reconcileCurrentCandidates(imageId, generation) {
     if (state.currentId !== imageId || !isCurrentGeneration(generation)) return false;
     state.candidates = bundle.candidates;
     state.candidateImages = bundle.candidateImages;
+    invalidateMaskComposition();
     const presence = manualLayerPresence();
     const visibleIds = new Set(bundle.candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id));
     if (state.manualMaskPresent) visibleIds.add("manual:apply");
@@ -369,7 +370,6 @@ async function reconcileCurrentCandidates(imageId, generation) {
       record.candidateRevision = bundle.candidateRevision;
     }
     invalidateCandidateBundles(imageId);
-    markMaskDirty();
     refreshMaskStatus(true); updateCandidateStatus(); requestMosaicPreview(); renderCandidates(); render();
     return true;
   } finally {
@@ -970,7 +970,8 @@ function markDraftDirtyRoi(layer, roi) {
     right: Math.max(previous.right, roi.right), bottom: Math.max(previous.bottom, roi.bottom),
   } : roi);
 }
-function markMaskDirty() { state.maskDirty = true; markDraftDirty(); }
+function invalidateMaskComposition() { state.maskDirty = true; }
+function markMaskDirty() { invalidateMaskComposition(); markDraftDirty(); }
 function flushMaskComposition() { if (state.maskDirty && !state.activeStroke) composeCurrentMask(); }
 
 function hasEffectiveMask() {
@@ -1066,6 +1067,7 @@ function polygonRoi(points) {
 function boundaryDraftBounds(draft) { return draft?.roi || polygonRoi(draft?.points || []); }
 
 function addBoundaryDraft(draft) {
+  if (manualCanvasInputLocked()) return null;
   const item = { id: boundaryDraftId(), ...draft };
   state.boundaryDrafts.push(item);
   state.boundaryActiveId = item.id;
@@ -1106,6 +1108,7 @@ function appendBoundaryBrushPoint(point) {
 }
 
 function beginBoundaryBrushStroke(point) {
+  if (manualCanvasInputLocked()) return;
   state.boundaryBrushStroke = { type: "brush", points: [point], radius: Math.max(1, Number($("#brushSize").value)), roi: null };
   state.boundaryBrushStroke.roi = strokeRoi(state.boundaryBrushStroke.points, state.boundaryBrushStroke.radius);
 }

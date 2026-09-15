@@ -109,7 +109,7 @@ async function commitCandidatePadding() {
   const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
   const previousReviewed = currentRecord()?.reviewed === true;
   const generation = state.imageGeneration;
-  candidate.expandPx = appliedValue; markMaskDirty(); setEditorUnreviewed();
+  candidate.expandPx = appliedValue; invalidateMaskComposition(); setEditorUnreviewed();
   const editorState = historyEditorState(); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
   closeCandidatePadding();
   if (await updateCandidate(candidate, candidate.enabled, previousMaskStatus, candidate.forced, session.original)) {
@@ -134,7 +134,7 @@ async function commitBatchCandidatePadding(session, value) {
     if (state.currentId === imageId && isCurrentGeneration(generation)) {
       await reconcileCurrentCandidates(imageId, generation);
       retainCurrentCandidateBundle(imageId, result.candidateRevision);
-      markMaskDirty(); setEditorUnreviewed(); recordHistoryOperation({ kind: "candidateBatch" }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
+      setEditorUnreviewed(); recordHistoryOperation({ kind: "candidateBatch" }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
     } else await refreshCandidateRecord(imageId, true);
       return result;
     });
@@ -197,6 +197,7 @@ function initCandidatePaddingPopover() {
       });
       return;
     }
+    event.preventDefault(); event.stopPropagation();
     void commitCandidatePadding();
   }, true);
 }
@@ -479,6 +480,7 @@ async function refreshCandidateBitmap(candidate, imageId, revision, generation, 
   const previous = state.candidateImages.get(candidate.id);
   state.candidateImages.set(candidate.id, bitmap);
   if (previous && previous !== bitmap) closeBitmap(previous);
+  invalidateMaskComposition();
   invalidateCandidateBundles(imageId);
   return true;
 }
@@ -913,7 +915,7 @@ function paintStrokePath(points, tool, size, startIndex = 0) {
 }
 
 function fillAt(point, tool = state.tool) {
-  if (!state.currentImage || !isProcessableImage(currentRecord())) return;
+  if (!state.currentImage || !isProcessableImage(currentRecord()) || manualCanvasInputLocked()) return;
   enableManualLayerForTool(tool);
   const width = originalCanvas.width; const height = originalCanvas.height;
   const pixels = originalCtx.getImageData(0, 0, width, height).data;
@@ -983,7 +985,7 @@ function enableManualLayerForTool(tool) {
 }
 
 function beginManualStroke(point) {
-  if (!isProcessableImage(currentRecord())) return;
+  if (!isProcessableImage(currentRecord()) || manualCanvasInputLocked()) return;
   enableManualLayerForTool(state.tool);
   state.activeStroke = { tool: state.tool, size: Number($("#brushSize").value), points: [{ ...point }], paintedPointCount: 1 };
   state.mosaicPending = true;

@@ -572,6 +572,9 @@ function publishWorkspaceFlags(imageId, flags) {
   return true;
 }
 function candidateControlLocked(imageId) { return (state.candidateControlLocks.get(imageId) || 0) > 0; }
+function manualCanvasInputLocked(imageId = state.currentId) {
+  return candidateControlLocked(imageId) || state.candidateBatchPending.has(imageId);
+}
 function queueImageMutation(imageId, send, { lockCandidateControls = false } = {}) {
   if (!imageId) return Promise.resolve(false);
   if (lockCandidateControls) {
