@@ -343,10 +343,19 @@ async function reconcileCurrentCandidates(imageId, generation) {
     if (state.currentId !== imageId || !isCurrentGeneration(generation)) return false;
     state.candidates = bundle.candidates;
     state.candidateImages = bundle.candidateImages;
+    const presence = manualLayerPresence();
+    const visibleIds = new Set(bundle.candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id));
+    if (state.manualMaskPresent) visibleIds.add("manual:apply");
+    if (presence.hasManualExclude) visibleIds.add("manual:exclude");
+    if (presence.hasManualExclusionErase) visibleIds.add("manual:excludeErase");
+    for (const id of [...state.blinkCandidateIds]) if (!visibleIds.has(id)) {
+      state.blinkCandidateIds.delete(id); state.blinkModes.delete(id);
+    }
     for (const role of ["apply", "exclude"]) {
       const ids = bundle.candidates.filter((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id);
       inheritRoleCandidateDisplayMode(role, ids);
     }
+    syncCandidateBlinkTimer();
     const record = state.images.find((image) => image.id === imageId);
     if (record) {
       const visible = bundle.candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id));
@@ -717,6 +726,7 @@ function releaseMosaicPreview() {
   state.mosaicWorkerBusy = false;
   state.mosaicPending = null;
   state.mosaicPreviewRoi = null;
+  state.mosaicPreviewFull = false;
   state.mosaicInFlightSourceId = "";
   state.mosaicInFlightGeneration = 0;
   state.mosaicSourceImage = null;
@@ -824,11 +834,12 @@ function mergeMosaicPreviewRoi(current, next) {
   };
 }
 
-function takeMosaicPreviewRoi() {
-  if (!state.activeStroke) { state.mosaicPreviewRoi = null; return null; }
+function takeMosaicPreviewRequest() {
+  const full = state.mosaicPreviewFull === true;
   const roi = state.mosaicPreviewRoi;
   state.mosaicPreviewRoi = null;
-  return roi;
+  state.mosaicPreviewFull = false;
+  return { full, roi: full ? null : roi };
 }
 
 async function rebuildMosaicPreview() {
@@ -842,8 +853,8 @@ async function rebuildMosaicPreview() {
   // represented by the latest dirty rectangle below, so one current render is
   // sufficient.
   state.mosaicPending = false;
-  const roi = takeMosaicPreviewRoi();
-  if (!roi) flushMaskComposition();
+  const { full, roi } = takeMosaicPreviewRequest();
+  if (full) flushMaskComposition();
   const generation = ++state.mosaicPreviewGeneration;
   state.mosaicInFlightSourceId = sourceId;
   state.mosaicInFlightGeneration = generation;
@@ -866,7 +877,8 @@ async function rebuildMosaicPreview() {
 
 function requestMosaicPreview(roi = null) {
   if (!state.mosaicPreviewEnabled || !state.currentImage) return;
-  state.mosaicPreviewRoi = mergeMosaicPreviewRoi(state.mosaicPreviewRoi, roi);
+  if (roi) state.mosaicPreviewRoi = mergeMosaicPreviewRoi(state.mosaicPreviewRoi, roi);
+  else { state.mosaicPreviewFull = true; state.mosaicPreviewRoi = null; }
   if (state.mosaicWorkerBusy) { state.mosaicPending = true; return; }
   if (state.mosaicPreviewRequested) return;
   state.mosaicPreviewRequested = true;

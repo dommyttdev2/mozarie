@@ -1870,11 +1870,13 @@ class CatalogMixin:
                 )
                 if self.catalog_id is None:
                     self.projectless_manual_drafts[image_id] = committed
+                    self.images[image_id].reviewed = False
                     return
                 try:
                     # The manual row, its normalized removal IDs, exact candidate
                     # revision, and gallery scalar are one SQLite transaction.
                     self.workspace_store.save_manual(image_id, committed, self._decode_workspace_mask)
+                    self.images[image_id].reviewed = False
                 except ValueError as exc:
                     raise ClientError("手描き状態を保存できません。", "workspace_write_failed") from exc
 
