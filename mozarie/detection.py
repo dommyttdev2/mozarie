@@ -1028,6 +1028,14 @@ class DetectionMixin:
             except (MemoryError, OSError) as exc:
                 raise ClientError("境界候補の手・除外マスクを処理できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
             temporary_paths: list[Path] = []
+
+            def discard_pending_masks() -> None:
+                for path in [*temporary_paths, *(item.mask_path for item in created)]:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+
             try:
                 for item, candidate_mask in zip(created, masks):
                     temporary = item.mask_path.with_name(f".mozarie-pending-{item.candidate_id}.tmp")
@@ -1053,12 +1061,10 @@ class DetectionMixin:
                     if not catalog_current:
                         raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。", "catalog_changed")
             except (MemoryError, OSError) as exc:
-                for path in [*temporary_paths, *(item.mask_path for item in created)]:
-                    path.unlink(missing_ok=True)
+                discard_pending_masks()
                 raise ClientError("境界候補のマスクを保存できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
             except Exception:
-                for path in [*temporary_paths, *(item.mask_path for item in created)]:
-                    path.unlink(missing_ok=True)
+                discard_pending_masks()
                 raise
         return {
             "candidates": [item.as_api_dict() for item in created],
