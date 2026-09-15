@@ -25,12 +25,13 @@ import numpy as np
 from .masks import compose_masks, expand_mask
 
 
-# Keep every IN clause comfortably below SQLite's smallest common bind limit.
-_BULK_CHUNK_SIZE = 900
-
-
-def _chunks(values: list[str]) -> list[list[str]]:
-    return [values[index:index + _BULK_CHUNK_SIZE] for index in range(0, len(values), _BULK_CHUNK_SIZE)]
+def _chunks(db: sqlite3.Connection, values: list[str], *, reserved_binds: int = 0) -> list[list[str]]:
+    """Split one IN clause by this connection's actual bind-variable limit."""
+    limit = db.getlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER)
+    available = limit - reserved_binds
+    if available < 1:
+        raise sqlite3.OperationalError("SQLite bind-variable limit is too small")
+    return [values[index:index + available] for index in range(0, len(values), available)]
 
 
 def native_source_identity(root: Path | str) -> str:
@@ -60,6 +61,29 @@ class ProjectSourceNoMatchError(ValueError):
 
 class _ClosingConnection(sqlite3.Connection):
     """sqlite's context manager commits but does not close on Windows."""
+    _retry_cancel: threading.Event | None = None
+
+    def _retry_busy(self, action: Callable[[], Any]) -> Any:
+        while True:
+            try:
+                return action()
+            except sqlite3.OperationalError as exc:
+                if "busy" not in str(exc).lower() and "locked" not in str(exc).lower():
+                    raise
+                if self._retry_cancel is not None and self._retry_cancel.wait(0.05):
+                    raise
+                if self._retry_cancel is None:
+                    time.sleep(0.05)
+
+    def execute(self, sql: str, parameters: Any = (), /) -> sqlite3.Cursor:
+        return self._retry_busy(lambda: super(_ClosingConnection, self).execute(sql, parameters))
+
+    def executemany(self, sql: str, parameters: Any, /) -> sqlite3.Cursor:
+        return self._retry_busy(lambda: super(_ClosingConnection, self).executemany(sql, parameters))
+
+    def executescript(self, sql_script: str, /) -> sqlite3.Cursor:
+        return self._retry_busy(lambda: super(_ClosingConnection, self).executescript(sql_script))
+
     def __exit__(self, *args: Any) -> None:
         try:
             super().__exit__(*args)
@@ -94,6 +118,7 @@ class WorkspaceStore:
     def __init__(self, data_dir: Path) -> None:
         self.path = data_dir / "workspaces.sqlite3"
         self._lock = threading.RLock()
+        self._shutdown_requested = threading.Event()
         data_dir.mkdir(parents=True, exist_ok=True)
         self._cleanup_stale_export_snapshots(data_dir)
         # Inspect an existing database before issuing any write-capable pragma,
@@ -105,7 +130,7 @@ class WorkspaceStore:
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=NORMAL")
             db.execute("PRAGMA foreign_keys=ON")
-            db.execute("PRAGMA busy_timeout=5000")
+            db.execute("PRAGMA busy_timeout=0")
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS catalogs (
@@ -301,12 +326,17 @@ class WorkspaceStore:
             raise WorkspaceOpenError(f"workspace database must be recreated for schema {WorkspaceStore.VERSION}")
 
     def _connect(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self.path, timeout=5, isolation_level=None, factory=_ClosingConnection)
+        db = sqlite3.connect(self.path, timeout=0, isolation_level=None, factory=_ClosingConnection)
+        db._retry_cancel = self._shutdown_requested
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA synchronous=NORMAL")
         db.execute("PRAGMA foreign_keys=ON")
-        db.execute("PRAGMA busy_timeout=5000")
+        db.execute("PRAGMA busy_timeout=0")
         return db
+
+    def shutdown(self) -> None:
+        """Release SQLite lock waiters when the application is stopping."""
+        self._shutdown_requested.set()
 
     @staticmethod
     def _decode_png_mask(raw: bytes | None) -> Image.Image | None:
@@ -417,11 +447,11 @@ class WorkspaceStore:
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                if unique_ids:
-                    placeholders = ",".join("?" for _ in unique_ids)
+                for chunk in _chunks(db, unique_ids, reserved_binds=2):
+                    placeholders = ",".join("?" for _ in chunk)
                     db.execute(
                         f"DELETE FROM images WHERE catalog_id=? AND source_id=? AND image_id IN ({placeholders})",
-                        [catalog_id, source_id, *unique_ids],
+                        [catalog_id, source_id, *chunk],
                     )
                 if delete_source:
                     db.execute("""DELETE FROM project_sources
@@ -639,7 +669,7 @@ class WorkspaceStore:
             return {}
         result: dict[str, dict[str, Any]] = {}
         with self._connect() as db:
-            for chunk in _chunks(image_ids):
+            for chunk in _chunks(db, image_ids):
                 placeholders = ",".join("?" for _ in chunk)
                 rows = db.execute(f"""SELECT images.image_id,images.hidden,images.reviewed,
                     transform.flip_horizontal,transform.flip_vertical,transform.source_flip_horizontal,
@@ -868,14 +898,15 @@ class WorkspaceStore:
                 }
                 used_ids = {}
                 if requested_ids:
-                    placeholders = ",".join("?" for _ in requested_ids)
-                    used_ids = {
-                        str(row["image_id"]): row
-                        for row in db.execute(
-                            f"SELECT image_id,catalog_id,source_id,relative_path FROM images WHERE image_id IN ({placeholders})",
-                            list(requested_ids),
-                        )
-                    }
+                    for chunk in _chunks(db, list(requested_ids)):
+                        placeholders = ",".join("?" for _ in chunk)
+                        used_ids.update({
+                            str(row["image_id"]): row
+                            for row in db.execute(
+                                f"SELECT image_id,catalog_id,source_id,relative_path FROM images WHERE image_id IN ({placeholders})",
+                                chunk,
+                            )
+                        })
                 for record in records:
                     row = existing.get(record.relative_path)
                     if row is None:
@@ -1137,7 +1168,7 @@ class WorkspaceStore:
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             try:
-                for chunk in _chunks(image_ids):
+                for chunk in _chunks(db, image_ids):
                     db.execute(f"DELETE FROM images WHERE image_id IN ({','.join('?' for _ in chunk)})", chunk)
                 db.execute("COMMIT")
             except Exception:
@@ -1450,7 +1481,7 @@ class WorkspaceStore:
         images: dict[str, int] = {}
         candidates: dict[str, list[Any]] = {}
         with self._connect() as db:
-            for chunk in _chunks(image_ids):
+            for chunk in _chunks(db, image_ids):
                 placeholders = ",".join("?" for _ in chunk)
                 for row in db.execute(f"SELECT image_id,candidate_revision FROM images WHERE image_id IN ({placeholders})", chunk):
                     images[str(row["image_id"])] = int(row["candidate_revision"])
@@ -1566,7 +1597,7 @@ class WorkspaceStore:
             return {}
         with self._connect() as db:
             result: dict[str, tuple[bool, int]] = {}
-            for chunk in _chunks(image_ids):
+            for chunk in _chunks(db, image_ids):
                 rows = db.execute(
                     f"SELECT image_id,has_effective_mask,candidate_revision FROM manual_edits WHERE image_id IN ({','.join('?' for _ in chunk)})",
                     chunk,
@@ -1578,7 +1609,7 @@ class WorkspaceStore:
         if not image_ids:
             return
         with self._lock, self._connect() as db:
-            for chunk in _chunks(image_ids):
+            for chunk in _chunks(db, image_ids):
                 db.execute(f"DELETE FROM manual_edits WHERE image_id IN ({','.join('?' for _ in chunk)})", chunk)
 
     @staticmethod

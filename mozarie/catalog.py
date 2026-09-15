@@ -1164,26 +1164,24 @@ class CatalogMixin:
 
     def shutdown(self) -> None:
         """Stop background work before releasing the session import directory."""
+        self.begin_shutdown()
         self.model_downloads.shutdown()
         # Browser-save commits retain this lock from token claim through their
         # durable commit.  Do not discard a claimed copy while one is running.
-        with self.import_lock:
-            self._shutdown_locked()
+        self._shutdown_locked()
 
     def _shutdown_locked(self) -> None:
-        with self.lock:
-            worker = self.worker_thread
-            control = self.job_control
-            self._clear_browser_save_tokens_unchecked()
-            self.browser_save_receipts.clear()
-            if control is not None:
-                control.cancel_requested.set()
-                control.pause_requested.clear()
+        with self.import_lock:
+            with self.lock:
+                worker = self.worker_thread
+                control = self.job_control
+                self._clear_browser_save_tokens_unchecked()
+                self.browser_save_receipts.clear()
+                if control is not None:
+                    control.cancel_requested.set()
+                    control.pause_requested.clear()
         if worker is not None and worker.is_alive():
-            worker.join(timeout=5)
-        if worker is not None and worker.is_alive():
-            LOGGER.warning("Background worker did not stop before shutdown; retaining this process cache.")
-            return
+            worker.join()
         with self.import_lock:
             with self.lock:
                 image_ids = tuple(self.images)

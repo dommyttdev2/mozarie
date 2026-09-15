@@ -100,6 +100,8 @@ def main() -> None:
             except KeyboardInterrupt:
                 pass
             finally:
+                if state_module.STATE is not None:
+                    state_module.STATE.begin_shutdown()
                 http_server.server_close()
                 if state_module.STATE is not None:
                     state_module.STATE.shutdown()
