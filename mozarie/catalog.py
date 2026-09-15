@@ -1117,18 +1117,22 @@ class CatalogMixin:
         if not isinstance(payload, dict) or not isinstance(payload.get("imageIds"), list):
             raise ClientError("削除する画像が正しくありません。", "input_invalid")
         delete_token = payload.get("deleteToken")
-        if not isinstance(delete_token, str) or not delete_token:
+        try:
+            token_is_valid = isinstance(delete_token, str) and str(uuid.UUID(delete_token)) == delete_token
+        except (TypeError, ValueError, AttributeError):
+            token_is_valid = False
+        if not token_is_valid:
             raise ClientError("削除操作の識別子が正しくありません。", "input_invalid")
         requested_ids = list(dict.fromkeys(str(image_id) for image_id in payload["imageIds"] if str(image_id)))
         if not requested_ids:
             raise ClientError("削除する画像がありません。", "image_not_found")
         with self.lock:
-            receipt = self.source_delete_receipts.get(delete_token)
-            if receipt is not None:
-                return {"committed": True, "deleteToken": delete_token, "preparedImageIds": receipt["removedImageIds"], "failed": receipt.get("failed", [])}
-            preparation = self.source_delete_preparations.get(delete_token)
-            if preparation is not None:
-                return dict(preparation["result"])
+            operation = self.workspace_store.source_delete_operation(delete_token)
+            if operation is not None:
+                result = operation.get("result") or {}
+                return {"committed": operation.get("state") != "prepared", "deleteToken": delete_token,
+                        "preparedImageIds": [item["imageId"] for item in operation.get("items", [])],
+                        "failed": result.get("failed", []), "state": operation.get("state")}
             self._assert_catalog_mutable(allow_terminal_cleanup=True)
             records = {image_id: self.images.get(image_id) for image_id in requested_ids}
         prepared: list[str] = []
@@ -1148,9 +1152,13 @@ class CatalogMixin:
                     failures.append({"imageId": image_id, "reason": "source_changed"})
                     continue
             prepared.append(image_id)
-        result = {"committed": False, "deleteToken": delete_token, "preparedImageIds": prepared, "failed": failures}
-        with self.lock:
-            self.source_delete_preparations[delete_token] = {"imageIds": set(prepared), "result": dict(result)}
+        items = [{"imageId": image_id, "sourceKind": records[image_id].source_kind,
+                  "relativePath": records[image_id].relative_path, "sourcePath": str(records[image_id].path),
+                  "mtimeNs": records[image_id].mtime_ns, "sizeBytes": records[image_id].size_bytes}
+                 for image_id in prepared]
+        self.workspace_store.prepare_source_delete(delete_token, self.catalog_id, self.workspace_id,
+                                                   self.catalog_generation, requested_ids, items)
+        result = {"committed": False, "deleteToken": delete_token, "preparedImageIds": prepared, "failed": failures, "state": "prepared"}
         return result
 
     def delete_images_with_sources(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1166,92 +1174,145 @@ class CatalogMixin:
         if not isinstance(payload, dict) or not isinstance(payload.get("imageIds"), list):
             raise ClientError("削除する画像が正しくありません。", "input_invalid")
         delete_token = payload.get("deleteToken")
-        if not isinstance(delete_token, str) or not delete_token:
+        try:
+            token_is_valid = isinstance(delete_token, str) and str(uuid.UUID(delete_token)) == delete_token
+        except (TypeError, ValueError, AttributeError):
+            token_is_valid = False
+        if not token_is_valid:
             raise ClientError("削除操作の識別子が正しくありません。", "input_invalid")
         requested_ids = list(dict.fromkeys(str(image_id) for image_id in payload["imageIds"] if str(image_id)))
         if not requested_ids:
             raise ClientError("削除する画像がありません。", "image_not_found")
         browser_deleted = {str(image_id) for image_id in payload.get("browserDeletedImageIds", [])}
+        started_at = time.monotonic()
+        LOGGER.info("元画像を完全削除: 開始 対象=%d", len(requested_ids))
 
         with self.import_lock:
             with self.lock:
                 receipt = self.source_delete_receipts.get(delete_token)
                 if receipt is not None:
                     return dict(receipt)
-                preparation = self.source_delete_preparations.get(delete_token)
-                if preparation is None:
+                operation = self.workspace_store.source_delete_operation(delete_token)
+                if operation is None:
                     raise ClientError("削除確認の有効期限が切れました。もう一度削除を実行してください。", "source_delete_not_prepared")
+                if operation.get("state") != "prepared":
+                    return dict(operation.get("result") or {})
                 self._assert_catalog_mutable(allow_terminal_cleanup=True)
-                prepared_ids = preparation["imageIds"]
+                if (operation.get("catalogId"), operation.get("workspaceId")) != (self.catalog_id, self.workspace_id):
+                    raise ClientError("画像一覧が変更されたため、操作をやり直してください。", "stale_catalog")
+                if operation.get("catalogGeneration") != self.catalog_generation:
+                    LOGGER.info("元画像削除を再開: 保存時世代=%s 現在世代=%s", operation.get("catalogGeneration"), self.catalog_generation)
+                prepared_ids = {str(item["imageId"]) for item in operation.get("items", [])}
                 records = {image_id: self.images.get(image_id) for image_id in requested_ids if image_id in prepared_ids}
 
-            removable: list[ImageRecord] = []
-            failures: list[dict[str, str]] = []
-            for image_id in requested_ids:
-                record = records.get(image_id)
-                if record is None:
-                    failures.append({"imageId": image_id, "reason": "image_not_found"})
-                    continue
-                if record.source_kind == "filesystem":
+            locks = [(record.image_id, self.image_io_lock(record.image_id)) for record in records.values() if record is not None]
+            with ExitStack() as stack:
+                for _image_id, image_lock in sorted(locks):
+                    stack.enter_context(image_lock)
+                with self.lock:
+                    if any(self.images.get(image_id) is not record for image_id, record in records.items()):
+                        raise ClientError("画像一覧が変更されたため、操作をやり直してください。", "stale_catalog")
+                return self._commit_prepared_source_delete(delete_token, requested_ids, browser_deleted, records, started_at)
+
+    def _commit_prepared_source_delete(self, delete_token: str, requested_ids: list[str], browser_deleted: set[str],
+                                        records: dict[str, ImageRecord | None], started_at: float) -> dict[str, Any]:
+        removable: list[ImageRecord] = []
+        failures: list[dict[str, str]] = []
+        for image_id in requested_ids:
+            record = records.get(image_id)
+            if record is None:
+                failures.append({"imageId": image_id, "reason": "image_not_found"}); continue
+            if record.source_kind == "filesystem":
+                try: stat = record.path.stat()
+                except OSError:
+                    failures.append({"imageId": image_id, "reason": "source_unavailable"}); continue
+                if (stat.st_mtime_ns, stat.st_size) != (record.mtime_ns, record.size_bytes):
+                    failures.append({"imageId": image_id, "reason": "source_changed"}); continue
+            elif image_id not in browser_deleted:
+                failures.append({"imageId": image_id, "reason": "browser_source_not_deleted"}); continue
+            removable.append(record)
+        renamed: list[tuple[ImageRecord, Path]] = []; confirmed: list[ImageRecord] = []
+        for record in removable:
+            if record.source_kind != "filesystem": confirmed.append(record); continue
+            quarantine = record.path.with_name(f".{record.path.name}.mozarie-delete-{uuid.uuid4().hex}")
+            try: os.replace(record.path, quarantine)
+            except OSError:
+                failures.append({"imageId": record.image_id, "reason": "source_delete_failed"}); continue
+            renamed.append((record, quarantine)); confirmed.append(record)
+        if confirmed:
+            try:
+                durable_result = {"removedImageIds": [record.image_id for record in confirmed], "failed": failures,
+                                  "state": "cleanup_pending", "quarantinePaths": [str(path) for _record, path in renamed]}
+                removed = self.remove_images_from_catalog([record.image_id for record in confirmed], source_delete_token=delete_token, source_delete_result=durable_result)
+            except Exception:
+                for record, quarantine in reversed(renamed):
                     try:
-                        stat = record.path.stat()
-                    except OSError:
-                        failures.append({"imageId": image_id, "reason": "source_unavailable"})
-                        continue
-                    if (stat.st_mtime_ns, stat.st_size) != (record.mtime_ns, record.size_bytes):
-                        failures.append({"imageId": image_id, "reason": "source_changed"})
-                        continue
-                elif image_id not in browser_deleted:
-                    failures.append({"imageId": image_id, "reason": "browser_source_not_deleted"})
-                    continue
-                removable.append(record)
+                        if quarantine.exists(): os.replace(quarantine, record.path)
+                    except OSError: LOGGER.exception("元画像の削除復元に失敗: %s", record.relative_path)
+                raise
+        else:
+            removed = {"images": self.list_images(), "removedImageIds": [], "catalogGeneration": self.catalog_generation}
+        removed_ids = set(removed["removedImageIds"]); cleanup_paths: list[str] = []
+        for record, quarantine in renamed:
+            if record.image_id not in removed_ids: continue
+            try: quarantine.unlink()
+            except OSError:
+                LOGGER.exception("元画像の完全削除に失敗: %s", record.relative_path)
+                failures.append({"imageId": record.image_id, "reason": "source_delete_failed"}); cleanup_paths.append(str(quarantine))
+        result = {**removed, "failed": failures, "state": "cleanup_pending" if cleanup_paths else "committed", "quarantinePaths": cleanup_paths}
+        names = {image_id: record.relative_path for image_id, record in records.items() if record is not None}
+        for failure in result["failed"]:
+            if failure.get("imageId") in names: failure["relativePath"] = names[failure["imageId"]]
+        with self.lock: self.source_delete_receipts[delete_token] = dict(result)
+        self.workspace_store.update_source_delete_operation(delete_token, result["state"], {key: value for key, value in result.items() if key != "images"})
+        failure_text = ", ".join(f"{failure.get('relativePath', failure['imageId'])}:{failure['reason']}" for failure in failures)
+        LOGGER.info("元画像を完全削除: 完了 対象=%d 成功=%d 失敗=%d 所要=%.2fs%s", len(requested_ids), len(removed["removedImageIds"]), len(failures), time.monotonic() - started_at, f" 詳細={failure_text}" if failure_text else "")
+        return result
 
-            renamed: list[tuple[ImageRecord, Path]] = []
-            confirmed: list[ImageRecord] = []
-            for record in removable:
-                if record.source_kind != "filesystem":
-                    confirmed.append(record)
-                    continue
-                quarantine = record.path.with_name(f".{record.path.name}.mozarie-delete-{uuid.uuid4().hex}")
+    def source_delete_status(self, token: str) -> dict[str, Any]:
+        try:
+            valid = str(uuid.UUID(token)) == token
+        except (TypeError, ValueError, AttributeError):
+            valid = False
+        if not valid:
+            raise ClientError("削除操作の識別子が正しくありません。", "input_invalid")
+        operation = self.workspace_store.source_delete_operation(token)
+        if operation is None:
+            raise ClientError("削除操作が見つかりません。", "source_delete_not_prepared")
+        result = operation.get("result") or {}
+        return {"deleteToken": token, "state": operation.get("state"), "preparedImageIds": [item["imageId"] for item in operation.get("items", [])], **result}
+
+    def cancel_source_delete(self, token: str) -> dict[str, Any]:
+        operation = self.source_delete_status(token)
+        if operation["state"] == "prepared":
+            result = {"removedImageIds": [], "failed": [], "state": "cancelled"}
+            self.workspace_store.update_source_delete_operation(token, "cancelled", result)
+            return {"deleteToken": token, **result}
+        return operation
+
+    def retry_source_delete_cleanups(self) -> None:
+        """Finish source unlinks left after a committed workspace deletion."""
+        for token, raw_paths in self.workspace_store.pending_source_delete_cleanups():
+            remaining: list[str] = []
+            for raw_path in raw_paths:
                 try:
-                    os.replace(record.path, quarantine)
+                    Path(raw_path).unlink(missing_ok=True)
                 except OSError:
-                    failures.append({"imageId": record.image_id, "reason": "source_delete_failed"})
-                    continue
-                renamed.append((record, quarantine))
-                confirmed.append(record)
-
-            if confirmed:
-                try:
-                    removed = self.remove_images_from_catalog([record.image_id for record in confirmed])
-                except Exception:
-                    for record, quarantine in reversed(renamed):
-                        try:
-                            if quarantine.exists():
-                                os.replace(quarantine, record.path)
-                        except OSError:
-                            LOGGER.exception("元画像の削除復元に失敗: %s", record.relative_path)
-                    raise
+                    remaining.append(raw_path)
+            operation = self.workspace_store.source_delete_operation(token)
+            if operation is None:
+                continue
+            result = dict(operation.get("result") or {})
+            result["quarantinePaths"] = remaining
+            result["state"] = "cleanup_pending" if remaining else "committed"
+            self.workspace_store.update_source_delete_operation(token, result["state"], result)
+            if remaining:
+                LOGGER.warning("元画像削除の後処理を保留: %d件", len(remaining))
             else:
-                removed = {"images": self.list_images(), "removedImageIds": [], "catalogGeneration": self.catalog_generation}
+                LOGGER.info("元画像削除の後処理を完了")
 
-            removed_ids = set(removed["removedImageIds"])
-            for record, quarantine in renamed:
-                if record.image_id not in removed_ids:
-                    continue
-                try:
-                    quarantine.unlink()
-                except OSError:
-                    LOGGER.exception("元画像の完全削除に失敗: %s", record.relative_path)
-                    failures.append({"imageId": record.image_id, "reason": "source_delete_failed"})
-            result = {**removed, "failed": failures}
-            with self.lock:
-                self.source_delete_receipts[delete_token] = dict(result)
-                self.source_delete_preparations.pop(delete_token, None)
-            LOGGER.info("元画像を削除: 成功=%d 失敗=%d", len(removed["removedImageIds"]), len(failures))
-            return result
-
-    def remove_images_from_catalog(self, image_ids: list[str]) -> dict[str, Any]:
+    def remove_images_from_catalog(self, image_ids: list[str], *, source_delete_token: str | None = None,
+                                   source_delete_result: dict[str, Any] | None = None) -> dict[str, Any]:
         """Remove saved images from the working catalog without deleting source files."""
         if not isinstance(image_ids, list):
             raise ClientError("画像IDの一覧が正しくありません。", "input_invalid")
@@ -1276,7 +1337,10 @@ class CatalogMixin:
                     # The durable delete is the transaction boundary. Do it
                     # before publishing the in-memory removal so a database
                     # failure leaves both views intact.
-                    self.workspace_store.delete_images(removed_ids)
+                    if source_delete_token is None:
+                        self.workspace_store.delete_images(removed_ids)
+                    else:
+                        self.workspace_store.commit_source_delete(source_delete_token, removed_ids, source_delete_result or {})
                     for record in records:
                         self.images.pop(record.image_id, None)
                         self.candidates.pop(record.image_id, None)

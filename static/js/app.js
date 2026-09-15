@@ -472,6 +472,7 @@ async function openProject(project, resume = false) {
         $("#projectDialog").close(); focusElement($("#projectButton"));
       }
       await showSourceMismatches();
+      if (typeof resumePendingSourceDeletes === "function") await resumePendingSourceDeletes();
     }, { allowNested: true });
   } catch (error) { showUserError(error); }
   finally { endProjectOperation(); }
@@ -1417,6 +1418,7 @@ async function initialise() {
     applyProjectSnapshot(data);
     state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(data.sources) : [];
     if (typeof restoreBrowserProjectSourcesForCurrentCatalog === "function") void restoreBrowserProjectSourcesForCurrentCatalog().catch(() => {});
+    if (typeof resumePendingSourceDeletes === "function") void resumePendingSourceDeletes().catch(() => {});
     if (data.images.length) {
       setStatusKey("status.imagesLoaded", { count: state.images.length });
     }

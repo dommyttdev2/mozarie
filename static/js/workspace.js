@@ -32,7 +32,7 @@ function projectSourceId() { return crypto.randomUUID(); }
 async function directoryCatalogStore() {
   if (!window.indexedDB) return null;
   return new Promise((resolve) => {
-    const request = indexedDB.open(DIRECTORY_DB, 3);
+    const request = indexedDB.open(DIRECTORY_DB, 4);
     request.onupgradeneeded = () => {
       const names = request.result.objectStoreNames;
       if (!names?.contains?.("directories")) request.result.createObjectStore("directories", { keyPath: "catalogId" });
@@ -40,10 +40,38 @@ async function directoryCatalogStore() {
         ? request.transaction.objectStore("projectSources")
         : request.result.createObjectStore("projectSources", { keyPath: "key" });
       if (!sources.indexNames.contains("projectId")) sources.createIndex("projectId", "projectId", { unique: false });
+      if (!names?.contains?.("sourceDeletes")) request.result.createObjectStore("sourceDeletes", { keyPath: "deleteToken" });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => resolve(null);
   });
+}
+
+async function rememberPendingSourceDelete(payload) {
+  const db = await directoryCatalogStore(); if (!db) return;
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction("sourceDeletes", "readwrite");
+      transaction.objectStore("sourceDeletes").put({ ...payload, savedAt: Date.now() });
+      transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); transaction.onabort = () => reject(transaction.error);
+    });
+  } finally { db.close(); }
+}
+
+async function forgetPendingSourceDelete(deleteToken) {
+  const db = await directoryCatalogStore(); if (!db || !deleteToken) return;
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction("sourceDeletes", "readwrite"); transaction.objectStore("sourceDeletes").delete(deleteToken);
+      transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); transaction.onabort = () => reject(transaction.error);
+    });
+  } finally { db.close(); }
+}
+
+async function pendingSourceDeletes() {
+  const db = await directoryCatalogStore(); if (!db) return [];
+  try { return await new Promise((resolve) => { const request = db.transaction("sourceDeletes").objectStore("sourceDeletes").getAll(); request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]); }); }
+  finally { db.close(); }
 }
 
 function projectSourceRows(db, projectId) {

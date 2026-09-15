@@ -155,7 +155,6 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         # receipts for this process so a browser can repeat the same request
         # after its response was lost without deleting a later catalogue item.
         self.source_delete_receipts: dict[str, dict[str, Any]] = {}
-        self.source_delete_preparations: dict[str, dict[str, Any]] = {}
         self._pending_browser_save_cleanup: list[tuple[Path, tuple[int, int] | None]] = []
         self.output_destination_lock = threading.Lock()
         # Windows native dialogs are process-modal. Keep folder and model
@@ -181,6 +180,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         # re-entrant lock prevents their peak allocations from overlapping.
         self.hand_segmentation_lock = self.sam_lock
         self.inference_lock = InferenceGate()
+        self.retry_source_delete_cleanups()
         self._cleanup_stale_sessions()
 
     def begin_shutdown(self) -> None:

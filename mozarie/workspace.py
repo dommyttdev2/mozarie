@@ -1213,6 +1213,92 @@ class WorkspaceStore:
                 db.execute("ROLLBACK")
                 raise
 
+    @staticmethod
+    def _source_delete_operations_db(db: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+        row = db.execute("SELECT value FROM meta WHERE key='source_delete_operations'").fetchone()
+        if row is None:
+            return {}
+        try:
+            operations = json.loads(str(row["value"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("source delete operations are invalid") from exc
+        if not isinstance(operations, dict):
+            raise ValueError("source delete operations are invalid")
+        return {str(token): value for token, value in operations.items() if isinstance(value, dict)}
+
+    @staticmethod
+    def _write_source_delete_operations_db(db: sqlite3.Connection, operations: dict[str, dict[str, Any]]) -> None:
+        db.execute("""INSERT INTO meta(key,value) VALUES('source_delete_operations',?)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value""", (json.dumps(operations, ensure_ascii=False, separators=(",", ":")),))
+
+    def prepare_source_delete(self, token: str, catalog_id: str | None, workspace_id: str | None,
+                              catalog_generation: int, requested_image_ids: list[str], items: list[dict[str, Any]]) -> dict[str, Any]:
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                operations = self._source_delete_operations_db(db)
+                existing = operations.get(token)
+                if existing is not None:
+                    db.execute("COMMIT")
+                    return existing
+                operation = {"state": "prepared", "catalogId": catalog_id, "workspaceId": workspace_id,
+                             "catalogGeneration": catalog_generation, "requestedImageIds": requested_image_ids, "items": items, "result": None,
+                             "createdAt": time.time_ns(), "updatedAt": time.time_ns()}
+                operations[token] = operation
+                self._write_source_delete_operations_db(db, operations)
+                db.execute("COMMIT")
+                return operation
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def source_delete_operation(self, token: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as db:
+            operation = self._source_delete_operations_db(db).get(token)
+            return None if operation is None else dict(operation)
+
+    def commit_source_delete(self, token: str, image_ids: list[str], result: dict[str, Any]) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                operations = self._source_delete_operations_db(db)
+                operation = operations.get(token)
+                if operation is None:
+                    raise ValueError("source delete operation is missing")
+                for chunk in _chunks(image_ids):
+                    db.execute(f"DELETE FROM images WHERE image_id IN ({','.join('?' for _ in chunk)})", chunk)
+                operation["state"] = str(result.get("state", "committed"))
+                operation["result"] = result
+                operation["updatedAt"] = time.time_ns()
+                self._write_source_delete_operations_db(db, operations)
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def update_source_delete_operation(self, token: str, state: str, result: dict[str, Any]) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                operations = self._source_delete_operations_db(db)
+                operation = operations.get(token)
+                if operation is None:
+                    raise ValueError("source delete operation is missing")
+                operation["state"] = state
+                operation["result"] = result
+                operation["updatedAt"] = time.time_ns()
+                self._write_source_delete_operations_db(db, operations)
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
+
+    def pending_source_delete_cleanups(self) -> list[tuple[str, list[str]]]:
+        with self._lock, self._connect() as db:
+            operations = self._source_delete_operations_db(db)
+            return [(token, [str(path) for path in (operation.get("result") or {}).get("quarantinePaths", [])])
+                    for token, operation in operations.items() if operation.get("state") == "cleanup_pending"]
+
     def clear_image_workspaces(self, revisions: dict[str, int], *, history_group: str | None = None) -> None:
         """Clear a selection in one durable transaction and one undo group."""
         if not revisions:
