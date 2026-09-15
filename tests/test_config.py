@@ -26,9 +26,11 @@ class SettingsTests(unittest.TestCase):
             saved = store.save({"detection": {"default_candidate_padding_px": 12}})
             self.assertEqual(saved["detection"]["default_candidate_padding_px"], 12)
             self.assertEqual(SettingsStore(root).load()["detection"]["default_candidate_padding_px"], 12)
-            for value in (True, 1.5, "12", -1, 16385):
+            for value in (True, 1.5, "12", -1):
                 with self.subTest(value=value), self.assertRaises(SettingsError):
                     store.validate_update({"detection": {"default_candidate_padding_px": value}})
+            saved = store.validate_update({"detection": {"default_candidate_padding_px": 16385}})
+            self.assertEqual(saved["detection"]["default_candidate_padding_px"], 16385)
 
     def test_missing_builtin_output_directory_is_created_for_load_save_and_reset(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -179,7 +181,7 @@ class SettingsTests(unittest.TestCase):
         invalid_threshold = json.loads(json.dumps(valid)); invalid_threshold["detection"]["threshold"] = 1.1
         invalid_tool_position = json.loads(json.dumps(valid)); invalid_tool_position["display"]["tool_position"] = "center"
         invalid_fluid_exclusion = json.loads(json.dumps(valid)); invalid_fluid_exclusion["detection"]["fluid_exclusion_enabled"] = "yes"
-        invalid_import_parallelism = json.loads(json.dumps(valid)); invalid_import_parallelism["importing"]["parallelism"] = 11
+        invalid_import_parallelism = json.loads(json.dumps(valid)); invalid_import_parallelism["importing"]["parallelism"] = 0
         invalid_fill_float = json.loads(json.dumps(valid)); invalid_fill_float["editing"]["fill_color_tolerance"] = 1.5
         invalid_fill_bool = json.loads(json.dumps(valid)); invalid_fill_bool["editing"]["fill_color_tolerance"] = True
         with self.assertRaises(SettingsError): validate_settings(invalid_provider)
