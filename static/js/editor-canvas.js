@@ -455,7 +455,7 @@ async function decodeDraftImages(draft) {
   return results.map((result) => result.value);
 }
 
-async function saveDraft() {
+async function saveDraft(historyIndexOverride = null) {
   if (!state.currentId || !state.currentImage || !state.draftDirty) return;
   const imageId = state.currentId;
   const dirtyLayers = new Set(state.draftLayerDirty);
@@ -468,7 +468,7 @@ async function saveDraft() {
     manualMaskPresent: state.manualMaskPresent, manualExclusionForced: state.manualExclusionForced,
     candidateRevision: Number(currentRecord()?.candidateRevision || 0), removedCandidateIds: [...state.removedCandidateIds],
     history: keepLocalHistory ? state.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined, editorState: stroke.editorState ? structuredClone(stroke.editorState) : undefined })) : [],
-    historyIndex: keepLocalHistory ? state.historyIndex : 0,
+    historyIndex: keepLocalHistory ? (historyIndexOverride ?? state.historyIndex) : 0,
     historyRemovedCandidateIds: keepLocalHistory ? [...(state.historyRemovedCandidateIds || [])] : [],
     historyCandidateIds: keepLocalHistory ? [...(state.historyCandidateIds || [])] : [],
     historyEditorState: keepLocalHistory && state.historyEditorState ? structuredClone(state.historyEditorState) : null,

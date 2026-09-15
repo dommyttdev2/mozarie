@@ -1230,9 +1230,11 @@ function bindEvents() {
     if (manualCanvasInputLocked()) return;
     if (state.projectReadOnly || currentRecord()?.sourceDimensionsChanged) return;
     if (catalogStagingEditsActive() && ["boundary", "polygon", "boundary_brush"].includes(state.tool)) return;
+    const rawPoint = pointFromEvent(event);
+    if (rawPoint.x < 0 || rawPoint.x >= state.currentImage.width || rawPoint.y < 0 || rawPoint.y >= state.currentImage.height) return;
     canvas.setPointerCapture(event.pointerId);
     state.gestureDisplaySide = compareEventSide(event);
-    const rawPoint = pointFromEvent(event); const point = clampPoint(rawPoint);
+    const point = clampPoint(rawPoint);
     state.drawing = true; state.pointer = point; state.hover = rawPoint; state.hoverDisplaySide = state.gestureDisplaySide;
     if (["boundary", "polygon", "boundary_brush"].includes(state.tool)) state.boundaryDisplaySide = state.gestureDisplaySide;
     if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
@@ -1258,7 +1260,7 @@ function bindEvents() {
     }
     if (state.tool === "boundary_brush") { beginBoundaryBrushStroke(point); render(); return; }
     if (["bucket", "exclude_bucket"].includes(state.tool)) { state.drawing = false; fillAt(point); return; }
-    beginManualStroke(rawPoint); render();
+    beginManualStroke(point); render();
   });
   const processPointerMove = (event, rect) => {
     if (isBusy() || state.importing) return;

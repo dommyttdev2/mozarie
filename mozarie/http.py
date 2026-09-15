@@ -111,6 +111,14 @@ _DELETE_OPERATION_LABELS = {
     "/api/project/": "プロジェクト削除",
 }
 
+_PER_IMAGE_OPERATION_ROUTES = {
+    "/api/import/file",
+    "/api/save/reserve",
+    "/api/save/render",
+    "/api/save/commit",
+    "/api/save/ack",
+}
+
 
 def _operation_log_spec(method: str, path: str) -> tuple[str, str] | None:
     """Return a user-facing operation name and an ID-free route for CMD logs."""
@@ -157,6 +165,11 @@ def _log_operation_started(operation: tuple[str, str] | None, path: str, payload
     if operation is None:
         return None
     label, route = operation
+    if route in _PER_IMAGE_OPERATION_ROUTES:
+        # A browser import/save session already logs its start and completion.
+        # Per-image successes make the CMD output noisy without adding a useful
+        # operation-level signal; failures remain warnings below.
+        return time.monotonic()
     LOGGER.info("操作開始: %s [%s]%s", label, route, _operation_log_details(path, payload))
     return time.monotonic()
 
@@ -165,6 +178,8 @@ def _log_operation_finished(operation: tuple[str, str] | None, started_at: float
     if operation is None or started_at is None:
         return
     label, route = operation
+    if route in _PER_IMAGE_OPERATION_ROUTES:
+        return
     LOGGER.info("操作完了: %s [%s] status=200 所要=%.2f秒", label, route, time.monotonic() - started_at)
 
 

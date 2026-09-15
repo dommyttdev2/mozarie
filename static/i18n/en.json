@@ -358,6 +358,7 @@
   "settings.browseOutputDirectory": "Browse",
   "settings.browseModel": "Browse",
   "settings.modelPathPlaceholder": "Specify a path",
+  "settings.absolutePathRequired": "Enter an absolute path for {field}.",
   "modelDownload.title": "Download model",
   "a11y.separator": ", ",
   "modelDownload.prepareTitle": "Prepare model",

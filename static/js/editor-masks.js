@@ -1055,7 +1055,7 @@ function recordHistoryOperation(operation) {
   updateHistoryButtons();
 }
 
-function rebuildManualMaskFromHistory() {
+function rebuildManualMaskFromHistory(historyIndex = state.historyIndex) {
   if (hasDurableHistory()) return;
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
@@ -1064,7 +1064,7 @@ function rebuildManualMaskFromHistory() {
   applyHistoryEditorState(state.historyEditorState);
   state.removedCandidateIds = new Set(state.historyRemovedCandidateIds || []);
   for (const candidate of state.candidates) if (!(state.historyCandidateIds || new Set()).has(candidate.id)) state.removedCandidateIds.add(candidate.id);
-  for (const stroke of state.history.slice(0, state.historyIndex)) { replayManualStroke(stroke); applyHistoryEditorState(stroke.editorState); }
+  for (const stroke of state.history.slice(0, historyIndex)) { replayManualStroke(stroke); applyHistoryEditorState(stroke.editorState); }
   refreshManualLayerPresence("add", "exclusion", "exclusionErase");
   markMaskDirty(); markDraftDirty("add", "exclusion", "exclusionErase");
 }
@@ -1138,17 +1138,18 @@ function localTransformForHistoryIndex(index, previousIndex) {
   return { flipH, flipV };
 }
 
-async function syncLocalTransformFromHistory(imageId, generation, previousIndex) {
-  const record = currentRecord(); const transform = localTransformForHistoryIndex(state.historyIndex, previousIndex);
-  if (!record || !transform || record.id !== imageId || (record.flipH === transform.flipH && record.flipV === transform.flipV)) return;
+async function syncLocalTransformFromHistory(imageId, generation, previousIndex, historyIndex) {
+  const record = currentRecord(); const transform = localTransformForHistoryIndex(historyIndex, previousIndex);
+  if (!record || !transform || record.id !== imageId || (record.flipH === transform.flipH && record.flipV === transform.flipV)) return true;
   state.transformPending = true; updateActionButtons();
   try {
     const result = await api(`/api/images/${encodeURIComponent(imageId)}/transform`, { method: "POST", body: JSON.stringify(transform) });
-    if (state.currentId !== imageId || !isCurrentGeneration(generation) || !result.image || result.image.id !== imageId) return;
+    if (state.currentId !== imageId || !isCurrentGeneration(generation) || !result.image || result.image.id !== imageId) return false;
     const recordIndex = state.images.findIndex((image) => image.id === imageId);
     if (recordIndex >= 0) Object.assign(state.images[recordIndex], result.image);
     renderCatalogViews(); render();
-  } catch (error) { showUserError(error); }
+    return true;
+  }
   finally { state.transformPending = false; updateActionButtons(); }
 }
 
@@ -1173,10 +1174,21 @@ async function syncProjectlessCandidateHistory(imageId, previous, generation) {
   } finally {
     if (refreshedBitmap && state.currentId === imageId && isCurrentGeneration(generation)) refreshCurrentCandidateComposition();
   }
-  return refreshedBitmap;
+  return true;
 }
 
-function restoreSnapshot(index) {
+async function resyncProjectlessHistory(imageId, generation) {
+  state.drafts.delete(imageId); state.maskStatus.delete(imageId); releaseCandidateBundles(imageId);
+  const snapshot = await api("/api/images");
+  const replaced = reconcileCatalogSnapshot(snapshot, state.project?.id || null, state.serverCatalogGeneration);
+  state.images = snapshot.images || state.images; loadReviewedPaths(); applyProjectSnapshot(snapshot); renderCatalogViews();
+  if (!replaced && state.currentId === imageId && isCurrentGeneration(generation)) {
+    await selectImage(imageId, true, { saveCurrentDraft: false });
+    state.images = snapshot.images || state.images; loadReviewedPaths(); applyProjectSnapshot(snapshot); renderCatalogViews();
+  }
+}
+
+async function restoreSnapshot(index) {
   if (catalogStagingEditsActive()) return;
   if (hasDurableHistory()) { void restoreProjectHistory(index < state.historyIndex ? "undo" : "redo"); return; }
   if (!currentRecord() || isBusy() || state.importing || isGestureActive() || currentImageActionPending() || index < 0 || index > state.history.length) return;
@@ -1184,21 +1196,36 @@ function restoreSnapshot(index) {
   const imageId = state.currentId;
   const generation = state.imageGeneration;
   const previousEditorState = historyEditorState();
-  const restoreToken = ++state.historyRestoreToken;
   const previousHistoryIndex = state.historyIndex;
-  state.historyIndex = index;
-  rebuildManualMaskFromHistory();
-  scheduleManualWorkspaceSave();
+  state.historyRestoreBusy = true;
+  rebuildManualMaskFromHistory(index);
   const restoredEditorState = historyEditorState();
-  if (previousEditorState.reviewed !== restoredEditorState.reviewed) void saveWorkspaceFlagNow(currentRecord(), "reviewed", restoredEditorState.reviewed, undefined, true);
-  if (previousEditorState.hidden !== restoredEditorState.hidden) void saveWorkspaceFlagNow(currentRecord(), "hidden", restoredEditorState.hidden, undefined, true);
-  void syncLocalTransformFromHistory(imageId, generation, previousHistoryIndex);
-  void syncProjectlessCandidateHistory(imageId, previousEditorState, generation).catch((error) => showUserError(error));
   updateHistoryButtons(); renderCandidates(); render();
-  requestAnimationFrame(() => {
-    if (restoreToken !== state.historyRestoreToken || state.currentId !== imageId || !isCurrentGeneration(generation) || currentImageActionPending()) return;
-    updateCandidateStatus(); refreshMaskStatus(true); refreshReviewViews(); requestMosaicPreview();
-  });
+  try {
+    await queueImageMutation(imageId, async () => {
+      const record = currentRecord();
+      if (!record || record.id !== imageId || !isCurrentGeneration(generation)) throw codedError("catalog_changed");
+      if (previousEditorState.reviewed !== restoredEditorState.reviewed) {
+        if (!await saveWorkspaceFlagNow(record, "reviewed", restoredEditorState.reviewed, undefined, true)) throw codedError("workspace_write_failed");
+      }
+      if (previousEditorState.hidden !== restoredEditorState.hidden) {
+        if (!await saveWorkspaceFlagNow(record, "hidden", restoredEditorState.hidden, undefined, true)) throw codedError("workspace_write_failed");
+      }
+      if (!await syncLocalTransformFromHistory(imageId, generation, previousHistoryIndex, index)) throw codedError("catalog_changed");
+      if (!await syncProjectlessCandidateHistory(imageId, previousEditorState, generation)) throw codedError("catalog_changed");
+      await saveDraft(index);
+      await flushWorkspaceDraft(imageId);
+      state.historyIndex = index;
+      updateHistoryButtons(); renderCandidates(); render();
+      updateCandidateStatus(); refreshMaskStatus(true); refreshReviewViews(); requestMosaicPreview();
+    }, { lockCandidateControls: true });
+  } catch (error) {
+    try { await resyncProjectlessHistory(imageId, generation); }
+    catch { state.historyIndex = previousHistoryIndex; rebuildManualMaskFromHistory(); renderCandidates(); render(); }
+    showUserError(error);
+  } finally {
+    state.historyRestoreBusy = false; updateHistoryButtons(); updateActionButtons();
+  }
 }
 
 function buildCombinedMask() {

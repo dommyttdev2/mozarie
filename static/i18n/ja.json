@@ -350,6 +350,7 @@
   "settings.browseOutputDirectory": "参照",
   "settings.browseModel": "参照",
   "settings.modelPathPlaceholder": "パスを指定してください",
+  "settings.absolutePathRequired": "{field}には絶対パスを指定してください。",
   "modelDownload.title": "モデルをダウンロード",
   "a11y.separator": "、",
   "modelDownload.prepareTitle": "モデルを準備",

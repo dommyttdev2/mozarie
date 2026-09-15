@@ -330,6 +330,32 @@ function settingsPayload() {
   };
 }
 
+function isAbsoluteSettingsPath(value) {
+  const path = String(value || "").trim();
+  return !path || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+|\/)/.test(path);
+}
+
+function validateAbsoluteSettingsPaths() {
+  const fields = [
+    ["settingsDefaultOutputDirectory", "settings.defaultOutputDirectory", "general"],
+    ["settingsTargetModel", "settings.targetModel", "models"],
+    ["settingsNtd11Model", "settings.ntd11Model", "models"],
+    ["settingsSensitiveModel", "settings.sensitiveModel", "models"],
+    ["settingsSamModel", "settings.samModel", "models"],
+    ["settingsHandModel", "settings.handModel", "models"],
+    ["settingsHandSegmentationModel", "settings.handSegmentationModel", "models"],
+  ];
+  document.querySelectorAll("#settingsForm input[aria-invalid='true']").forEach((input) => input.setAttribute("aria-invalid", "false"));
+  const invalid = fields.find(([id]) => !isAbsoluteSettingsPath($(`#${id}`).value))
+    || (!Object.values(samCheckpointPaths).every(isAbsoluteSettingsPath) ? ["settingsSamModel", "settings.samModel", "models"] : null);
+  if (!invalid) return true;
+  const [id, label, tab] = invalid;
+  selectSettingsTab(tab);
+  const input = $(`#${id}`); input.setAttribute("aria-invalid", "true"); input.focus();
+  const result = $("#settingsResult"); result.textContent = t("settings.absolutePathRequired", { field: t(label) }); result.classList.add("error");
+  return false;
+}
+
 function selectSettingsTab(name) {
   const tabs = [...document.querySelectorAll(".settings-tab")];
   const nextTab = tabs.find((button) => button.dataset.settingsTab === name);
@@ -381,6 +407,7 @@ async function saveSettings(event) {
   if (!validateDetectionTargets(detectionTargets())) {
     result.textContent = t("error.detectionTargetsRequired"); result.classList.add("error"); return;
   }
+  if (!validateAbsoluteSettingsPaths()) return;
   try {
     const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(settingsPayload()) });
     const languageChanged = state.settings?.general?.language !== data.settings.general.language;

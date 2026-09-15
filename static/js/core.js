@@ -12,7 +12,7 @@ const state = {
   polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(), blinkModes: new Map(), blinkRoleModes: new Map(), blinkPhase: false, blinkTimer: null,
   pointer: null, hover: null, brushCursorGeometry: "", history: [], historyIndex: 0, activeStroke: null, manualStrokePaintFrame: 0, removedCandidateIds: new Set(),
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false, transformPending: false,
-  catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, serverCatalogGeneration: null, catalogTransition: null, viewGeneration: 0, historyRestoreToken: 0, workspaceId: null, historyDurable: false, translations: {},
+  catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, serverCatalogGeneration: null, catalogTransition: null, viewGeneration: 0, historyRestoreBusy: false, workspaceId: null, historyDurable: false, translations: {},
   applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false, mosaicWorkerBusy: false, mosaicPending: null, mosaicPreviewRoi: null, mosaicPreviewFull: false, mosaicSourceImage: null, mosaicSourceId: "", mosaicSourcePromise: null, mosaicPreviewFailureReported: false,
   outputDirectoryPicking: false, singleSave: null,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
@@ -386,7 +386,7 @@ function isBusy() {
   return ["running", "pausing", "paused"].includes(state.job?.state)
     || state.saving || state.saveStarting || state.detectionStarting || state.masksClearing
     || state.processing?.kind === "detect"
-    || state.catalogMutation || state.boundaryPending || state.fillPending || state.projectHistoryBusy;
+    || state.catalogMutation || state.boundaryPending || state.fillPending || state.projectHistoryBusy || state.historyRestoreBusy;
 }
 function beginCatalogEpoch() { state.catalogEpoch += 1; return state.catalogEpoch; }
 function isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }
