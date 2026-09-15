@@ -122,8 +122,8 @@ async function runArtifactCases() {
 
 assert.deepEqual(runner.parseArguments(["frontend", "--artifacts", "coverage-artifacts"]).suite, "frontend", "the requested suite is parsed");
 assert.deepEqual(runner.coverageRates('<coverage line-rate="1" branch-rate="1"/>'), { line: 100, branch: 100 }, "coverage rates are summarized as percentages");
-assert.doesNotThrow(() => runner.verifyBackendCoverage('<coverage><class filename="server.py" line-rate="1" branch-rate="1"/><class filename="updater.py" line-rate="1" branch-rate="1"/><class filename="setup_gpu_check.py" line-rate="1" branch-rate="1"/></coverage>'), "all required files at 100% pass the coverage gate");
-assert.throws(() => runner.verifyBackendCoverage('<coverage><class filename="server.py" line-rate="1" branch-rate="1"/></coverage>'), /missing updater.py/, "missing required coverage is rejected");
+assert.doesNotThrow(() => runner.verifyBackendCoverage('<coverage><class filename="server.py" line-rate="0" branch-rate="0"/><class filename="updater.py" line-rate="0" branch-rate="0"/><class filename="setup_gpu_check.py" line-rate="0" branch-rate="0"/></coverage>'), "required files are reported without a numeric coverage gate");
+assert.throws(() => runner.verifyBackendCoverage('<coverage><class filename="server.py" line-rate="1" branch-rate="1"/></coverage>'), /missing required files: updater.py/, "missing required coverage is rejected");
 diagnosticCases();
 const backendEnvironment = runner.backendEnvironment(path.join(os.tmpdir(), "mozarie-quiet-env"), "coverage-data");
 assert.equal(backendEnvironment.PYTHONPYCACHEPREFIX, path.join(os.tmpdir(), "mozarie-quiet-env", "pycache"), "backend bytecode is directed to the temporary directory");

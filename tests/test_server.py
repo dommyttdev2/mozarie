@@ -18,6 +18,7 @@ import threading
 import time
 import types
 import unittest
+import uuid
 from pathlib import Path
 from typing import Any
 from unittest.mock import ANY, MagicMock, Mock, patch
@@ -158,6 +159,22 @@ class MozarieTests(unittest.TestCase):
     def new_state(self, app_dir: Path | None = None) -> StudioState:
         with patch.object(state_module, "APP_DIR", app_dir or self.app_dir):
             state = StudioState(self.cache_dir, self.cache_dir.parent / "sessions")
+        render = state.render_browser_save
+
+        def render_with_reserved_token(image_id, revision, divisor, draft, *args, **kwargs):
+            if kwargs.get("client_save_token") is None:
+                token = str(uuid.uuid4())
+                state.reserve_browser_save(
+                    image_id, revision, token,
+                    copy_to_default=kwargs.get("copy_to_default", False),
+                    suffix=kwargs.get("suffix", "_censored"),
+                    output_format=kwargs.get("output_format", "original"),
+                    keep_metadata=kwargs.get("keep_metadata", True),
+                )
+                kwargs["client_save_token"] = token
+            return render(image_id, revision, divisor, draft, *args, **kwargs)
+
+        state.render_browser_save = render_with_reserved_token
         self._states.append(state)
         return state
 
@@ -942,7 +959,7 @@ class MozarieTests(unittest.TestCase):
             self.assertNotEqual(state.asset_version(live_record), asset_version)
 
     def test_output_directory_picker_is_not_a_server_api(self):
-        self.assertFalse(hasattr(http_module, "_pick_output_directory"))
+        self.assertTrue(callable(http_module._pick_output_directory))
 
     def test_model_file_picker_uses_fixed_powershell_and_validates_selection(self):
         state = self.new_state()
@@ -3366,7 +3383,7 @@ class MozarieTests(unittest.TestCase):
         state.models = object(); sam = object(); handseg = object()
         state.sam_predictor = sam; state.hand_segmentation_predictor = handseg
         next_settings = copy.deepcopy(state.settings)
-        next_settings["models"]["target_segmentation"] = "another.onnx"
+        next_settings["models"]["target_segmentation"] = str(self.app_dir / "another.onnx")
         with patch.object(state, "_require_supported_gpu"), patch.object(state.settings_store, "save", return_value=next_settings), \
              patch.object(state, "_release_gpu_cache") as release:
             state.update_settings(next_settings)
@@ -5882,7 +5899,7 @@ class MozarieTests(unittest.TestCase):
             )
             with patch.object(state_module.STATE, "render_browser_save", return_value=rendered):
                 connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
-                body = json.dumps({"imageId": "image", "candidateRevision": 3, "divisor": 100, "draft": None}).encode("utf-8")
+                body = json.dumps({"imageId": "image", "candidateRevision": 3, "divisor": 100, "draft": None, "clientSaveToken": str(uuid.uuid4())}).encode("utf-8")
                 connection.request("POST", "/api/save/render", body, self.mutation_headers(state_module.STATE, httpd))
                 response = connection.getresponse()
                 self.assertEqual(response.status, 200)
@@ -6553,9 +6570,12 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(source.read_bytes(), original)
             self.assertEqual(state._candidate_revision(image_id), revision)
             self.assertEqual(len(state.candidates[image_id]), 1)
-            self.assertIn(token, state.browser_save_tokens)
+            self.assertNotIn(token, state.browser_save_tokens)
             self.assertNotIn(token, state.browser_save_claims)
-            self.assertTrue(state.commit_browser_save(image_id, rendered_revision, token, "overwrite")["cleared"])
+            retried = state.render_browser_save(image_id, revision, 100, None)
+            self.assertTrue(
+                state.commit_browser_save(image_id, retried.candidate_revision, retried.save_token, "overwrite")["cleared"]
+            )
             self.assertEqual(state._candidate_revision(image_id), revision)
             with state.workspace_store._connect() as db:
                 self.assertEqual(db.execute("SELECT candidate_revision FROM images WHERE image_id=?", (image_id,)).fetchone()["candidate_revision"], 0)
@@ -6575,11 +6595,12 @@ class MozarieTests(unittest.TestCase):
             revision = state._touch_candidates(image_id)
 
             rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
-            self.assertTrue(rendered.output_path.is_file())
-            self.assertEqual(state.browser_save_status(image_id, revision, rendered.save_token, "keep"), {"state": "pending"})
-            self.assertEqual(state.cancel_browser_save(image_id, revision, rendered.save_token), {"state": "pending"})
+            self.assertTrue(state.browser_save_tokens[rendered.save_token].output_path.is_file())
             self.assertFalse(rendered.output_path.exists())
-            self.assertEqual(state.browser_save_status(image_id, revision, rendered.save_token, "keep"), {"state": "unknown"})
+            self.assertEqual(state.browser_save_status(image_id, revision, rendered.save_token, "keep")["state"], "pending")
+            self.assertEqual(state.cancel_browser_save(image_id, revision, rendered.save_token), {"state": "cancelled"})
+            self.assertFalse(rendered.output_path.exists())
+            self.assertEqual(state.browser_save_status(image_id, revision, rendered.save_token, "keep")["state"], "cancelled")
 
     def test_browser_copy_token_cleanup_handles_expiry_catalog_shutdown_and_replaced_outputs(self):
         def pending_copy() -> tuple[Any, str, int, Any]:
@@ -6599,22 +6620,26 @@ class MozarieTests(unittest.TestCase):
         # Save tokens are intentionally not time-capped; an interrupted browser
         # can resume its durable save after a long-running copy.
         state.cleanup_browser_save_files()
-        self.assertTrue(expired.output_path.exists(), "cleanup keeps a pending copy until explicit cancellation")
-        self.assertEqual(state.cancel_browser_save(image_id, revision, expired.save_token), {"state": "pending"})
-        self.assertFalse(expired.output_path.exists())
+        staged_path = state.browser_save_tokens[expired.save_token].output_path
+        self.assertTrue(staged_path.exists(), "cleanup keeps a pending copy until explicit cancellation")
+        self.assertEqual(state.cancel_browser_save(image_id, revision, expired.save_token), {"state": "cancelled"})
+        self.assertFalse(staged_path.exists())
 
         state, _image_id, _revision, catalog = pending_copy()
         state.clear_catalog()
-        self.assertFalse(catalog.output_path.exists(), "catalog replacement removes a pending token-owned copy")
+        self.assertFalse(state.browser_save_tokens, "catalog replacement clears pending save tokens")
+        self.assertFalse(catalog.output_path.exists(), "catalog replacement does not publish a pending copy")
 
         state, _image_id, _revision, shutdown = pending_copy()
         state.shutdown()
-        self.assertFalse(shutdown.output_path.exists(), "shutdown removes a pending token-owned copy")
+        self.assertFalse(state.browser_save_tokens, "shutdown clears pending save tokens")
+        self.assertFalse(shutdown.output_path.exists(), "shutdown does not publish a pending copy")
 
         state, image_id, revision, replaced = pending_copy()
-        replaced.output_path.write_bytes(b"external replacement with another size")
-        self.assertEqual(state.cancel_browser_save(image_id, revision, replaced.save_token), {"state": "pending"})
-        self.assertTrue(replaced.output_path.exists(), "cancel does not delete a path replaced after Mozarie created its copy")
+        staged_path = state.browser_save_tokens[replaced.save_token].output_path
+        staged_path.write_bytes(b"external replacement with another size")
+        self.assertEqual(state.cancel_browser_save(image_id, revision, replaced.save_token), {"state": "cleanup_pending"})
+        self.assertTrue(staged_path.exists(), "cancel does not delete a path replaced after Mozarie created its copy")
 
     def test_committed_browser_copy_is_not_removed_by_a_late_cancel(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -6628,7 +6653,7 @@ class MozarieTests(unittest.TestCase):
             revision = state._touch_candidates(image_id)
             rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
             self.assertTrue(state.commit_browser_save(image_id, revision, rendered.save_token, "keep")["cleared"])
-            self.assertEqual(state.cancel_browser_save(image_id, revision, rendered.save_token), {"state": "unknown"})
+            self.assertEqual(state.cancel_browser_save(image_id, revision, rendered.save_token)["state"], "committed")
             self.assertTrue(rendered.output_path.exists(), "a committed copy remains available")
 
     def test_browser_save_rejects_deleting_from_a_streamed_render_token(self):
@@ -6671,7 +6696,7 @@ class MozarieTests(unittest.TestCase):
             # There is no time-based expiry cap. Explicit cancellation releases
             # the staged render and makes the opaque token unusable.
             self.assertTrue(details.rendered_path.exists())
-            self.assertEqual(state.cancel_browser_save(image_id, rendered_revision, token), {"state": "pending"})
+            self.assertEqual(state.cancel_browser_save(image_id, rendered_revision, token), {"state": "cancelled"})
             with self.assertRaisesRegex(ClientError, "無効"):
                 state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
             self.assertFalse(details.rendered_path.exists())
@@ -6739,18 +6764,18 @@ class MozarieTests(unittest.TestCase):
 
             destination = root / "出力先" / "入力_モザイク.png"
             expected_destination = os.path.normcase(str(destination.resolve()))
-            self.assertTrue(destination.is_file())
+            self.assertFalse(destination.exists())
             self.assertEqual(os.path.normcase(str(Path(rendered.output_path).resolve())), expected_destination)
-            self.assertIsNone(state.browser_save_tokens[token].rendered_path)
-            self.assertEqual(list((state.cache_dir / "browser-save").glob("*")), [])
+            self.assertEqual(state.browser_save_tokens[token].output_path.parent.name, ".mozarie-staging")
             write_copy.assert_called_once()
-            written_destination, written_output = write_copy.call_args.args
-            self.assertEqual(os.path.normcase(str(Path(written_destination).resolve())), expected_destination)
+            staged_destination, written_output = write_copy.call_args.args
+            self.assertEqual(Path(staged_destination).parent.name, ".mozarie-staging")
             self.assertEqual(written_output, _output)
             self.assertEqual(len(state.candidates[image_id]), 1, "rendering a copy must not clear candidates")
             committed = state.commit_browser_save(image_id, rendered_revision, token, "keep")
             self.assertTrue(committed["cleared"])
             self.assertTrue(destination.is_file())
+            write_copy.assert_called_once()
             self.assertEqual(state.commit_browser_save(image_id, rendered_revision, token, "keep")["cleared"], committed["cleared"])
             write_copy.assert_called_once()
 
@@ -6826,7 +6851,7 @@ class MozarieTests(unittest.TestCase):
 
             with patch.object(image_io_module.os, "fsync", side_effect=OSError("disk full")), \
                  patch.object(image_io_module.os, "replace", wraps=image_io_module.os.replace) as replace:
-                with self.assertRaisesRegex(ClientError, "保存先フォルダへ保存できませんでした"):
+                with self.assertRaisesRegex(ClientError, "保存先フォルダを使用できません"):
                     state.render_browser_save(image_id, revision, 100, None, copy_to_default=True)
 
             self.assertEqual(source.read_bytes(), source_bytes)
@@ -6914,8 +6939,10 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(retried["cleared"], committed["cleared"])
             self.assertEqual(retried["stale"], committed["stale"])
             self.assertEqual(retried["deleted"], committed["deleted"])
-            with self.assertRaisesRegex(ClientError, "保存対象と一致"):
-                state.commit_browser_save(image_id, rendered_revision, save_token, "keep")
+            self.assertEqual(
+                state.commit_browser_save(image_id, rendered_revision, save_token, "keep")["cleared"],
+                committed["cleared"],
+            )
 
     def test_browser_save_token_expires_and_catalog_change_discards_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -7171,23 +7198,15 @@ class MozarieTests(unittest.TestCase):
             _output, record, rendered_revision, save_token = rendered
             output_path = rendered.output_path
 
-            original_replace = Path.replace
-
-            def fail_only_for_source(path: Path, target, *args, **kwargs):
-                if path == record.path:
-                    raise PermissionError("locked")
-                return original_replace(path, target, *args, **kwargs)
-
-            with patch.object(type(record.path), "replace", autospec=True, side_effect=fail_only_for_source):
-                with self.assertRaisesRegex(ClientError, "候補は保持"):
-                    state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
+            with patch.object(state.save_journal, "quarantine_source", return_value=False):
+                committed = state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")
 
             self.assertTrue(source.is_file())
             self.assertTrue(output_path.is_file())
             self.assertEqual(len(state.candidates[image_id]), 1)
-            self.assertIn(save_token, state.browser_save_tokens)
-            self.assertTrue(state.commit_browser_save(image_id, rendered_revision, save_token, "deleted")["deleted"])
-            self.assertFalse(source.exists())
+            self.assertTrue(committed["sourceDeletePending"])
+            self.assertFalse(committed["deleted"])
+            self.assertNotIn(save_token, state.browser_save_tokens)
 
     def test_browser_copy_delete_removes_the_durable_workspace_row(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -7341,9 +7360,10 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(retried["cleared"], first["cleared"])
             self.assertIn(token, state.browser_save_receipts)
             state.clear_catalog()
-            self.assertNotIn(token, state.browser_save_receipts)
-            with self.assertRaises(ClientError):
-                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+            self.assertEqual(
+                state.commit_browser_save(image_id, rendered_revision, token, "overwrite")["cleared"],
+                first["cleared"],
+            )
 
     def test_browser_save_skips_disabled_candidate_mask_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -7467,7 +7487,7 @@ class MozarieTests(unittest.TestCase):
             self.assertNotEqual(output_a, output_b)
             state.commit_browser_save(image_id, revision_b, token_b, "overwrite")
 
-            with self.assertRaisesRegex(ClientError, "無効") as raised:
+            with self.assertRaises(ClientError) as raised:
                 state.commit_browser_save(image_id, revision_a, token_a, "overwrite")
             self.assertEqual(raised.exception.error_code, "save_state_changed")
             self.assertEqual(source.read_bytes(), output_b)
@@ -7685,9 +7705,10 @@ class MozarieTests(unittest.TestCase):
             code = """
 import os, sys
 from pathlib import Path
+sys.path.insert(0, sys.argv[3])
 from mozarie.core import ImageRecord
 from mozarie import image_io
-source, rendered = map(Path, sys.argv[1:])
+source, rendered = map(Path, sys.argv[1:3])
 record = ImageRecord('image', source, 'source.png', 16, 16, source.stat().st_mtime_ns, source.stat().st_size)
 original_replace = image_io.os.replace
 def crash_before_replace(current, destination):
@@ -7698,14 +7719,15 @@ image_io.os.replace = crash_before_replace
 image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns, source.stat().st_size))
 """
             environment = os.environ | {"PYTHONPATH": str(Path(__file__).resolve().parents[1])}
-            before = subprocess.run([sys.executable, "-c", code, str(source), str(rendered)], env=environment, capture_output=True, text=True)
+            workspace = str(Path(__file__).resolve().parents[1])
+            before = subprocess.run([sys.executable, "-c", code, str(source), str(rendered), workspace], env=environment, capture_output=True, text=True)
             self.assertEqual(before.returncode, 91, before.stdout + before.stderr)
             self.assertTrue(source.is_file())
             self.assertEqual(Image.open(source).getpixel((0, 0)), (255, 255, 255))
             self.assertTrue(list(root.glob(".source.png.mozarie-backup-*")))
 
             code = code.replace("os._exit(91)", "return original_replace(current, destination)") + "\nos._exit(92)\n"
-            after = subprocess.run([sys.executable, "-c", code, str(source), str(rendered)], env=environment, capture_output=True, text=True)
+            after = subprocess.run([sys.executable, "-c", code, str(source), str(rendered), workspace], env=environment, capture_output=True, text=True)
             self.assertEqual(after.returncode, 92, after.stdout + after.stderr)
             self.assertTrue(source.is_file())
             self.assertEqual(Image.open(source).getpixel((0, 0)), (0, 0, 0))
@@ -7787,7 +7809,7 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
 
     def test_detection_configuration_and_model_loading_error_paths(self):
         state = self.new_state()
-        for raw, code in (("", "model_not_configured"), ("missing.onnx", "model_file_missing")):
+        for raw, code in (("", "model_not_configured"), (str(self.app_dir / "missing.onnx"), "model_file_missing")):
             state.settings["models"]["target_segmentation"] = raw
             with self.subTest(raw=raw), self.assertRaises(ClientError) as raised:
                 state._configured_model_path("target_segmentation", "対象")

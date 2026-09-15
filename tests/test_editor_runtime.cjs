@@ -55,7 +55,7 @@ const context = {
   addCanvas: addCtx.canvas, exclusionCanvas: exclusionCtx.canvas, exclusionEraseCanvas: exclusionEraseCtx.canvas,
   historyAddCanvas: drawingContext().canvas, historyExclusionCanvas: drawingContext().canvas, historyExclusionEraseCanvas: drawingContext().canvas,
   $: (selector) => element(selector), document: { activeElement: null, documentElement: { clientWidth: 320, clientHeight: 240 } },
-  window: { innerWidth: 320, innerHeight: 240 }, crypto: { randomUUID: () => "key-1" },
+  window: { innerWidth: 320, innerHeight: 240, addEventListener() {} }, crypto: { randomUUID: () => "key-1" },
   navigator: { clipboard: { writeText: async () => {} } },
   isBusy: () => false, catalogStagingEditsActive: () => false, currentImageActionPending: () => Boolean(state.pendingImageId), manualCanvasInputLocked: () => false, isProcessableImage: () => true, hasDurableHistory: () => false, clearBoundaryInteraction() {}, clearBoundaryConstruction() {}, closeBoundaryModeMenu: () => false,
   updateBoundaryActions() {}, render() {}, focusCanvas() {}, focusElement() {}, t: (key, values = {}) => `${key}:${values.value || ""}`,

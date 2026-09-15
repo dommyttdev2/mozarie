@@ -99,7 +99,7 @@ async function testCompletionInvalidatesAndReloadsCandidates() {
     handledDetectionStartedAt: null, detectCancelRequested: false,
   };
   const context = {
-    state, Array, Number, Promise, Map, window: { addEventListener() {} },
+    state, Array, Number, Promise, Map, window: { addEventListener() {} }, localStorage: { length: 0, key() { return null; }, getItem() { return null; }, setItem() {}, removeItem() {} },
     modalInvokers: new Map(),
     $: () => ({}),
     api: async () => ({ images: [newRecord] }),

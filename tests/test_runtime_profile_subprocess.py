@@ -9,6 +9,13 @@ import unittest
 from pathlib import Path
 
 
+def subprocess_python() -> str:
+    executable = Path(sys.executable)
+    if not any(executable.parent.glob("python*._pth")):
+        return str(executable)
+    return shutil.which("python") or str(executable)
+
+
 class RuntimeProfileSubprocessTests(unittest.TestCase):
     def test_module_execution_avoids_the_app_http_module_shadow(self) -> None:
         """The batch/updater form must keep stdlib http ahead of mozarie/http.py."""
@@ -30,12 +37,12 @@ class RuntimeProfileSubprocessTests(unittest.TestCase):
             metadata.mkdir()
             (metadata / "METADATA").write_text("Name: onnxruntime\nVersion: 1.0\n", encoding="utf-8")
             environment = os.environ | {"PYTHONPATH": str(site)}
-            command = [sys.executable, "-S", "-m", "mozarie.runtime_profile", "preflight", "cpu", "--venv", str(app / ".venv")]
+            command = [subprocess_python(), "-S", "-m", "mozarie.runtime_profile", "preflight", "cpu", "--venv", str(app / ".venv")]
             result = subprocess.run(command, cwd=app, env=environment, capture_output=True, text=True, encoding="utf-8")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
             direct = subprocess.run(
-                [sys.executable, "-S", str(package / "runtime_profile.py"), "preflight", "cpu", "--venv", str(app / ".venv")],
+                [subprocess_python(), "-S", str(package / "runtime_profile.py"), "preflight", "cpu", "--venv", str(app / ".venv")],
                 cwd=app, env=environment, capture_output=True, text=True, encoding="utf-8",
             )
             self.assertNotEqual(direct.returncode, 0, direct.stdout + direct.stderr)

@@ -76,7 +76,7 @@ const context = {
   responseError(response, payload) { const error = new Error(); error.status = response.status; error.code = typeof payload?.error_code === "string" ? payload.error_code : (response.status === 404 ? "api_not_found" : "internal_error"); error.params = payload?.params || {}; return error; },
   console, Promise, Set, Map, Array, Object, Math, Number, Boolean, String, Error,
   AbortController, DOMException, setTimeout, clearTimeout, encodeURIComponent, crypto: { randomUUID: () => `key-${++unique}` },
-  state, document, window: { innerWidth: 300, innerHeight: 200 }, navigator: { clipboard: { writeText: async (value) => { calls.push(["copy", value]); } } },
+  state, document, window: { innerWidth: 300, innerHeight: 200, addEventListener() {} }, navigator: { clipboard: { writeText: async (value) => { calls.push(["copy", value]); } } },
   $: (selector) => element(selector),
   canvas: { style: {} }, addCanvas: { width: 4, height: 4 }, exclusionCanvas: { width: 4, height: 4 }, exclusionEraseCanvas: { width: 4, height: 4 },
   addCtx: { clearRect() {} }, exclusionCtx: { clearRect() {} }, exclusionEraseCtx: { clearRect() {} },

@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -74,6 +75,10 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state.browser_save_tokens = {}; state.browser_save_receipts = {}; state.browser_save_claims = set(); state._pending_browser_save_cleanup = []
         state.cache_dir = directory / "cache"; state._image_io_locks = {}
         state.workspace_store = Mock()
+        state.workspace_store.browser_save_receipt.return_value = None
+        state.workspace_store.acknowledge_browser_save_receipt.return_value = True
+        state.save_journal = Mock()
+        state.save_journal.row.return_value = None
         state.image_io_lock = lambda _image_id: threading.RLock()
         state._has_active_worker = lambda: False
         state._assert_catalog_mutable = lambda *_args, **_kwargs: None
@@ -81,6 +86,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state._assert_request_catalog_expectation = lambda *_args, **_kwargs: None
         state._issue_browser_save_token_unchecked = lambda *_args, **_kwargs: "token"
         state.cleanup_browser_save_files = lambda: None
+        state.cleanup_expired_browser_save_tokens = lambda: None
         state._candidate_revision = lambda image_id: state.candidate_revisions.get(image_id, 1)
         state.image_snapshot = lambda image_id: __import__("dataclasses").replace(state.images[image_id])
         state._records_for_ids_with_catalog = lambda ids: ([state.images[item] for item in ids], state.catalog_generation)
@@ -97,6 +103,22 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state._discard_browser_save_tokens_for_image_unchecked = lambda _image: None
         state._clear_browser_save_receipts_for_image_unchecked = lambda _image: None
         state._encode_workspace_mask = lambda value: value
+        render = state.render_browser_save
+
+        def render_with_reserved_token(image_id, revision, divisor, draft, *args, **kwargs):
+            if kwargs.get("client_save_token") is None:
+                if image_id not in state.images:
+                    return render(image_id, revision, divisor, draft, *args, **kwargs)
+                token = str(uuid.uuid4())
+                record = state.images[image_id]
+                state.browser_save_tokens[token] = BrowserSaveToken(
+                    image_id, revision, record.asset_fingerprint(), state.catalog_generation,
+                    time.monotonic(), None, state="rendering", allow_copy_action=kwargs.get("copy_to_default", False),
+                )
+                kwargs["client_save_token"] = token
+            return render(image_id, revision, divisor, draft, *args, **kwargs)
+
+        state.render_browser_save = render_with_reserved_token
         return state
 
     def test_job_control_and_record_guards(self) -> None:
@@ -437,10 +459,10 @@ class JobsSavingCoverageTests(unittest.TestCase):
             self.assertEqual(state.browser_save_status("x", 1, "none", "keep"), {"state": "unknown"})
             state.browser_save_receipts["wrong"] = BrowserSaveReceipt("other", 1, "keep", True, False, False, 1)
             self.assertEqual(state.browser_save_status(record.image_id, 1, "wrong", "keep"), {"state": "unknown"})
-            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, None)
+            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, time.monotonic(), None)
             state.browser_save_tokens["pending"] = token
             self.assertEqual(state.cancel_browser_save("wrong", 1, "pending"), {"state": "unknown"})
-            self.assertEqual(state.cancel_browser_save(record.image_id, 1, "pending"), {"state": "pending"})
+            self.assertEqual(state.cancel_browser_save(record.image_id, 1, "pending"), {"state": "cancelled"})
             state._run_fixed_workers = lambda records, _workers, action, *_args: [action(index, item) for index, item in enumerate(records)] and []
             state._set_job_current = lambda *_args: None; state._record_job_success = lambda *_args: None
             state._job_is_current = lambda *_args: True; state._finish_job = Mock(); state._fail_job = Mock(); state._cancel_job = Mock()
@@ -452,12 +474,12 @@ class JobsSavingCoverageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
             state.images[record.image_id] = record; state.order = [record.image_id]
-            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, None)
+            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, time.monotonic(), None)
             state.browser_save_tokens["active"] = token
             state._has_active_worker = lambda: True
             with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "active", "keep")
             state._has_active_worker = lambda: False
-            state.browser_save_tokens["changed"] = BrowserSaveToken(record.image_id, 1, (1, 1), 2, None)
+            state.browser_save_tokens["changed"] = BrowserSaveToken(record.image_id, 1, (1, 1), 2, time.monotonic(), None)
             with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "changed", "keep")
             # The second locked lookup must reject a receipt that arrived after
             # the initial token lookup, rather than committing the wrong action.
@@ -467,7 +489,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
                     state.browser_save_receipts["raced"] = BrowserSaveReceipt(record.image_id, 1, "deleted", False, True, False, 1)
                 def __exit__(_self, *_args): return False
             state.image_io_lock = lambda _image: AddReceipt()
-            with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "raced", "keep")
+            self.assertFalse(state.commit_browser_save(record.image_id, 1, "raced", "keep")["cleared"])
             state.image_io_lock = lambda _image: threading.RLock()
             # A database failure restores a filesystem source moved to quarantine.
             state.browser_save_tokens["rollback"] = token
@@ -478,14 +500,17 @@ class JobsSavingCoverageTests(unittest.TestCase):
             thumb = state.cache_dir / "thumbnails" / f"{record.image_id}-one.jpg"; thumb.parent.mkdir(parents=True); thumb.write_bytes(b"x")
             state.browser_save_tokens["deleted"] = token
             result = state.commit_browser_save(record.image_id, 1, "deleted", "deleted")
-            self.assertEqual(result, {"cleared": True, "stale": False, "deleted": True, "catalogGeneration": state.catalog_generation})
+            self.assertEqual(
+                {key: result[key] for key in ("cleared", "stale", "deleted", "catalogGeneration")},
+                {"cleared": True, "stale": False, "deleted": True, "catalogGeneration": state.catalog_generation},
+            )
             self.assertFalse(thumb.exists())
 
     def test_browser_commit_second_lookup_and_catalog_changes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
             state.images[record.image_id] = record; state.order = [record.image_id]
-            base = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, None)
+            base = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, time.monotonic(), None)
             def second_lookup(token_name, mutate, action="keep"):
                 state.browser_save_tokens = {token_name: base}; state.browser_save_receipts = {}
                 class Mutate:
@@ -497,8 +522,8 @@ class JobsSavingCoverageTests(unittest.TestCase):
             self.assertEqual(result["cleared"], True)
             for name, mutate in (
                 ("gone", lambda: state.browser_save_tokens.clear()),
-                ("revision", lambda: state.browser_save_tokens.__setitem__("revision", BrowserSaveToken(record.image_id, 2, (1, 1), 1, None))),
-                ("action", lambda: state.browser_save_tokens.__setitem__("action", BrowserSaveToken(record.image_id, 1, (1, 1), 1, directory / "rendered.png"))),
+                ("revision", lambda: state.browser_save_tokens.__setitem__("revision", BrowserSaveToken(record.image_id, 2, (1, 1), 1, time.monotonic(), None))),
+                ("action", lambda: state.browser_save_tokens.__setitem__("action", BrowserSaveToken(record.image_id, 1, (1, 1), 1, time.monotonic(), directory / "rendered.png"))),
             ):
                 with self.subTest(name=name), self.assertRaises(ClientError): second_lookup(name, mutate)
             state.image_io_lock = lambda _image: threading.RLock()
@@ -508,7 +533,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             directory = Path(raw); record = self.record(directory); state = self.make_saving(directory)
             state.images[record.image_id] = record; state.order = [record.image_id]
-            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, None)
+            token = BrowserSaveToken(record.image_id, 1, (record.mtime_ns, record.size_bytes), 1, time.monotonic(), None)
             state.browser_save_tokens["catalog"] = token
             state._assert_record_stat_matches = lambda _record: setattr(state, "catalog_generation", 2)
             with self.assertRaises(ClientError): state.commit_browser_save(record.image_id, 1, "catalog", "keep")

@@ -1121,7 +1121,16 @@ class UpdaterTests(unittest.TestCase):
             (app / "mozarie" / "runtime_profile.py").write_text("import sys\nsys.exit(1)\n", encoding="utf-8")
             (app / "server.py").write_text("raise RuntimeError('server must not start')\n", encoding="utf-8")
             venv = app / ".venv"
-            subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
+            runtime_python = sys.executable
+            if any(Path(runtime_python).parent.glob("python*._pth")):
+                launcher = shutil.which("py")
+                if launcher:
+                    selected = subprocess.check_output(
+                        [launcher, "-3", "-c", "import sys; print(sys.executable)"], text=True,
+                    ).strip()
+                    if Path(selected).is_file():
+                        runtime_python = selected
+            subprocess.run([runtime_python, "-m", "venv", str(venv)], check=True)
             (venv / ".mozarie-ready").write_text("ready\n", encoding="utf-8")
             for marker in (None, "{not-json"):
                 marker_path = venv / ".mozarie-runtime.json"
@@ -1148,7 +1157,7 @@ class UpdaterTests(unittest.TestCase):
             result = subprocess.run(
                 ["cmd.exe", "/d", "/c", str(app / "run.bat")], cwd=app, input="\n",
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
-                creationflags=subprocess.CREATE_NO_WINDOW,
+                creationflags=subprocess.CREATE_NO_WINDOW, env=os.environ | {"MOZARIE_RUNTIME": "cuda"},
             )
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(started.read_text(encoding="utf-8"), "ok")

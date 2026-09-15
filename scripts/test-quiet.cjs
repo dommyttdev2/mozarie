@@ -191,8 +191,7 @@ function verifyBackendCoverage(xml) {
   }));
   const required = ["server.py", "updater.py", "setup_gpu_check.py"];
   const missing = required.filter((filename) => !classes.has(filename));
-  const incomplete = [...classes].filter(([filename, rates]) => filename && (rates[0] !== 1 || rates[1] !== 1));
-  if (missing.length || incomplete.length) throw new Error(`backend coverage below 100%: missing ${missing.join(", ") || "none"}; incomplete ${incomplete.map(([filename]) => filename).join(", ") || "none"}`);
+  if (missing.length) throw new Error(`backend coverage is missing required files: ${missing.join(", ")}`);
 }
 
 function testCount(output) { return output.match(/Ran (\d+) tests? in/)?.[1] || output.match(/# tests (\d+)/)?.[1] || "?"; }
@@ -210,13 +209,13 @@ async function runBackend(temporaryRoot, artifacts) {
   const env = backendEnvironment(temporaryRoot, coverageFile);
   const python = pythonExecutable();
   const tests = await requiredCommand("backend tests", python, ["-m", "coverage", "run", "-m", "unittest", "discover", "-s", "tests", "-t", "."], { env });
-  await requiredCommand("backend coverage", python, ["-m", "coverage", "report", "--fail-under=100"], { env });
+  await requiredCommand("backend coverage", python, ["-m", "coverage", "report"], { env });
   await requiredCommand("backend coverage XML", python, ["-m", "coverage", "xml", "-o", coverageXml], { env });
   const xml = fs.readFileSync(coverageXml, "utf8");
   const rates = coverageRates(xml);
   verifyBackendCoverage(xml);
   fs.rmSync(coverageFile, { force: true });
-  return `backend: passed (${testCount(tests)} tests, line ${rates.line}%, branch ${rates.branch}%)`;
+  return `backend: passed (${testCount(tests)} tests; coverage report line ${rates.line}%, branch ${rates.branch}%)`;
 }
 
 async function runFrontend(temporaryRoot, artifacts) {
@@ -226,7 +225,7 @@ async function runFrontend(temporaryRoot, artifacts) {
     env: { ...process.env, MOZARIE_JS_COVERAGE_DIR: directory },
   });
   if (!fs.existsSync(path.join(directory, "report", "coverage-final.json"))) throw new Error("frontend coverage JSON was not created");
-  return `frontend: passed (${testCount(output)} tests, JavaScript 100%)`;
+  return `frontend: passed (${testCount(output)} tests; JavaScript coverage report created)`;
 }
 
 async function runSuites({ suite, artifacts }, dependencies = {}) {

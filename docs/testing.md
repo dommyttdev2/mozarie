@@ -17,7 +17,7 @@
 
 - fixtureは各試験専用の一時ディレクトリ、DB、ポート、状態を使い、リポジトリ、利用者の設定、実画像を変更しない。
 - 開いたファイル、SQLite接続、サーバー、スレッド、生成した一時ファイルは試験中に明示して閉じる。GCやプロセス終了に後始末を任せない。
-- モックはOS、GPU、ネットワーク、時計など外部境界に限る。製品内部を写経するモックではなく、公開された入力と出力を確認する。
+- モックはOS、GPU、ネットワーク、時計など外部境界に限る。製品内部を写経するモックではなく、公開された入力と出力を確認する。Nodeの`node:test`では各試験の`context.mock`を使い、試験終了時に自動復元される範囲で置換する。
 - 実GPU、実モデル、Windowsダイアログ、OS権限、実UNCはCI fixtureに置き換えない。該当する実機確認を残す。
 
 ## 回帰境界
@@ -34,11 +34,16 @@
 
 ## CIとcoverage
 
-CIは隔離fixtureで実行できるテストを常に実行する。coverageは未検証の境界を見つける補助であり、数値達成のためのテスト、内部実装を固定するテスト、skipによる見かけの成功を作らない。実行時間やメモリが増える回帰は、小さいfixtureで件数に比例しないことを確認する。
+CIは隔離fixtureで実行できるテストを常に実行する。Playwrightは利用者に見える画面と隔離した`BrowserContext`を使い、固定待機ではなくlocatorや応答などのweb-first条件で待つ。coverageは全対象のレポートを毎回生成し、未検証の境界を見つける補助にする。100%などの数値を合否条件にせず、損失・破損・権限・復旧の重要経路を人が確認する。数値達成のためのテスト、内部実装を固定するテスト、skipによる見かけの成功を作らない。実行時間やメモリが増える回帰は、小さいfixtureで件数に比例しないことを確認する。
 
 ## 参照
 
 - [Python unittest](https://docs.python.org/3/library/unittest.html)
 - [Python tempfile](https://docs.python.org/3/library/tempfile.html)
+- [Node.js test runner](https://nodejs.org/api/test.html)
+- [Playwright BrowserContext](https://playwright.dev/docs/browser-contexts)
+- [Playwright best practices](https://playwright.dev/docs/best-practices)
+- [Playwright web-first assertions](https://playwright.dev/docs/test-assertions)
 - [GitHub ActionsでのPythonテスト](https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python)
+- [Google Testing Blog: Code Coverage Best Practices](https://testing.googleblog.com/2020/08/code-coverage-best-practices.html)
 - [FileSystemFileHandle.getFile()](https://developer.mozilla.org/en-US/docs/Web/API/FileSystemFileHandle/getFile)

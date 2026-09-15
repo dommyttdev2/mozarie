@@ -166,14 +166,15 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
             request.path = "/api/update/start"
             request.do_POST()
             request.path = "/api/save/render"
-            request._read_json_body = lambda: {"imageId": "image", "candidateRevision": 0, "divisor": 100, "copyToDefault": True}
+            request._read_json_body = lambda: {"imageId": "image", "candidateRevision": 0, "divisor": 100, "copyToDefault": True, "clientSaveToken": "a4c6687e-381a-4df2-97bb-90a9c2763adb"}
             request.do_POST()
             request.path = "/api/settings?status=0"
             request._read_json_body = lambda: {}
             request.do_POST()
         self.assertEqual(getattr(emitted[0], "error_code", None), "model_download_invalid")
         self.assertEqual(getattr(emitted[1], "error_code", None), "operation_in_progress")
-        self.assertEqual(emitted[-2]["output"], "copy.png")
+        self.assertIn("binary", emitted)
+        state.render_browser_save.assert_called_once()
         thread.assert_called_once()
 
     def test_binary_reader_rejects_oversize_and_thumbnail_staleness_cleans_temp_file(self) -> None:

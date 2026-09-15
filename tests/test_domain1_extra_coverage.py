@@ -492,9 +492,6 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         image_id = imported[0]["imageId"]
         nested = self.state.images[image_id].path.parent
         (nested / "keep.txt").write_text("keep")
-        self.state.browser_save_receipts["old"] = BrowserSaveReceipt(image_id, 0, "copy", False, False, False, self.state.catalog_generation)
-        self.state._clear_browser_save_receipts_for_image_unchecked(image_id)
-        self.assertNotIn("old", self.state.browser_save_receipts)
         self.state.remove_image_from_catalog(image_id)
         self.assertTrue(nested.exists())
 
@@ -570,9 +567,6 @@ class StateCatalogExtraCoverageTests(unittest.TestCase):
         created = owned.cache_dir
         owned.shutdown()
         self.assertFalse(created.exists())
-        self.state.browser_save_receipts["old"] = BrowserSaveReceipt("image", 0, "copy", False, False, False, self.state.catalog_generation)
-        self.state._clear_browser_save_receipts_for_image_unchecked("image")
-        self.assertNotIn("old", self.state.browser_save_receipts)
 
     def test_catalogue_remaining_file_and_durable_state_edges(self) -> None:
         image_id = self.add_image(); item = self.state.images[image_id]
@@ -899,11 +893,6 @@ class FinalCatalogCoverageTests(unittest.TestCase):
 
     def test_token_lifecycle_predictor_and_session_directory_cleanup(self) -> None:
         image_id = self.add_image()
-        self.state.browser_save_receipts["prior"] = BrowserSaveReceipt(
-            image_id, 0, "copy", False, False, False, self.state.catalog_generation,
-        )
-        self.state._clear_browser_save_receipts_for_image_unchecked(image_id)
-        self.assertNotIn("prior", self.state.browser_save_receipts)
         self.state.sam_predictor = Mock()
         self.state.hand_segmentation_predictor = Mock()
         self.state._invalidate_sam_cache()

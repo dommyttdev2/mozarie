@@ -553,12 +553,16 @@ class SavingCoverageTests(unittest.TestCase):
             saving.start_apply(["x"], 2, [])
         saving.browser_save_receipts = {}
         saving.browser_save_tokens = {}
+        saving.workspace_store = Mock()
+        saving.workspace_store.browser_save_receipt.return_value = None
+        saving.save_journal = Mock()
+        saving.save_journal.row.return_value = None
         self.assertEqual(saving.browser_save_status("x", 1, "missing", "keep"), {"state": "unknown"})
         saving.browser_save_receipts["done"] = BrowserSaveReceipt("x", 1, "keep", True, False, False, 1.0)
         self.assertEqual(saving.browser_save_status("x", 1, "done", "keep")["state"], "committed")
         self.assertEqual(saving.browser_save_status("wrong", 1, "done", "keep"), {"state": "unknown"})
-        saving.browser_save_tokens["pending"] = type("Token", (), {"image_id": "x", "candidate_revision": 1})()
-        self.assertEqual(saving.browser_save_status("x", 1, "pending", "keep"), {"state": "pending"})
+        saving.browser_save_tokens["pending"] = type("Token", (), {"image_id": "x", "candidate_revision": 1, "state": "pending", "output_destination": None, "no_effect": False})()
+        self.assertEqual(saving.browser_save_status("x", 1, "pending", "keep")["state"], "pending")
 
     def test_prepare_and_start_apply_snapshot_a_filesystem_record(self) -> None:
         saving = SavingMixin()
