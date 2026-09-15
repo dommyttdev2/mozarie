@@ -80,7 +80,7 @@ const USER_ERROR_CODES = {
   model_profile_invalid: "model_file_invalid", sam_checkpoint_invalid: "model_type_mismatch",
   sam_provider_unavailable: "gpu_runtime_unavailable", hand_segmentation_invalid: "model_load_failed",
   model_picker_busy: "operation_in_progress", model_picker_failed: "model_picker_failed", model_picker_invalid: "model_file_invalid",
-  model_download_invalid: "model_download_invalid", catalog_changed: "catalog_changed", job_running: "operation_in_progress",
+  model_download_invalid: "model_download_invalid", catalog_changed: "catalog_changed", stale_catalog: "catalog_changed", job_running: "operation_in_progress",
   mask_not_found: "mask_not_found", candidate_not_found: "mask_not_found", invalid_settings: "input_invalid", invalid_request: "input_invalid",
   api_not_found: "response_invalid", connection_lost: "connection_lost", output_folder_unavailable: "output_folder_unavailable", output_permission_denied: "output_permission_denied", request_failed: "internal_error",
   image_not_found: "image_not_found", image_hidden: "image_hidden", image_read_failed: "image_read_failed", image_format_unsupported: "image_format_unsupported",

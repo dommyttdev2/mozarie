@@ -905,8 +905,14 @@ class WorkspaceStore:
                     for record in records
                 ))
                 existing = {
-                    str(row["relative_path"]): row for row in db.execute("""SELECT images.* FROM images
-                        JOIN workspace_reconcile_records AS incoming ON incoming.relative_path=images.relative_path
+                    str(row["relative_path"]): row for row in db.execute("""SELECT images.*,
+                        transform.flip_horizontal AS transform_flip_horizontal,
+                        transform.flip_vertical AS transform_flip_vertical,
+                        transform.source_flip_horizontal AS transform_source_flip_horizontal,
+                        transform.source_flip_vertical AS transform_source_flip_vertical,
+                        transform.revision AS transform_revision
+                        FROM images JOIN workspace_reconcile_records AS incoming ON incoming.relative_path=images.relative_path
+                        LEFT JOIN image_transforms AS transform ON transform.image_id=images.image_id
                         WHERE images.source_id=?""", (source_id,))
                 }
                 requested_ids = {
@@ -955,18 +961,17 @@ class WorkspaceStore:
                         # An outside write has no Mozarie transform contract;
                         # never compensate it as if it had been our bake.
                         db.execute("UPDATE image_transforms SET source_flip_horizontal=0,source_flip_vertical=0,revision=revision+1 WHERE image_id=?", (row["image_id"],))
-                    transform = db.execute("SELECT * FROM image_transforms WHERE image_id=?", (row["image_id"],)).fetchone()
                     result[record.relative_path] = {
                         "image_id": row["image_id"], "hidden": bool(row["hidden"]),
                         "reviewed": False if changed else bool(row["reviewed"]),
                         "revision": int(row["candidate_revision"]),
                         "changed": changed or bool(row["source_blocked"]),
                         "dimensions_changed": dimensions_changed or bool(row["source_blocked"]),
-                        "flip_horizontal": bool(transform["flip_horizontal"]) if transform else False,
-                        "flip_vertical": bool(transform["flip_vertical"]) if transform else False,
-                        "source_flip_horizontal": bool(transform["source_flip_horizontal"]) if transform else False,
-                        "source_flip_vertical": bool(transform["source_flip_vertical"]) if transform else False,
-                        "transform_revision": int(transform["revision"]) if transform else 0,
+                        "flip_horizontal": bool(row["transform_flip_horizontal"]) if row["transform_flip_horizontal"] is not None else False,
+                        "flip_vertical": bool(row["transform_flip_vertical"]) if row["transform_flip_vertical"] is not None else False,
+                        "source_flip_horizontal": False if changed else bool(row["transform_source_flip_horizontal"]),
+                        "source_flip_vertical": False if changed else bool(row["transform_source_flip_vertical"]),
+                        "transform_revision": (int(row["transform_revision"]) + 1 if changed else int(row["transform_revision"])) if row["transform_revision"] is not None else 0,
                         "created": False,
                     }
                 db.execute("COMMIT")
