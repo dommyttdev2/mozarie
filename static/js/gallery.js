@@ -374,7 +374,7 @@ async function reviewAndMoveNext() {
   if (isGestureActive() || currentImageActionPending() || !current) return null;
   const currentId = current.id;
   const filteredImages = galleryFilteredImages();
-  const target = nextVisibleImage(filteredImages, currentId, { fallback: true });
+  const target = nextVisibleImage(filteredImages, currentId);
   const reviewed = await queueImageMutation(currentId, async () => {
     const scroll = state.contextMenuScroll;
     return saveWorkspaceFlagNow(current, "reviewed", true, () => {
@@ -388,7 +388,6 @@ async function reviewAndMoveNext() {
     await selectImage(target.id);
     return target;
   }
-  clearCurrentImageSelection();
   return null;
 }
 async function hideAndMoveNext() {
