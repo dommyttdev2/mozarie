@@ -111,11 +111,15 @@ class ImageIoFailureBoundaryTests(unittest.TestCase):
         segment = image_io._jpeg_exif_orientation_one_segment(source.getvalue())
         self.assertEqual(segment[4:10], b"Exif\x00\x00")
 
-    def test_import_name_space_exhaustion_is_reported(self) -> None:
-        with patch.object(Path, "exists", return_value=True):
-            with self.assertRaises(ClientError) as raised:
-                image_io.unique_session_import_destination(Path("C:/scratch/input.png"))
-        self.assertEqual(raised.exception.error_code, "save_write_failed")
+    def test_import_destination_keeps_searching_past_existing_names(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "input.png"
+            source.write_bytes(b"existing")
+            source.with_name("input_2.png").write_bytes(b"existing")
+            self.assertEqual(
+                image_io.unique_session_import_destination(source, {source.with_name("input_3.png")}),
+                source.with_name("input_4.png"),
+            )
 
     def test_save_keeps_written_image_when_timestamp_restore_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -132,8 +136,14 @@ class ImageIoFailureBoundaryTests(unittest.TestCase):
 
     def test_rollback_with_no_backup_is_a_noop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            stage = image_io.SourceReplaceStage(Mock(), Path(directory) / "not-created.backup")
+            source = Path(directory) / "source.png"
+            source.write_bytes(self.png_bytes("RGB"))
+            stat = source.stat()
+            original = ImageRecord("image", source, "source.png", 2, 2, stat.st_mtime_ns, stat.st_size)
+            record = ImageRecord("image", source, "source.png", 2, 2, stat.st_mtime_ns + 1, stat.st_size + 1)
+            stage = image_io.SourceReplaceStage(record, Path(directory) / "not-created.backup", original)
             stage.rollback()
+        self.assertEqual(record.asset_fingerprint(), original.asset_fingerprint())
 
 
 class ModelDownloadFailureBoundaryTests(unittest.TestCase):
