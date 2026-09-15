@@ -622,39 +622,38 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 response = None
                 succeeded = False
                 try:
-                    with STATE.import_staging_gate:
-                        staged_path: Path | None = None
-                        try:
-                            staged_path = self._read_binary_body_to_file(content_length)
-                            STATE.record_import_transfer_bytes(import_session_id, content_length)
-                            requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
-                            # Keep implicit API callers from splitting a
-                            # parallel empty-catalog upload across IDs. This
-                            # lock only verifies that the browser is still
-                            # importing into its already-open project;
-                            # decoding and file copy below retain their
-                            # parallelism.  A request header never opens or
-                            # changes a project.
-                            with STATE.import_lock:
-                                if requested_catalog and STATE.catalog_id != requested_catalog:
-                                    raise ClientError("画像追加中にフォルダを切り替えることはできません。", "operation_in_progress")
-                            import_args = {
-                                "name": name, "relative_path": relative_path, "client_key": client_key,
-                                "include_images": False, "transfer_active": True,
-                                "import_session_id": import_session_id,
-                                "import_project_id": expected_project_id,
-                                "import_catalog_generation": expected_catalog_generation,
-                                "source_identity": source_identity or None,
-                                "source_kind": source_kind,
-                                "intent": import_intent,
-                                "mtime_ns": mtime_ns,
-                                "size_bytes": size_bytes,
-                            }
-                            _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
-                            STATE.cleanup_browser_save_files()
-                        finally:
-                            if staged_path is not None:
-                                staged_path.unlink(missing_ok=True)
+                    staged_path: Path | None = None
+                    try:
+                        staged_path = self._read_binary_body_to_file(content_length)
+                        STATE.record_import_transfer_bytes(import_session_id, content_length)
+                        requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
+                        # Keep implicit API callers from splitting a
+                        # parallel empty-catalog upload across IDs. This
+                        # lock only verifies that the browser is still
+                        # importing into its already-open project;
+                        # decoding and file copy below retain their
+                        # parallelism.  A request header never opens or
+                        # changes a project.
+                        with STATE.import_lock:
+                            if requested_catalog and STATE.catalog_id != requested_catalog:
+                                raise ClientError("画像追加中にフォルダを切り替えることはできません。", "operation_in_progress")
+                        import_args = {
+                            "name": name, "relative_path": relative_path, "client_key": client_key,
+                            "include_images": False, "transfer_active": True,
+                            "import_session_id": import_session_id,
+                            "import_project_id": expected_project_id,
+                            "import_catalog_generation": expected_catalog_generation,
+                            "source_identity": source_identity or None,
+                            "source_kind": source_kind,
+                            "intent": import_intent,
+                            "mtime_ns": mtime_ns,
+                            "size_bytes": size_bytes,
+                        }
+                        _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
+                        STATE.cleanup_browser_save_files()
+                    finally:
+                        if staged_path is not None:
+                            staged_path.unlink(missing_ok=True)
                     response = {"imported": imported, "catalogId": STATE.catalog_id,
                                 "catalogGeneration": STATE.catalog_snapshot()["catalogGeneration"]}
                     succeeded = True
@@ -1200,38 +1199,37 @@ class MosaicHandler(BaseHTTPRequestHandler):
             # A visible thumbnail is single-flight by asset.  Unrelated visible
             # requests are not held behind a fixed process-wide worker count.
             if not thumbnail_path.is_file():
-                with STATE.thumbnail_generation_lock(f"{image_id}-{asset_version}"):
-                    if not thumbnail_path.is_file():
+                if not thumbnail_path.is_file():
+                    with STATE.lock:
+                        current = STATE.images.get(image_id)
+                        if current is None or STATE.asset_version(current) != asset_version:
+                            raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
+                    temporary_path: Path | None = None
+                    try:
+                        with open_image_without_png_text(record.path) as image:
+                            image = ImageOps.exif_transpose(image)
+                            if record.flip_horizontal != record.source_flip_horizontal:
+                                image = ImageOps.mirror(image)
+                            if record.flip_vertical != record.source_flip_vertical:
+                                image = ImageOps.flip(image)
+                            image.thumbnail((280, 280), Image.Resampling.LANCZOS)
+                            output = io.BytesIO()
+                            image.convert("RGB").save(output, format="JPEG", quality=82)
+                        with tempfile.NamedTemporaryFile(dir=thumbnail_dir, suffix=".thumbnail.tmp", delete=False) as handle:
+                            temporary_path = Path(handle.name)
+                            handle.write(output.getvalue())
+                            handle.flush()
                         with STATE.lock:
                             current = STATE.images.get(image_id)
                             if current is None or STATE.asset_version(current) != asset_version:
                                 raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
-                        temporary_path: Path | None = None
-                        try:
-                            with open_image_without_png_text(record.path) as image:
-                                image = ImageOps.exif_transpose(image)
-                                if record.flip_horizontal != record.source_flip_horizontal:
-                                    image = ImageOps.mirror(image)
-                                if record.flip_vertical != record.source_flip_vertical:
-                                    image = ImageOps.flip(image)
-                                image.thumbnail((280, 280), Image.Resampling.LANCZOS)
-                                output = io.BytesIO()
-                                image.convert("RGB").save(output, format="JPEG", quality=82)
-                            with tempfile.NamedTemporaryFile(dir=thumbnail_dir, suffix=".thumbnail.tmp", delete=False) as handle:
-                                temporary_path = Path(handle.name)
-                                handle.write(output.getvalue())
-                                handle.flush()
-                            with STATE.lock:
-                                current = STATE.images.get(image_id)
-                                if current is None or STATE.asset_version(current) != asset_version:
-                                    raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
-                            os.replace(temporary_path, thumbnail_path)
-                            temporary_path = None
-                        except (MemoryError, OSError) as exc:
-                            raise ClientError("サムネイルを作成できませんでした。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
-                        finally:
-                            if temporary_path is not None:
-                                temporary_path.unlink(missing_ok=True)
+                        os.replace(temporary_path, thumbnail_path)
+                        temporary_path = None
+                    except (MemoryError, OSError) as exc:
+                        raise ClientError("サムネイルを作成できませんでした。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
+                    finally:
+                        if temporary_path is not None:
+                            temporary_path.unlink(missing_ok=True)
             try:
                 with thumbnail_path.open("rb") as handle:
                     self._stream_file(handle, None, "image/jpeg", cache_control)

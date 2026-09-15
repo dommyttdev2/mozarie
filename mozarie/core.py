@@ -84,7 +84,6 @@ DEFAULT_DETECTION_CONFIDENCE = 0.50
 SECONDARY_MIN_CONFIDENCE = 0.50
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 IO_CHUNK_BYTES = 1024 * 1024
-THUMBNAIL_WORKERS = 4
 LOGGER = logging.getLogger(__name__)
 PUBLIC_ERROR_PARAMS: dict[str, frozenset[str]] = {
     "gpu_out_of_memory": frozenset({"parallelism"}),

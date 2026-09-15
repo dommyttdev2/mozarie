@@ -17,7 +17,6 @@ from typing import Any
 
 from .core import (
     APP_DIR, CACHE_BASE_DIR, DEFAULT_COLORS, LOGGER, SESSION_BASE_DIR,
-    THUMBNAIL_WORKERS,
     BrowserSaveReceipt, BrowserSaveToken, Candidate, ClientError, ImageRecord,
     InferenceGate, Job, JobControl, torch_module,
 )
@@ -137,8 +136,6 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         # mutation still uses ``lock``; never acquire an image lock while that
         # global lock is held.
         self._image_io_locks: dict[str, threading.RLock] = {}
-        self.thumbnail_gate = threading.BoundedSemaphore(THUMBNAIL_WORKERS)
-        self.import_staging_gate = threading.BoundedSemaphore(10)
         self.browser_save_tokens: dict[str, BrowserSaveToken] = {}
         # A claimed token is being committed outside ``lock``. A later prepare
         # must leave its already-written copy alone until the commit finishes.
@@ -177,11 +174,6 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         """Let long-lived local operations leave cleanly during process shutdown."""
         self.shutdown_requested.set()
         self.workspace_store.shutdown()
-
-    @contextmanager
-    def thumbnail_generation_lock(self, _key: str):
-        with self.thumbnail_gate:
-            yield
 
     def set_image_flags_bulk(self, payload: dict[str, Any]) -> dict[str, dict[str, bool]]:
         """Keep durable bulk flags and a concurrent catalog publication in one state epoch."""
