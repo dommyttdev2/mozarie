@@ -44,7 +44,7 @@ assert.deepEqual([...averaged], [50, 50, 0, 255, 50, 50, 0, 255, 9, 9, 9, 255], 
 assert.equal(response.generation, 7, "the generation is returned unchanged");
 assert.equal(transfer.length, 1, "the worker transfers one output buffer");
 assert.equal(transfer[0], response.output, "the transferred bitmap is the response output");
-assert.equal(canvases.every((canvas) => canvas.width === 1 && canvas.height === 1), true, "full-frame scratch canvases are released after their frame transfers");
+assert.equal(canvases.filter((canvas) => canvas.width === 3 && canvas.height === 1).length, 2, "a full frame retains one bounded pair of scratch canvases for later previews");
 
 const transparent = render([30, 40, 50, 0], [255], 1, 1, 1, 8);
 assert.deepEqual([...transparent], [30, 40, 50, 0], "a fully transparent masked pixel does not invent an RGB colour");
@@ -70,10 +70,9 @@ self.onmessage({ data: { type: "patch", sourceId: "patch", left: 2, top: 0, widt
 } });
 assert.equal(response.patch, true, "a drag preview returns a patch instead of a full frame");
 assert.deepEqual([...response.output.pixels], [55, 0, 0, 255, 70, 0, 0, 255, 55, 0, 0, 255, 80, 0, 0, 255], "patch mosaic averages only the aligned masked source block");
-assert.equal(canvases.every((canvas) => canvas.width === 1 && canvas.height === 1), true, "patch scratch canvases are released after their frame transfers");
+assert.equal(canvases.filter((canvas) => canvas.width === 2 && canvas.height === 2).length, 2, "a drag patch retains one bounded scratch pair at its current patch size");
 
-// Each completion drops scratch state. The next patch must recreate it rather
-// than reuse a retained full-frame allocation.
+// Repeated previews at the same patch size reuse the bounded scratch pair.
 self.onmessage({ data: { type: "source", sourceId: "scratch-cycles", source: { width: 1, height: 1, pixels: new Uint8ClampedArray([4, 5, 6, 255]) }, generation: 12 } });
 const scratchStart = canvases.length;
 for (const generation of [13, 14, 15]) {
@@ -81,9 +80,9 @@ for (const generation of [13, 14, 15]) {
     mask: { width: 1, height: 1, pixels: new Uint8ClampedArray([0, 0, 0, 255]), close() {} },
   } });
   assert.equal(response.generation, generation, `scratch cycle ${generation} returns its patch`);
-  assert.equal(canvases.every((canvas) => canvas.width === 1 && canvas.height === 1), true, `scratch cycle ${generation} returns to the released plateau`);
+  assert.equal(canvases.slice(scratchStart).every((canvas) => canvas.width === 1 && canvas.height === 1), true, `scratch cycle ${generation} keeps its one-pixel scratch pair bounded`);
 }
-assert.ok(canvases.length >= scratchStart + 6, "three patch cycles recreate two scratch canvases per completed frame");
+assert.equal(canvases.length, scratchStart + 2, "three same-size patch cycles reuse two scratch canvases");
 
 response = undefined;
 const wrongPatchMask = { close() { this.closed = true; } };
