@@ -1,5 +1,6 @@
 import io
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -7,7 +8,7 @@ from unittest import mock
 from PIL import Image, PngImagePlugin
 
 from mozarie.core import ClientError
-from mozarie.image_io import inspect_import_image
+from mozarie.image_io import inspect_import_image, open_image
 
 
 class InputImageValidationTests(unittest.TestCase):
@@ -21,13 +22,49 @@ class InputImageValidationTests(unittest.TestCase):
                 with self.assertRaises(ClientError):
                     inspect_import_image(path, ".jpg")
 
-    def test_pillow_bomb_warning_is_rejected(self):
+    def test_pillow_pixel_guard_is_disabled_only_while_opening(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "small.png"
             Image.new("RGB", (2, 2), "white").save(path)
             with mock.patch.object(Image, "MAX_IMAGE_PIXELS", 1):
-                with self.assertRaises(ClientError):
-                    inspect_import_image(path, ".png")
+                self.assertEqual(inspect_import_image(path, ".png"), (2, 2))
+                self.assertEqual(Image.MAX_IMAGE_PIXELS, 1)
+
+    def test_pixel_guard_is_restored_after_concurrent_openers_finish(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "small.png"
+            Image.new("RGB", (2, 2), "white").save(path)
+            entered = threading.Barrier(3)
+            release = threading.Event()
+            failures: list[BaseException] = []
+
+            def worker() -> None:
+                try:
+                    with open_image(path):
+                        entered.wait(timeout=2)
+                        release.wait(2)
+                except BaseException as exc:  # test thread failures must be reported by the parent.
+                    failures.append(exc)
+
+            with mock.patch.object(Image, "MAX_IMAGE_PIXELS", 1):
+                threads = [threading.Thread(target=worker) for _index in range(2)]
+                for thread in threads:
+                    thread.start()
+                entered.wait(timeout=2)
+                self.assertIsNone(Image.MAX_IMAGE_PIXELS)
+                release.set()
+                for thread in threads:
+                    thread.join(2)
+                self.assertEqual(failures, [])
+                self.assertEqual(Image.MAX_IMAGE_PIXELS, 1)
+
+    def test_open_failures_are_reported_as_image_read_failed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "broken.png"
+            path.write_bytes(b"not an image")
+            with self.assertRaises(ClientError) as raised:
+                inspect_import_image(path, ".png")
+            self.assertEqual(raised.exception.error_code, "image_read_failed")
 
     def test_png_with_large_text_metadata_is_inspected_from_pixels(self):
         """A valid image must not disappear because optional PNG text is huge."""
