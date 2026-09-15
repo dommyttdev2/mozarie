@@ -16,6 +16,15 @@ from mozarie.workspace import WorkspaceStore
 
 class CandidateExpandTests(unittest.TestCase):
     @staticmethod
+    def _workspace_image(store: WorkspaceStore, root: Path) -> str:
+        record = type("Record", (), {
+            "relative_path": "one.png", "size_bytes": 1, "mtime_ns": 1,
+            "width": 5, "height": 5,
+        })()
+        _catalog_id, _source_id, images = store.create_projectless_native_workspace(root, [record])
+        return str(images["one.png"]["image_id"])
+
+    @staticmethod
     def _png(expand_px: int | None = None) -> bytes:
         image = Image.new("L", (5, 5))
         image.putpixel((2, 2), 255)
@@ -74,9 +83,7 @@ class CandidateExpandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = WorkspaceStore(root)
-            catalog = store.ensure_catalog()
-            record = type("Record", (), {"relative_path": "one.png", "size_bytes": 1, "mtime_ns": 1})()
-            image_id = str(store.reconcile_images(catalog, [record])["one.png"]["image_id"])
+            image_id = self._workspace_image(store, root)
             mask_path = root / "candidate.png"
             raw = self._png(3)
             mask_path.write_bytes(raw)
@@ -94,9 +101,7 @@ class CandidateExpandTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             store = WorkspaceStore(root)
-            catalog = store.ensure_catalog()
-            record = type("Record", (), {"relative_path": "one.png", "size_bytes": 1, "mtime_ns": 1})()
-            image_id = str(store.reconcile_images(catalog, [record])["one.png"]["image_id"])
+            image_id = self._workspace_image(store, root)
             mask_path = root / "candidate.png"
             raw = self._png()
             mask_path.write_bytes(raw)
@@ -115,9 +120,9 @@ class CandidateExpandTests(unittest.TestCase):
                     metadata.add_text("mozarie_expand_px", value)
                     source.save(output, format="PNG", pnginfo=metadata)
                 with self.assertRaises(ValueError):
-                    WorkspaceStore._candidate_row({"mask_png": output.getvalue()})
+                    WorkspaceStore._candidate_row({"expand_px": value})
         with self.assertRaises(ValueError):
-            WorkspaceStore._candidate_row({"mask_png": "not-bytes"})
+            WorkspaceStore._candidate_row({"expand_px": "not-bytes"})
 
     def test_candidate_rejects_non_integer_padding(self):
         for value in (True, 1.5, -1):
