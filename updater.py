@@ -393,12 +393,9 @@ def _archive_plan(archive: Path) -> tuple[str, list[tuple[str, PurePosixPath, in
             raise UpdateError(tr("archive_missing_app"))
         source_name = roots.pop()
         planned: list[tuple[str, PurePosixPath, int, bool]] = []
-        names: set[str] = set()
+        targets: dict[tuple[str, ...], bool] = {}
         extracted_size = 0
         for info, path in entries:
-            if info.filename in names:
-                raise UpdateError(tr("archive_invalid_count"))
-            names.add(info.filename)
             member = PurePosixPath(*path.parts[1:])
             if not member.parts:
                 if not info.is_dir():
@@ -406,9 +403,16 @@ def _archive_plan(archive: Path) -> tuple[str, list[tuple[str, PurePosixPath, in
                 continue
             if not _managed_archive_member(member, is_directory=info.is_dir()):
                 raise UpdateError(tr("archive_unmanaged"))
+            canonical_target = tuple(part.casefold() for part in member.parts)
+            if canonical_target in targets:
+                raise UpdateError(tr("archive_invalid_count"))
+            targets[canonical_target] = info.is_dir()
             planned.append((info.filename, member, info.file_size, info.is_dir()))
             if not info.is_dir():
                 extracted_size += info.file_size
+        file_targets = {target for target, is_directory in targets.items() if not is_directory}
+        if any(target[:depth] in file_targets for target in targets for depth in range(1, len(target))):
+            raise UpdateError(tr("archive_invalid_count"))
         return source_name, planned, extracted_size
 
 
