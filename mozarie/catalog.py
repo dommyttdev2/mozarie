@@ -1112,6 +1112,145 @@ class CatalogMixin:
         """Remove one image's working state without deleting its source file."""
         return self.remove_images_from_catalog([image_id])
 
+    def prepare_source_delete(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Check the catalogue and native file fingerprints before deletion."""
+        if not isinstance(payload, dict) or not isinstance(payload.get("imageIds"), list):
+            raise ClientError("削除する画像が正しくありません。", "input_invalid")
+        delete_token = payload.get("deleteToken")
+        if not isinstance(delete_token, str) or not delete_token:
+            raise ClientError("削除操作の識別子が正しくありません。", "input_invalid")
+        requested_ids = list(dict.fromkeys(str(image_id) for image_id in payload["imageIds"] if str(image_id)))
+        if not requested_ids:
+            raise ClientError("削除する画像がありません。", "image_not_found")
+        with self.lock:
+            receipt = self.source_delete_receipts.get(delete_token)
+            if receipt is not None:
+                return {"committed": True, "deleteToken": delete_token, "preparedImageIds": receipt["removedImageIds"], "failed": receipt.get("failed", [])}
+            preparation = self.source_delete_preparations.get(delete_token)
+            if preparation is not None:
+                return dict(preparation["result"])
+            self._assert_catalog_mutable(allow_terminal_cleanup=True)
+            records = {image_id: self.images.get(image_id) for image_id in requested_ids}
+        prepared: list[str] = []
+        failures: list[dict[str, str]] = []
+        for image_id in requested_ids:
+            record = records.get(image_id)
+            if record is None:
+                failures.append({"imageId": image_id, "reason": "image_not_found"})
+                continue
+            if record.source_kind == "filesystem":
+                try:
+                    stat = record.path.stat()
+                except OSError:
+                    failures.append({"imageId": image_id, "reason": "source_unavailable"})
+                    continue
+                if (stat.st_mtime_ns, stat.st_size) != (record.mtime_ns, record.size_bytes):
+                    failures.append({"imageId": image_id, "reason": "source_changed"})
+                    continue
+            prepared.append(image_id)
+        result = {"committed": False, "deleteToken": delete_token, "preparedImageIds": prepared, "failed": failures}
+        with self.lock:
+            self.source_delete_preparations[delete_token] = {"imageIds": set(prepared), "result": dict(result)}
+        return result
+
+    def delete_images_with_sources(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Permanently remove source files and their Mozarie state.
+
+        Native sources are first moved beside themselves.  The durable workspace
+        deletion is then committed, and only then is the renamed source
+        unlinked.  A database failure therefore leaves the original pathname
+        usable.  Browser sources have already been removed through their
+        directory handle by the caller; the acknowledgement is intentionally
+        checked before their server-side copy is discarded.
+        """
+        if not isinstance(payload, dict) or not isinstance(payload.get("imageIds"), list):
+            raise ClientError("削除する画像が正しくありません。", "input_invalid")
+        delete_token = payload.get("deleteToken")
+        if not isinstance(delete_token, str) or not delete_token:
+            raise ClientError("削除操作の識別子が正しくありません。", "input_invalid")
+        requested_ids = list(dict.fromkeys(str(image_id) for image_id in payload["imageIds"] if str(image_id)))
+        if not requested_ids:
+            raise ClientError("削除する画像がありません。", "image_not_found")
+        browser_deleted = {str(image_id) for image_id in payload.get("browserDeletedImageIds", [])}
+
+        with self.import_lock:
+            with self.lock:
+                receipt = self.source_delete_receipts.get(delete_token)
+                if receipt is not None:
+                    return dict(receipt)
+                preparation = self.source_delete_preparations.get(delete_token)
+                if preparation is None:
+                    raise ClientError("削除確認の有効期限が切れました。もう一度削除を実行してください。", "source_delete_not_prepared")
+                self._assert_catalog_mutable(allow_terminal_cleanup=True)
+                prepared_ids = preparation["imageIds"]
+                records = {image_id: self.images.get(image_id) for image_id in requested_ids if image_id in prepared_ids}
+
+            removable: list[ImageRecord] = []
+            failures: list[dict[str, str]] = []
+            for image_id in requested_ids:
+                record = records.get(image_id)
+                if record is None:
+                    failures.append({"imageId": image_id, "reason": "image_not_found"})
+                    continue
+                if record.source_kind == "filesystem":
+                    try:
+                        stat = record.path.stat()
+                    except OSError:
+                        failures.append({"imageId": image_id, "reason": "source_unavailable"})
+                        continue
+                    if (stat.st_mtime_ns, stat.st_size) != (record.mtime_ns, record.size_bytes):
+                        failures.append({"imageId": image_id, "reason": "source_changed"})
+                        continue
+                elif image_id not in browser_deleted:
+                    failures.append({"imageId": image_id, "reason": "browser_source_not_deleted"})
+                    continue
+                removable.append(record)
+
+            renamed: list[tuple[ImageRecord, Path]] = []
+            confirmed: list[ImageRecord] = []
+            for record in removable:
+                if record.source_kind != "filesystem":
+                    confirmed.append(record)
+                    continue
+                quarantine = record.path.with_name(f".{record.path.name}.mozarie-delete-{uuid.uuid4().hex}")
+                try:
+                    os.replace(record.path, quarantine)
+                except OSError:
+                    failures.append({"imageId": record.image_id, "reason": "source_delete_failed"})
+                    continue
+                renamed.append((record, quarantine))
+                confirmed.append(record)
+
+            if confirmed:
+                try:
+                    removed = self.remove_images_from_catalog([record.image_id for record in confirmed])
+                except Exception:
+                    for record, quarantine in reversed(renamed):
+                        try:
+                            if quarantine.exists():
+                                os.replace(quarantine, record.path)
+                        except OSError:
+                            LOGGER.exception("元画像の削除復元に失敗: %s", record.relative_path)
+                    raise
+            else:
+                removed = {"images": self.list_images(), "removedImageIds": [], "catalogGeneration": self.catalog_generation}
+
+            removed_ids = set(removed["removedImageIds"])
+            for record, quarantine in renamed:
+                if record.image_id not in removed_ids:
+                    continue
+                try:
+                    quarantine.unlink()
+                except OSError:
+                    LOGGER.exception("元画像の完全削除に失敗: %s", record.relative_path)
+                    failures.append({"imageId": record.image_id, "reason": "source_delete_failed"})
+            result = {**removed, "failed": failures}
+            with self.lock:
+                self.source_delete_receipts[delete_token] = dict(result)
+                self.source_delete_preparations.pop(delete_token, None)
+            LOGGER.info("元画像を削除: 成功=%d 失敗=%d", len(removed["removedImageIds"]), len(failures))
+            return result
+
     def remove_images_from_catalog(self, image_ids: list[str]) -> dict[str, Any]:
         """Remove saved images from the working catalog without deleting source files."""
         if not isinstance(image_ids, list):

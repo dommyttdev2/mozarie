@@ -151,6 +151,11 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         # must leave its already-written copy alone until the commit finishes.
         self.browser_save_claims: set[str] = set()
         self.browser_save_receipts: dict[str, BrowserSaveReceipt] = {}
+        # Source deletion is deliberately not undoable.  Keep completed
+        # receipts for this process so a browser can repeat the same request
+        # after its response was lost without deleting a later catalogue item.
+        self.source_delete_receipts: dict[str, dict[str, Any]] = {}
+        self.source_delete_preparations: dict[str, dict[str, Any]] = {}
         self._pending_browser_save_cleanup: list[tuple[Path, tuple[int, int] | None]] = []
         self.output_destination_lock = threading.Lock()
         # Windows native dialogs are process-modal. Keep folder and model

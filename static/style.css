@@ -137,7 +137,7 @@ h2 { margin: 0 0 2px; font-size: 14px; } .muted { color: #98a2ad; font-size: 12p
 .candidate-row-manual-exclude .candidate-label { color: #9ee5f2; }
 .candidate-row-manual-exclude-erase .candidate-label { color: #ffd18d; }
 .candidate-delete { width: 26px; height: 26px; min-width: 26px; min-height: 26px; padding: 0; border-color: #70464b; color: #f08b95; font-size: 18px; line-height: 1; }
-.candidate-row-actions .candidate-delete { margin-left: auto; }
+.candidate-row-heading .candidate-delete { margin-left: auto; }
 .candidate-delete:hover:not(:disabled) { border-color: #d65f6b; background: #4b2d31; color: #ffd8dc; }
 .candidate-section-heading { display: grid; gap: 7px; padding: 10px 10px 8px; }
 .candidate-section-actions { display: flex; flex-wrap: wrap; gap: 5px; align-items: center; min-width: 0; }

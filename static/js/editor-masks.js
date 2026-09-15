@@ -242,8 +242,10 @@ function renderCandidates() {
     return button;
   };
   const appendRow = (row, label, enabled, actions) => {
+    const remove = actions.find((action) => action.classList?.contains("candidate-delete"));
     const heading = document.createElement("div"); heading.className = "candidate-row-heading"; heading.append(label);
-    const actionRow = document.createElement("div"); actionRow.className = "candidate-row-actions"; actionRow.append(enabled, ...actions);
+    if (remove) heading.append(remove);
+    const actionRow = document.createElement("div"); actionRow.className = "candidate-row-actions"; actionRow.append(enabled, ...actions.filter((action) => action !== remove));
     row.append(heading, actionRow);
   };
   const appendManual = (list, role) => {

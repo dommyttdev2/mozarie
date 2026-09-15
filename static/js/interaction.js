@@ -87,11 +87,14 @@ function updateBlockSizeDisplay() {
 }
 
 function confirmAction(title, message, key = null) {
+  const alwaysConfirm = key === "sourceDelete";
+  if (alwaysConfirm) key = null;
   const newConfirmation = new Set(["candidateDelete", "candidateRoleDelete", "overwriteSource", "deleteSourceAfterCopy"]);
   if (key && (newConfirmation.has(key) ? state.settings?.confirmations?.[key] !== true : state.settings?.confirmations?.[key] === false)) return Promise.resolve(true);
   const dialog = $("#confirmDialog");
   $("#confirmTitle").textContent = title;
   $("#confirmMessage").textContent = message;
+  $("#confirmNeverShow").closest("label").hidden = alwaysConfirm;
   return new Promise((resolve) => {
     const finish = () => {
       const accepted = dialog.returnValue === "confirm";
@@ -101,7 +104,7 @@ function confirmAction(title, message, key = null) {
           state.settings = data.settings;
         }).catch(() => {});
       }
-      $("#confirmNeverShow").checked = false; resolve(accepted);
+      $("#confirmNeverShow").checked = false; $("#confirmNeverShow").closest("label").hidden = false; resolve(accepted);
     };
     dialog.addEventListener("close", finish, { once: true });
     showModalFromInvoker(dialog);
@@ -257,54 +260,91 @@ async function restoreDeletionSelection(snapshot, imageIds) {
   if (!imageId) clearCurrentImageSelection();
   else if (!(state.currentId === imageId && state.currentImage)) await selectImage(imageId, true, { saveCurrentDraft: false });
 }
+async function preflightBrowserSourceDelete(images) {
+  const ready = []; const failed = [];
+  for (const image of images) {
+    if (image.sourceKind === "filesystem") { ready.push(image); continue; }
+    const access = sourceAccessFor(image.id);
+    try {
+      if (!sourceCanDelete(image)) throw codedError("source_action_unavailable");
+      await ensureHandlePermission(access, true);
+      const file = await access.fileHandle.getFile();
+      if (file.size !== image.sizeBytes || file.lastModified * 1_000_000 !== image.mtimeNs) throw codedError("stale_asset");
+      ready.push(image);
+    } catch (error) { failed.push({ imageId: image.id, reason: error?.code || "source_delete_failed" }); }
+  }
+  return { ready, failed };
+}
+
+async function deleteBrowserSources(images) {
+  const deleted = []; const failed = [];
+  for (const image of images) {
+    if (image.sourceKind === "filesystem") continue;
+    try { await removeSourceHandle(sourceAccessFor(image.id)); deleted.push(image.id); }
+    catch (error) { failed.push({ imageId: image.id, reason: error?.code || "source_delete_failed" }); }
+  }
+  return { deleted, failed };
+}
+
+async function commitSourceDeleteWithRetry(payload) {
+  try { return await catalogApi("/api/catalog/delete-source", payload); }
+  catch (error) {
+    if (error?.code !== "connection_lost") throw error;
+    // The source may already be gone while only the response was lost.  The
+    // server keeps this token's receipt, so repeating it is safe.
+    return catalogApi("/api/catalog/delete-source", payload);
+  }
+}
+
+async function permanentlyDeleteImages(images, visibleImages) {
+  if (!images.length || isBusy() || state.importing) return;
+  const ids = images.map((image) => image.id);
+  const title = ids.length === 1 ? t("confirm.removeImage.title") : t("confirm.removeImages.title");
+  const message = ids.length === 1 ? t("confirm.removeImage.message") : t("confirm.removeImages.message", { count: ids.length });
+  if (!await confirmAction(title, message, "sourceDelete")) return;
+  const imageIds = new Set(ids);
+  const selection = deletionSelectionSnapshot(imageIds, visibleImages);
+  const token = crypto.randomUUID();
+  state.catalogMutation = true; invalidatePendingImage(); updateActionButtons();
+  try {
+    await flushAllImageMutations();
+    await flushAllWorkspaceMutations();
+    const local = await preflightBrowserSourceDelete(images);
+    if (!local.ready.length) throw codedError(local.failed[0]?.reason || "source_action_unavailable");
+    const prepared = await catalogApi("/api/catalog/delete-source/prepare", { imageIds: local.ready.map((image) => image.id), deleteToken: token });
+    const preparedIds = new Set(prepared.preparedImageIds || []);
+    const preparedImages = local.ready.filter((image) => preparedIds.has(image.id));
+    const browser = await deleteBrowserSources(preparedImages);
+    const browserDeleted = new Set(browser.deleted);
+    const commitImages = preparedImages.filter((image) => image.sourceKind === "filesystem" || browserDeleted.has(image.id));
+    let data = { images: state.images, removedImageIds: [], failed: [] };
+    if (commitImages.length) data = await commitSourceDeleteWithRetry({
+      imageIds: commitImages.map((image) => image.id), deleteToken: token, browserDeletedImageIds: browser.deleted,
+    });
+    const removed = new Set(data.removedImageIds || []);
+    for (const image of images.filter((item) => removed.has(item.id))) {
+      releaseImageCaches(image.id); state.sourceAccess.delete(image.id); state.drafts.delete(image.id); state.maskStatus.delete(image.id); clearReviewForRemovedImage(image);
+      state.selectedImageIds.delete(image.id);
+    }
+    state.images = data.images || state.images;
+    if (state.project?.id && removed.size) await forgetProjectImageSources(state.project.id, [...removed]);
+    loadReviewedPaths(); pruneSourceAccess();
+    if (!state.images.length) { state.batchMode = false; clearBatchSelection(); }
+    if (selection.removesSelection) clearCurrentImageSelection();
+    renderCatalogViews(); updateSelectionActionBar();
+    await restoreDeletionSelection(selection, imageIds);
+    const failed = [...local.failed, ...(prepared.failed || []), ...browser.failed, ...(data.failed || [])];
+    if (failed.length) showUserError(codedError(failed[0].reason));
+  } catch (error) {
+    await restoreDeletionSelection(selection, imageIds);
+    showUserError(error);
+  } finally { state.catalogMutation = false; updateActionButtons(); }
+}
+
 async function removeImageFromCatalog(imageId = state.contextMenuImageId) {
   if (!canRemoveCurrentImage() || imageId !== state.currentId) return;
   const image = state.images.find((item) => item.id === imageId);
-  if (!image) return;
-  if (!await confirmAction(t("confirm.removeImage.title"), t("confirm.removeImage.message"), "removeImage")) return;
-
-  closeCatalogContextMenu();
-  const imageIds = new Set([imageId]);
-  const selection = deletionSelectionSnapshot(imageIds, galleryFilteredImages());
-  state.catalogMutation = true;
-  invalidatePendingImage();
-  updateActionButtons();
-  const projectId = state.project?.id || null;
-  const cleanupIntent = projectId ? await rememberProjectImageSourceCleanup(projectId, imageId) : null;
-  try {
-    await runCatalogTransition(async ({ epoch, signal }) => {
-      await flushAllImageMutations();
-      await flushWorkspaceDraft(imageId);
-      const data = await catalogApi(`/api/catalog/image/${encodeURIComponent(imageId)}`, {}, { method: "DELETE", signal, resyncOnFailure: false });
-      if (!isCurrentCatalogEpoch(epoch)) return;
-      state.images = data.images;
-      if (projectId && await forgetProjectImageSources(projectId, [imageId]) && cleanupIntent) {
-        await clearProjectSourceCleanup({ intentIds: [cleanupIntent] });
-      }
-      loadReviewedPaths();
-      state.selectedImageIds.delete(imageId);
-      if (!state.images.length) { state.batchMode = false; clearBatchSelection(); }
-      releaseImageCaches(imageId);
-      state.sourceAccess.delete(imageId);
-      state.drafts.delete(imageId);
-      state.maskStatus.delete(imageId);
-      pruneSourceAccess();
-      clearReviewForRemovedImage(image);
-      if (selection.removesSelection) clearCurrentImageSelection();
-      renderCatalogViews(); updateSelectionActionBar();
-    });
-    await restoreDeletionSelection(selection, imageIds);
-  } catch (error) {
-    if (cleanupIntent && Number.isInteger(error?.status) && error.status >= 400 && error.status < 500) {
-      await clearProjectSourceCleanup({ intentIds: [cleanupIntent] });
-    } else if (cleanupIntent && state.project?.id === projectId && !state.images.some((item) => item.id === imageId)
-      && await forgetProjectImageSources(projectId, [imageId])) {
-      await clearProjectSourceCleanup({ intentIds: [cleanupIntent] });
-    }
-    await restoreDeletionSelection(selection, imageIds);
-    showUserError(error);
-  }
-  finally { state.catalogMutation = false; updateActionButtons(); }
+  if (image) await permanentlyDeleteImages([image], galleryFilteredImages());
 }
 
 async function runSelectionAction(action) {
@@ -330,48 +370,7 @@ async function runSelectionAction(action) {
   if (action === "detect") return openDetectionDialog(images.filter(isProcessableImage).map((image) => image.id));
   if (action === "clear") return clearMasks(images.filter(isProcessableImage).map((image) => image.id), "confirm.clearAllMasks.title", "confirm.clearAllMasks.message");
   if (action === "remove") {
-    if (!await confirmAction(t("confirm.removeImages.title"), t("confirm.removeImages.message", { count: ids.length }), "removeImage")) return;
-    const epoch = beginCatalogEpoch(); state.catalogMutation = true; updateActionButtons();
-    const imageIds = new Set(ids);
-    const selection = deletionSelectionSnapshot(imageIds, overviewImages());
-    invalidatePendingImage();
-    const projectId = state.project?.id || null;
-    let cleanupIntents = new Map();
-    try {
-      await flushAllImageMutations();
-      await flushAllWorkspaceMutations();
-      cleanupIntents = projectId ? new Map(await Promise.all(ids.map(async (imageId) => [imageId, await rememberProjectImageSourceCleanup(projectId, imageId)]))) : new Map();
-      const data = await catalogApi("/api/catalog/remove", { imageIds: ids }, { method: "POST" });
-      if (!isCurrentCatalogEpoch(epoch)) return;
-      for (const image of images) {
-        releaseImageCaches(image.id); state.sourceAccess.delete(image.id); state.drafts.delete(image.id); state.maskStatus.delete(image.id); clearReviewForRemovedImage(image);
-      }
-      state.images = data.images || [];
-      if (projectId) {
-        const removed = ids.filter((imageId) => !state.images.some((image) => image.id === imageId));
-        if (await forgetProjectImageSources(projectId, removed)) {
-          await clearProjectSourceCleanup({ intentIds: removed.map((imageId) => cleanupIntents.get(imageId)).filter(Boolean) });
-        }
-      }
-      loadReviewedPaths();
-      pruneSourceAccess();
-      if (selection.removesSelection) clearCurrentImageSelection();
-      state.batchMode = false; clearBatchSelection(); updateSelectionActionBar();
-      renderCatalogViews();
-      await restoreDeletionSelection(selection, imageIds);
-    } catch (error) {
-      if (Number.isInteger(error?.status) && error.status >= 400 && error.status < 500) {
-        await clearProjectSourceCleanup({ intentIds: [...cleanupIntents.values()].filter(Boolean) });
-      } else if (projectId && state.project?.id === projectId) {
-        const removed = ids.filter((imageId) => !state.images.some((image) => image.id === imageId));
-        if (removed.length && await forgetProjectImageSources(projectId, removed)) {
-          await clearProjectSourceCleanup({ intentIds: removed.map((imageId) => cleanupIntents.get(imageId)).filter(Boolean) });
-        }
-      }
-      await restoreDeletionSelection(selection, imageIds);
-      if (isCurrentCatalogEpoch(epoch)) showUserError(error);
-    }
-    finally { state.catalogMutation = false; updateActionButtons(); }
+    await permanentlyDeleteImages(images, overviewImages());
   }
 }
 

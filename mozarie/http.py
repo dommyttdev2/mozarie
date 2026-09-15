@@ -71,6 +71,8 @@ _POST_OPERATION_LABELS = {
     "/api/catalog/clear": "画像一覧クリア",
     "/api/workspace/images": "画像状態の一括変更",
     "/api/catalog/remove": "画像一覧から削除",
+    "/api/catalog/delete-source": "元画像を完全削除",
+    "/api/catalog/delete-source/prepare": "元画像削除の確認",
     "/api/masks/clear": "モザイク指定クリア",
     "/api/detect": "自動検出",
     "/api/candidates/batch": "候補の一括変更",
@@ -696,6 +698,12 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/catalog/remove":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
                                                    lambda: STATE.remove_images_from_catalog(payload.get("imageIds", []))))
+            elif path == "/api/catalog/delete-source/prepare":
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.prepare_source_delete(payload)))
+            elif path == "/api/catalog/delete-source":
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.delete_images_with_sources(payload)))
             elif path == "/api/masks/clear":
                 self._json({"cleared": self._catalog_mutation(expected_project_id, expected_catalog_generation,
                                                                 lambda: STATE.clear_masks(payload.get("imageIds", [])))})
