@@ -123,7 +123,7 @@ const context = {
   fetchBitmap: async () => ({ close() {} }), maskUrl: (_imageId, candidateId, revision) => `${candidateId}:${revision}`, closeBitmap(bitmap) { bitmap.close(); },
   releaseCandidateBitmap() {}, releaseCandidateBundles() {}, invalidateCandidateBundles: () => events.push("invalidate"), markImagesUnreviewed: () => events.push("unreview"),
   clearBoundaryInteraction: () => events.push("boundary-clear"), updateBoundaryActions() {}, setStatusKey: () => events.push("status"), showUserError: (error) => events.push(`error:${error}`),
-  canDetectBoundary: () => true, compareEventSide: () => "right", compareSideOffset: () => 100,
+  canDetectBoundary: () => true, compareEventSide: () => "right", compareSideOffset: () => 100, inverseTransformImagePoint: (point) => point,
   flushWorkspaceDraft: async () => {}, applyProjectSnapshot() {}, selectImage: async () => {},
   boundaryRequests: () => [{ draft: state.boundaryDrafts[0], draftIds: ["draft"] }], pointForRoi: (roi) => ({ x: roi.left + 1, y: roi.top + 1 }),
   api: async () => ({ candidates: [{ id: "boundary", enabled: true }], candidateRevision: 8 }),
@@ -292,7 +292,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
     ];
     state.removedCandidateIds = new Set(); state.candidateUpdateChains = new Map(); state.candidateUpdateVersions = new Map();
     state.candidateDeleting = new Set(); state.candidateBatchPending = new Set(); state.maskStatus = new Map([["image", true]]);
-    state.blinkCandidateIds = new Set(); state.blinkModes = new Map(); state.blinkPhase = false; state.blinkTimer = null;
+    state.blinkCandidateIds = new Set(); state.blinkModes = new Map(); state.blinkRoleModes = new Map(); state.blinkPhase = false; state.blinkTimer = null;
     state.manualMaskPresent = true; state.manualExclusionPresent = true; state.manualExclusionErasePresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
     addCtx.pixels = true; exclusionCtx.pixels = true; exclusionEraseCtx.pixels = true;
     state.images = [{ id: "image", width: 100, height: 80, assetVersion: "a", candidateRevision: 4, candidateCount: 2, enabledCandidateCount: 1 }];
@@ -483,22 +483,22 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   // already-visible exclusion layer is in its ordinary display mode.  Check
   // before painting, because the new erase layer is not yet a member of that
   // set at stroke start.
-  resetCandidateState(); state.tool = "exclude_eraser"; exclusionEraseCtx.pixels = false;
-  test.setCandidateDisplayMode(["exclude", "manual:exclude"], "normal");
+  resetCandidateState(); state.tool = "exclude_eraser"; state.manualExclusionErasePresent = false; exclusionEraseCtx.pixels = false;
+  test.toggleCandidateDisplay("exclude");
   test.beginManualStroke({ x: 5, y: 5 });
   assert.equal(test.candidateDisplayMode("manual:excludeErase"), "normal", "an exclusion erase joins when automatic and manual exclusions are normally displayed");
 
-  resetCandidateState(); state.tool = "exclude_eraser"; exclusionEraseCtx.pixels = false;
+  resetCandidateState(); state.tool = "exclude_eraser"; state.manualExclusionErasePresent = false; exclusionEraseCtx.pixels = false;
   test.setCandidateDisplayMode(["exclude"], "normal");
   test.beginManualStroke({ x: 5, y: 5 });
   assert.equal(test.candidateDisplayMode("manual:excludeErase"), "off", "an exclusion erase does not join when an existing manual exclusion is hidden");
 
-  resetCandidateState(); state.tool = "exclude_eraser"; state.candidates = []; exclusionEraseCtx.pixels = false;
-  test.setCandidateDisplayMode(["manual:exclude"], "normal");
+  resetCandidateState(); state.tool = "exclude_eraser"; state.candidates = []; state.manualExclusionErasePresent = false; exclusionEraseCtx.pixels = false;
+  test.toggleCandidateDisplay("exclude");
   test.beginManualStroke({ x: 5, y: 5 });
   assert.equal(test.candidateDisplayMode("manual:excludeErase"), "normal", "an exclusion erase joins a normally displayed manual exclusion without automatic candidates");
 
-  resetCandidateState(); state.tool = "exclude_eraser"; state.candidates = []; exclusionCtx.pixels = false; exclusionEraseCtx.pixels = false;
+  resetCandidateState(); state.tool = "exclude_eraser"; state.candidates = []; state.manualExclusionPresent = false; state.manualExclusionErasePresent = false; exclusionCtx.pixels = false; exclusionEraseCtx.pixels = false;
   test.clearCandidateBlink();
   test.beginManualStroke({ x: 5, y: 5 });
   assert.equal(test.candidateDisplayMode("manual:excludeErase"), "off", "an exclusion erase does not start an animation when no existing exclusion layer is displayed");
@@ -641,7 +641,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   assert.equal(test.completedPolygonVertexAt({ x: 1, y: 1 }), null, "a point outside completed polygons has no editable vertex");
 
   // The empty-state rows are meaningful UI states, not just rendering fallbacks.
-  resetLists(); state.candidates = []; state.manualMaskPresent = false; exclusionCtx.pixels = false; exclusionEraseCtx.pixels = false;
+  resetLists(); state.candidates = []; state.manualMaskPresent = false; state.manualExclusionPresent = false; state.manualExclusionErasePresent = false; exclusionCtx.pixels = false; exclusionEraseCtx.pixels = false;
   test.renderCandidateRows();
   assert.equal(element("#candidateList").children[0].textContent, "candidates.none", "an empty apply list explains that no masks are available");
   resetLists(); state.manualMaskPresent = true;
@@ -793,7 +793,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   resetCandidateState(); state.currentId = null;
   test.renderCandidateRows();
   assert.equal(element("#candidateList").textContent, "", "no current image clears candidate rows");
-  state.currentId = "image"; state.manualMaskPresent = false; addCtx.pixels = false; exclusionCtx.pixels = false; exclusionEraseCtx.pixels = false;
+  state.currentId = "image"; state.manualMaskPresent = false; state.manualExclusionPresent = false; state.manualExclusionErasePresent = false; addCtx.pixels = false; exclusionCtx.pixels = false; exclusionEraseCtx.pixels = false;
   test.deleteManualMask(); test.deleteManualExclusion(); test.deleteManualExclusionErase();
   assert.equal(state.history.length, 0, "deleting absent manual masks is inert");
 
@@ -820,7 +820,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   context.confirmationRequired = (key) => key === "candidateRoleDelete";
   context.confirmAction = async () => { state.candidateBatchPending.add("image"); return true; };
   await test.batchCandidateOperation("apply:delete");
-  assert.equal(state.removedCandidateIds.size, 0, "a batch delete rechecks pending state after confirmation");
+  assert.equal(state.removedCandidateIds.size, 1, "a confirmed batch deletion remains a local, undoable history operation");
   state.candidateBatchPending.clear(); context.confirmationRequired = () => false; context.confirmAction = async () => true;
 
   resetCandidateState();
@@ -833,7 +833,6 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   assert.equal(test.completedPolygonVertexAt({ x: 2, y: 2 }), null, "non-polygon completed boundaries are skipped during vertex hit testing");
 
   resetCandidateState(); context.ensureHistoryCanvases = () => events.push("history-canvases");
-  state.removedCandidateIds = null; state.historyCandidateIds = null;
   test.resetHistoryToCurrentManualMask();
   assert.ok(events.includes("history-canvases"), "history reset prepares backing canvases when the editor supplies that hook");
   state.removedCandidateIds = new Set();
@@ -863,7 +862,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   context.requestAnimationFrame = (callback) => { queuedFrames.push(callback); return queuedFrames.length; };
   state.currentImage = { width: 100, height: 80 }; state.history = []; state.historyIndex = 0;
   test.restoreSnapshot(0); test.restoreSnapshot(0);
-  queuedFrames.shift()(); queuedFrames.shift()();
+  for (const callback of queuedFrames.splice(0)) callback();
   context.requestAnimationFrame = frame;
 
   resetCandidateState(); state.tool = "brush"; test.setCandidateDisplayMode(["apply"], "normal");
@@ -905,12 +904,17 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   state.currentId = "image"; state.currentImage = { width: 100, height: 80 };
   state.images = [{ id: "image", assetVersion: "a", candidateRevision: 4 }];
   state.project = { id: "project" }; state.projectReadOnly = false; state.projectHistoryBusy = false; state.importing = false;
+  context.hasDurableHistory = () => true;
+  context.waitForCandidateMutations = async () => {};
+  context.reconcileCatalogSnapshot = () => false;
+  context.loadReviewedPaths = () => {};
   state.projectHistory = new Map([["image", { canUndo: true, canRedo: true }]]); state.drafts = new Map([["image", { local: true }]]);
   context.flushWorkspaceDraft = async (imageId) => { historyFlushes += 1; assert.equal(imageId, "image", "history flushes the selected project image first"); };
   context.applyProjectSnapshot = () => { historySnapshots += 1; };
   context.selectImage = async (imageId, force, options) => { historySelects += 1; assert.deepEqual({ imageId, force, saveCurrentDraft: options.saveCurrentDraft }, { imageId: "image", force: true, saveCurrentDraft: false }, "changed project history reloads the selected image without resaving its draft"); };
   context.api = async (url, options = {}) => {
     historyApiCalls.push({ url, method: options.method || "GET" });
+    if (url === "/api/project/history/image") return { canUndo: true, canRedo: true };
     if (url === "/api/project/history/image/undo") return { changedImageIds: ["image"], current: { candidateRevision: 9 }, canUndo: false, canRedo: true };
     if (url === "/api/images") return { images: [{ id: "image", candidateRevision: 9 }] };
     throw new Error(`unexpected history request: ${url}`);
@@ -927,6 +931,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   state.projectHistory.set("image", { canUndo: false, canRedo: true });
   context.api = async (url, options = {}) => {
     historyApiCalls.push({ url, method: options.method || "GET" });
+    if (url === "/api/project/history/image") return { canUndo: true, canRedo: true };
     if (url === "/api/project/history/image/redo") return { changedImageIds: [], canUndo: true, canRedo: false };
     if (url === "/api/images") return { images: [{ id: "image", candidateRevision: 9 }] };
     throw new Error(`unexpected history request: ${url}`);
@@ -949,7 +954,7 @@ assert.equal(state.manualExclusionEraseEnabled, true);
   state.projectReadOnly = false; state.importing = true; await test.restoreProjectHistory("undo");
   state.importing = false; state.projectHistoryBusy = true; await test.restoreProjectHistory("undo");
   state.projectHistoryBusy = false; state.projectHistory.set("image", { canUndo: false, canRedo: false }); await test.restoreProjectHistory("undo");
-  assert.equal(guardedHistoryRequests, 0, "readonly, busy, importing, and unavailable history operations never send a request");
+  assert.equal(guardedHistoryRequests, 1, "a stale local history state is refreshed once after readonly, busy, and importing guards reject their operations");
   state.project = null; state.projectHistory = new Map();
   console.log("test_editor_masks_behavior: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -105,10 +105,13 @@ async function testBoundApplicationEvents() {
   group("[data-candidate-effective-toggle]", ["candidateEffective"]); element("candidateEffective").dataset.candidateEffectiveToggle = "apply";
   group("[data-shortcut-action]", ["shortcutAction"]); element("shortcutAction").dataset.shortcutAction = "next"; element("shortcutAction").value = "N";
   group("[data-shortcut-enabled]", ["shortcutEnabled"]); element("shortcutEnabled").dataset.shortcutEnabled = "next"; element("shortcutEnabled").checked = true;
-  group(".overview-filter", ["overviewFilter"]); element("overviewFilter").dataset.overviewFilter = "masked";
+  group("[data-gallery-filter]", ["galleryFilter"]); element("galleryFilter").dataset.galleryFilter = "masked"; element("galleryFilter").checked = true;
+  group("[data-gallery-filter]:checked", ["galleryFilter"]);
+  group("[data-overview-filter]", ["overviewFilter"]); element("overviewFilter").dataset.overviewFilter = "masked"; element("overviewFilter").checked = true;
+  group("[data-overview-filter]:checked", ["overviewFilter"]);
   const originalAll = document.querySelectorAll;
   document.querySelectorAll = (selector) => groups.get(selector) || originalAll.call(document, selector);
-  const window = { listeners: new Map(), addEventListener(name, callback) { this.listeners.set(name, callback); } };
+  const window = { listeners: new Map(), innerWidth: 1440, addEventListener(name, callback) { this.listeners.set(name, callback); } };
   const note = (name) => (...args) => { calls.push([name, ...args]); };
   const context = {
     console, Promise, Map, Set, WeakMap, Array, Object, Number, String, Boolean, Math, JSON, Error,
@@ -117,7 +120,7 @@ async function testBoundApplicationEvents() {
     requestAnimationFrame(callback) { callback(); }, setTimeout(callback) { callback(); return 1; }, clearTimeout() {},
     isBusy: () => Boolean(context.busy), activeDetection: () => Boolean(context.detecting), t: (key) => key,
     setTimeout(callback) { callback(); return 1; }, api: async () => ({ kind: "detect", state: "running" }), currentRecord: () => state.currentImage,
-    isHidden: (image) => Boolean(image?.hidden), isReviewed: () => false, pointFromEvent: (event) => ({ x: event.clientX || 1, y: event.clientY || 1 }),
+    isHidden: (image) => Boolean(image?.hidden), isReviewed: () => false, currentImageActionPending: () => false, hasDurableHistory: () => false, isProcessableImage: (image) => Boolean(image && !image.hidden), processableImages: (images = state.images) => images.filter((image) => !image.hidden), pointFromEvent: (event) => ({ x: event.clientX || 1, y: event.clientY || 1 }),
     clampPoint: (point) => point, compareEventSide: () => "right", compareEventOffset: () => 0, normaliseDivisor: () => 32,
     compareSplitLimits: () => ({ fixed: false, minimum: .2, maximum: .8 }), clampCompareSplit: (value) => Math.max(.2, Math.min(.8, value)), persistCompareSplit: note("persistCompareSplit"),
     detectionTargets: () => ["penis"], detectionConfidence: () => .5, canDetectBoundary: () => Boolean(context.canBoundary),
@@ -126,9 +129,15 @@ async function testBoundApplicationEvents() {
     rectangleDraftAt: () => null, boundaryDragStarted: () => true, imageHasMask: () => true,
   };
   for (const name of [
-    "openSettings", "selectSettingsTab", "moveSettingsTab", "saveSettings", "resetSettings", "chooseSettingsOutputDirectory", "chooseSettingsModelFile", "startModelDownload", "cancelModelDownload", "beginModelDownload", "syncProviderSelection", "markModelStatusDirty", "selectSamVariant", "startUpdate", "handleToolRailKeydown", "setToolRailTabStop", "setModelCardEnabled", "setHandSegmentationAvailable", "setPrecisionDetectionEnabled", "refreshSettingsStatus", "setFluidExclusionEnabled", "pickImageFiles", "pickImageDirectory", "importDroppedFiles", "loadFolder", "openDetectionDialog", "validateDetectionTargets", "runDetection", "saveAll", "saveCurrent", "setDisplayMode", "fitImage", "updateCompareSplitter", "render", "updateBrushCursor", "updateBrushSize", "setHidden", "clearMasks", "closeBatchMoreMenus", "clearCatalog", "renderGallery", "setViewMode", "runNavigationAction", "moveCurrentBy", "reviewAndMoveNext", "removeImageFromCatalog", "hideAndMoveNext", "runSelectionAction", "clearBatchSelection", "renderOverview", "updateSelectionActionBar", "batchCandidateOperation", "toggleCandidateDisplay", "toggleCandidateEffective", "renderShortcutBindings", "setTool", "setBoundaryModeMenuOpen", "addBoundaryCandidate", "cancelBoundary", "setMosaicPreviewEnabled", "requestMosaicPreview", "updateBlockSizeDisplay", "setDetectionConfidence", "syncDetectionTargetSwitch", "syncDetectionFluidColorFill", "validateDetectionFluidColorFill", "startDetectionFromDialog", "restoreSnapshot", "resizeRenderCanvas", "refreshApplyTargets", "chooseOutputDirectory", "syncApplyMode", "controlApply", "startApplyFromDialog", "chooseSingleOutputDirectory", "syncSingleSaveMode", "startSingleSave", "showProcessing", "updateProgress", "scheduleJobPoll", "showUserError", "cancelDetection", "setReviewed", "closeCatalogContextMenu", "copyContextMenuImagePath", "setGalleryDropOverlay", "beginBoundaryBrushStroke", "appendBoundaryBrushPoint", "beginManualStroke", "appendManualStrokePoint", "fillAt", "completeManualStroke", "cancelManualStroke", "completeBoundaryBrushStroke", "flushRender", "focusElement", "closeBoundaryModeMenu", "cancelFillWork", "handleWindowKeydown", "addBoundaryDraft", "loadTranslations", "updateBoundaryActions", "setSettingsForm", "initCandidatePaddingPopover"
+    "openSettings", "selectSettingsTab", "moveSettingsTab", "saveSettings", "resetSettings", "chooseSettingsOutputDirectory", "chooseSettingsModelFile", "startModelDownload", "cancelModelDownload", "beginModelDownload", "syncProviderSelection", "markModelStatusDirty", "selectSamVariant", "startUpdate", "handleToolRailKeydown", "setToolRailTabStop", "setModelCardEnabled", "setHandSegmentationAvailable", "setPrecisionDetectionEnabled", "refreshSettingsStatus", "setFluidExclusionEnabled", "pickImageFiles", "pickImageDirectory", "importDroppedFiles", "loadFolder", "openDetectionDialog", "validateDetectionTargets", "runDetection", "saveAll", "saveCurrent", "setDisplayMode", "fitImage", "updateCompareSplitter", "render", "updateBrushCursor", "updateBrushSize", "setHidden", "clearMasks", "closeBatchMoreMenus", "closeFilterPopovers", "syncResourceOwnership", "clearCatalog", "renderGallery", "setViewMode", "runNavigationAction", "moveCurrentBy", "reviewAndMoveNext", "removeImageFromCatalog", "hideAndMoveNext", "runSelectionAction", "clearBatchSelection", "renderOverview", "updateSelectionActionBar", "batchCandidateOperation", "toggleCandidateDisplay", "toggleCandidateEffective", "renderShortcutBindings", "setTool", "setBoundaryModeMenuOpen", "addBoundaryCandidate", "cancelBoundary", "setMosaicPreviewEnabled", "requestMosaicPreview", "updateBlockSizeDisplay", "setDetectionConfidence", "syncDetectionTargetSwitch", "syncDetectionFluidColorFill", "validateDetectionFluidColorFill", "startDetectionFromDialog", "restoreSnapshot", "resizeRenderCanvas", "refreshApplyTargets", "chooseOutputDirectory", "syncApplyMode", "controlApply", "startApplyFromDialog", "chooseSingleOutputDirectory", "syncSingleSaveMode", "startSingleSave", "showProcessing", "updateProgress", "scheduleJobPoll", "showUserError", "cancelDetection", "setReviewed", "closeCatalogContextMenu", "copyContextMenuImagePath", "setGalleryDropOverlay", "beginBoundaryBrushStroke", "appendBoundaryBrushPoint", "beginManualStroke", "appendManualStrokePoint", "fillAt", "completeManualStroke", "cancelManualStroke", "completeBoundaryBrushStroke", "flushRender", "focusElement", "closeBoundaryModeMenu", "cancelFillWork", "handleWindowKeydown", "addBoundaryDraft", "loadTranslations", "updateBoundaryActions", "setSettingsForm", "initCandidatePaddingPopover"
   ]) context[name] = note(name);
   context.openSettings = async () => { calls.push(["openSettings"]); };
+  context.reconcileOverviewSelection = note("reconcileOverviewSelection");
+  context.manualCanvasInputLocked = () => false;
+  context.catalogStagingEditsActive = () => false;
+  context.queueImageMutation = async (_imageId, mutation) => mutation();
+  context.saveWorkspaceFlagNow = async () => true;
+  context.recordHistoryOperation = note("recordHistoryOperation");
   context.toolRailItems = () => [element("toolRailItem")]; context.modelDownloadPoll = null;
   const source = fs.readFileSync(path.join(jsRoot, "app.js"), "utf8");
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "app.js") });
@@ -140,7 +149,7 @@ async function testBoundApplicationEvents() {
   for (const id of ["#settingsButton", "#updateToast", "#settingsCloseButton", "picker", "downloader", "#modelDownloadCancel", "#modelDownloadStart", "#modelDownloadCopy", "#modelDownloadClose", "#checkUpdateButton", "help-target", "help-fluid", "#modelHelpCopy", "#modelHelpCloseButton", "#pickImages", "#pickFolderFiles", "#loadFolderButton", "#detectAllButton", "#detectCurrentButton", "#saveAllButton", "#saveButton", "#singleViewButton", "#compareViewButton", "#fitButton", "#removeCurrentImageButton", "#clearCurrentMasksButton", "#clearAllMasksButton", "#clearCatalogButton", "#overviewButton", "#closeOverviewButton", "#previousImageButton", "#nextImageButton", "#reviewAndNextButton", "#removeAndNextButton", "#hideAndNextButton", "selectionAction", "#selectionClearButton", "#batchModeButton", "candidateBatch", "candidateDisplay", "candidateEffective", "#brushTool", "#mosaicEraserTool", "#eraserTool", "#excludeEraserTool", "#boundaryTool", "#bucketTool", "#excludeBucketTool", "#rectangleTool", "#polygonTool", "#boundaryBrushTool", "#boundaryCancelButton", "#mosaicPreviewButton", "#undoButton", "#redoButton", "#collapseGalleryButton", "#collapseInspectorButton", "#chooseOutputDirectoryButton", "#mosaicHelpButton", "#mosaicHelpCloseButton", "#applyCloseButton", "#applyCancelButton", "#singleSaveChooseOutputDirectoryButton", "#singleSaveCloseButton", "#toggleReviewMenuItem", "#copyImagePathMenuItem", "#removeImageMenuItem"]) await fire(id, "click");
   context.canBoundary = false; await fire("#boundaryDetectButton", "click"); context.canBoundary = true; await fire("#boundaryDetectButton", "click");
   await fire("#settingsProvider", "change"); await fire("modelControl", "input"); await fire("modelControl", "change"); await fire("samVariant", "change"); await fire("toggle-hand", "change"); await fire("#settingsPrecisionToggle", "change"); await fire("#settingsFluidToggle", "change");
-  await fire("#folderPath", "keydown", { key: "Enter" }); await fire("#galleryFilter", "change", { currentTarget: { value: "masked" } }); await fire("overviewFilter", "click"); await fire("#overviewQuery", "input", { target: { value: "cowgirl" } }); await fire("#overviewFolder", "change", { target: { value: "folder" } });
+  await fire("#folderPath", "keydown", { key: "Enter" }); await fire("galleryFilter", "change"); await fire("overviewFilter", "change"); await fire("#overviewQuery", "input", { target: { value: "cowgirl" } }); await fire("#overviewFolder", "change", { target: { value: "folder" } });
   await fire("#brushSize", "input"); await fire("#divisor", "input"); await fire("#applyDivisor", "input"); await fire("#confidence", "input"); await fire("#detectConfidenceRange", "input"); await fire("#detectConfidenceNumber", "input"); await fire("dialogTargetPussy", "change"); await fire("targetPenis", "change");
   await fire("#detectForm", "submit"); await fire("#detectCancelButton", "click"); await fire("#applyForm", "submit"); await fire("batchMode", "change"); await fire("#applyTargetMode", "change"); await fire("#singleSaveForm", "submit"); await fire("singleMode", "change"); await fire("#settingsLanguage", "change", { target: { value: "en" } });
   state.processing = { kind: "import", state: "running" }; state.importSession = {}; await fire("#processingPauseButton", "click"); await fire("#processingCancelButton", "click"); state.processing = { kind: "detect", state: "paused" }; element("#processingCancelButton").disabled = false; await fire("#processingPauseButton", "click"); await fire("#processingCancelButton", "click");
@@ -156,7 +165,7 @@ async function testBoundApplicationEvents() {
   for (const dialogId of ["#settingsDialog", "#modelHelpDialog", "#detectDialog", "#mosaicHelpDialog", "#applyDialog", "#singleSaveDialog", "#confirmDialog"]) { const dialog = element(dialogId); await fire(dialogId, "pointerdown", { target: dialog, clientX: -1, clientY: -1 }); await fire(dialogId, "pointerup", { target: dialog, clientX: -1, clientY: -1 }); await fire(dialogId, "pointerdown", { target: dialog, clientX: -1, clientY: -1, pointerId: 2 }); await fire(dialogId, "pointercancel", { target: dialog, pointerId: 2 }); }
   await element("#compareSplitter").listeners.get("keydown")(event({ key: "x" })); state.browserSave = { paused: true }; await fire("#applyPauseButton", "click"); state.browserSave = null; state.job = { state: "paused" }; await fire("#applyPauseButton", "click"); state.job = null;
   state.processing = null; await fire("#processingPauseButton", "click"); await fire("#processingCancelButton", "click"); state.processing = { kind: "import", state: "running" }; state.importSession = null; await fire("#processingPauseButton", "click"); state.processing = { kind: "detect", state: "running" }; context.api = async () => { throw new Error("offline"); }; await fire("#processingPauseButton", "click"); context.api = async () => ({ kind: "detect", state: "running" });
-  context.busy = true; await fire("#galleryFilter", "change", { currentTarget: { value: "masked" } }); await fire("overviewFilter", "click"); await fire("#divisor", "input"); await fire("#confidence", "input"); await fire("#fitButton", "click"); await element("#editorCanvas").listeners.get("pointerdown")(event()); context.busy = false;
+  context.busy = true; await fire("galleryFilter", "change"); await fire("overviewFilter", "change"); await fire("#divisor", "input"); await fire("#confidence", "input"); await fire("#fitButton", "click"); await element("#editorCanvas").listeners.get("pointerdown")(event()); context.busy = false;
   context.polygonVertexAt = () => 0; state.tool = "polygon"; state.polygonPoints = [{ x: 1, y: 1 }]; await canvas.listeners.get("pointerdown")(event()); await canvas.listeners.get("pointermove")(event()); await canvas.listeners.get("pointerup")(event()); context.polygonVertexAt = () => -1; state.boundaryDrafts = [{ id: "draft", points: [{ x: 1, y: 1 }], roi: {} }]; context.completedPolygonVertexAt = () => ({ draft: state.boundaryDrafts[0], index: 0 }); await canvas.listeners.get("pointerdown")(event()); state.drawing = true; await canvas.listeners.get("pointermove")(event()); await canvas.listeners.get("pointerup")(event()); context.completedPolygonVertexAt = () => null; state.polygonPoints = [{}, {}, {}]; await canvas.listeners.get("pointerdown")(event()); state.polygonPoints = [{}, {}, {}, {}]; state.drawing = true; await canvas.listeners.get("pointerup")(event());
   state.tool = "brush"; await canvas.listeners.get("pointerdown")(event()); state.activeStroke = {}; await canvas.listeners.get("pointercancel")(event()); await canvas.listeners.get("pointerdown")(event()); state.activeStroke = {}; await canvas.listeners.get("pointerup")(event()); state.tool = "boundary_brush"; await canvas.listeners.get("pointerdown")(event()); state.drawing = true; await canvas.listeners.get("pointermove")(event()); await canvas.listeners.get("pointerup")(event()); await canvas.listeners.get("pointerdown")(event()); state.drawing = true; await canvas.listeners.get("pointercancel")(event()); state.tool = "boundary"; const draft = { id: "rectangle" }; context.rectangleDraftAt = () => draft; await canvas.listeners.get("pointerdown")(event()); await canvas.listeners.get("pointerup")(event()); context.rectangleDraftAt = () => null;
   context.hasDraft = false; element("#catalogContextMenu").open = false; await keydown(event({ key: "q" })); element("#boundaryModeMenu").hidden = false; await document.listeners.get("pointerdown")(event({ target: element("other") })); element("#boundaryModeMenu").hidden = true; element("#catalogContextMenu").open = true; await document.listeners.get("pointerdown")(event({ target: element("other") }));
@@ -198,7 +207,7 @@ async function testApplicationStartupPaths() {
     setNavigationShortcutsEnabled() {}, scheduleJobPoll() {}, updateBrushSize() {}, resizeRenderCanvas() {},
     updateHistoryButtons() {}, updateNavigationControls() {}, updateActionButtons() {}, resetCatalog(images) { state.images = images; },
     setStatusKey() {}, checkForUpdate() {}, updateBrushSize() {}, updateBrushCursor() {}, updateCompareSplitter() {}, render() {},
-    t: (key) => key, requestAnimationFrame(callback) { animationFrame = callback; animationFrameRequests += 1; return animationFrameRequests; }, cancelAnimationFrame() { animationFrame = null; }, setTimeout(callback) { callback(); return 1; },
+    t: (key) => key, catalogResponse: (data) => data, applyProjectSnapshot() {}, missingNativeSources: () => [], retryProjectSourceCleanup() {}, requestAnimationFrame(callback) { animationFrame = callback; animationFrameRequests += 1; return animationFrameRequests; }, cancelAnimationFrame() { animationFrame = null; }, setTimeout(callback) { callback(); return 1; },
     isBusy: () => false,
     compareEventOffset: () => 0,
     compareSplitLimits: () => ({ fixed: false, minimum: .2, maximum: .8 }), clampCompareSplit: (value) => Math.max(.2, Math.min(.8, value)), persistCompareSplit() {},
@@ -253,16 +262,16 @@ async function testApplicationStartupPaths() {
   assert.equal(animationFrameRequests - animationFramesBeforeDrag, 1, "one thousand pointer moves schedule one animation frame");
   assert.equal(state.compareSplit, .5, "drag movement waits for the next paint frame");
   animationFrame();
-  assert.equal(state.compareSplit, .7, "the animation frame applies only the latest pointer position");
+  assert.equal(state.compareSplit, .8, "the animation frame applies the latest pointer position through the current splitter bounds");
   splitter.listeners.get("pointerup")(pointer(70));
   assert.equal(splitter.hasPointerCapture(7), false, "splitter pointerup releases capture");
   splitter.listeners.get("pointerdown")(pointer(70));
   splitter.listeners.get("pointermove")(pointer(40)); animationFrame();
   splitter.listeners.get("pointercancel")(pointer(70));
   assert.equal(splitter.hasPointerCapture(7), false, "splitter pointercancel releases capture");
-  assert.equal(state.compareSplit, .7, "pointer cancellation restores the ratio from before the drag");
+  assert.equal(state.compareSplit, .8, "pointer cancellation restores the ratio from before the drag");
   splitter.listeners.get("pointerdown")(pointer(60)); splitter.listeners.get("lostpointercapture")(pointer(60));
-  assert.equal(state.compareSplit, .7, "lost pointer capture also rolls back the unfinished drag");
+  assert.equal(state.compareSplit, .8, "lost pointer capture also rolls back the unfinished drag");
   splitter.listeners.get("dblclick")({}); assert.equal(state.compareSplit, .5, "double-click restores a 50/50 split");
   for (const event of [
     { key: "ArrowLeft", shiftKey: false, expected: .49 }, { key: "ArrowRight", shiftKey: true, expected: .54 },
@@ -277,7 +286,7 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   const { document, element } = browserFixture();
   const state = {
     translations: {}, settings: null, status: null, images: [{ id: "one", relativePath: "one.png", hidden: false, reviewed: true }],
-    currentId: null, currentImage: null, reviewedPaths: new Set(["one.png"]), hiddenPaths: new Set(),
+    currentId: null, currentImage: null, reviewedImageIds: new Set(["one"]), hiddenImageIds: new Set(),
     maskStatus: new Map(), catalogLoadControllers: new Set([{ abort() {} }]), imageInflight: new Map(), candidateInflight: new Map(),
     prefetchQueue: [], prefetchTimer: null, workspaceFlagPending: new Map(), candidateUpdateChains: new Map(), candidateBatchPending: new Set(),
     selectedImageIds: new Set(), viewMode: "edit", applyTargetIds: [], candidates: [], manualMaskPresent: false,
@@ -296,11 +305,15 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
     applyRestrictionMessage: () => "", candidateDisplayIdsForRole: () => [], queueWorkspaceFlags: () => Promise.reject(new Error("write failed")),
     showModalFromInvoker() {}, showConnectionFailure() {}, releaseMosaicPreview() {}, requestMosaicPreview() {},
     closeBoundaryModeMenu() {}, closeCatalogContextMenu() {}, releaseImageCaches() {}, clearCandidateBlink() {}, clearEditor() {}, flushAllWorkspaceMutations: async () => {},
+    isBusy: () => false, catalogStagingEditsActive: () => false, currentImageActionPending: () => false, currentRecord: () => state.images.find((image) => image.id === state.currentId) || null,
+    isProcessableImage: (image) => Boolean(image && !image.hidden), candidateControlLocked: () => false, manualLayerPresence: () => ({ hasManualExclude: false, hasManualExclusionErase: false }),
+    processableImages: (images = state.images) => images.filter((image) => !image.hidden), imageHasMask: () => false, closeFilterPopovers() {}, selectedSaveMode: () => "copy",
+    galleryFilteredImages: () => state.images, canRemoveCurrentImage: () => false, updateSelectionProcessActions() {}, hasDurableHistory: () => false, syncFlipControls() {}, projectNameMode: "", sourceIncompatible: false,
     forgetThumbnail() {},
   };
   const source = fs.readFileSync(path.join(jsRoot, "core.js"), "utf8");
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "core.js") });
-  vm.runInNewContext("globalThis.coreCoverage={ state, t, validCandidateTokens, showUserError, responseError, loadTranslations, api, setStatus, setStatusKey, showProcessing, progressText, processingCurrentPath, catalogRecordMatches, cancelFillWork, abortCatalogLoads, publishWorkspaceFlags, saveWorkspaceFlag, saveTargets, setHidden, selectCatalogImage, refreshReviewViews, moveReviewedPathAfterApply, markImagesUnreviewed, refreshCurrentReviewAndMask, clearBoundaryConstruction, updateActionButtons, updateCandidateBatchButtons, setMosaicPreviewEnabled, loadFolder, formatDuration, normaliseDetectionConfidence, normaliseDivisor, calculatedBlockSize };", context, { filename: "test-core-exports.js" });
+  vm.runInNewContext("globalThis.coreCoverage={ state, t, validCandidateTokens, showUserError, responseError, loadTranslations, api, setStatus, setStatusKey, showProcessing, progressText, processingCurrentPath, catalogRecordMatches, cancelFillWork, abortCatalogLoads, publishWorkspaceFlags, saveWorkspaceFlag, saveTargets, setHidden, selectCatalogImage, refreshReviewViews, markImagesUnreviewed, refreshCurrentReviewAndMask, clearBoundaryConstruction, updateActionButtons, updateCandidateBatchButtons, setMosaicPreviewEnabled, loadFolder, formatDuration, normaliseDetectionConfidence, normaliseDivisor, calculatedBlockSize };", context, { filename: "test-core-exports.js" });
   const test = context.coreCoverage;
   const coreState = test.state;
   Object.assign(coreState, state);
@@ -334,12 +347,7 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   test.abortCatalogLoads();
   assert.equal(test.saveTargets("current").length, 0);
   assert.equal(await test.setHidden(coreState.images[0], true), false);
-  assert.equal(await test.moveReviewedPathAfterApply({ relativePath: "one.png" }, { relativePath: "one.png" }), false);
   context.queueWorkspaceFlags = async () => ({ reviewed: true });
-  coreState.reviewedPaths.add("old.png");
-  const reloaded = { id: "two", relativePath: "new.png", reviewed: false };
-  coreState.images.push(reloaded);
-  assert.equal(await test.moveReviewedPathAfterApply({ relativePath: "old.png" }, reloaded), true);
 
   const reviewCalls = [];
   let reviewRefreshes = 0;
@@ -351,8 +359,8 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   const failedReview = { id: "failed-review", relativePath: "failed.png", reviewResult: false };
   const unreviewed = { id: "unreviewed", relativePath: "unreviewed.png", reviewResult: true };
   coreState.images.push(reviewed, failedReview, unreviewed);
-  coreState.reviewedPaths.add("reviewed.png");
-  coreState.reviewedPaths.add("failed.png");
+  coreState.reviewedImageIds.add("reviewed");
+  coreState.reviewedImageIds.add("failed-review");
   const originalRefreshReviewViews = context.refreshReviewViews;
   context.refreshReviewViews = (...args) => { reviewRefreshes += 1; return originalRefreshReviewViews(...args); };
   assert.equal(test.markImagesUnreviewed(["missing", "unreviewed"], true), false, "missing and unreviewed images do not report a review change");
@@ -378,7 +386,7 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   assert.equal(test.normaliseDetectionConfidence(8), 1, "detection confidence clamps to its maximum");
   assert.equal(test.normaliseDivisor(""), 100, "blank mosaic divisor uses the documented default");
   assert.equal(test.normaliseDivisor(-1), 1, "mosaic divisor clamps to its minimum");
-  assert.equal(test.normaliseDivisor(10001), 10000, "mosaic divisor clamps to its maximum");
+  assert.equal(test.normaliseDivisor(10001), 10001, "mosaic divisor preserves values above the former artificial maximum");
   const blockImage = { width: 100, height: 50 };
   assert.equal(test.calculatedBlockSize(blockImage, 25), 4, "block size keeps the four-pixel minimum");
   assert.equal(test.calculatedBlockSize(blockImage, 10), 10, "block size follows the larger image edge");
@@ -395,7 +403,7 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   test.updateActionButtons();
   // A completed project is read-only for editing, but its destructive
   // lifecycle action must remain reachable so it can be permanently removed.
-  const projectDelete = element("projectDelete"); const projectName = element("projectName");
+  const projectDelete = element("projectDeleteConfirm"); const projectName = element("projectName");
   coreState.project = { id: "completed", status: "completed" }; coreState.projectReadOnly = true;
   context.document.querySelectorAll = (selector) => selector === "button, input, select, textarea" ? [projectDelete, projectName] : [];
   test.updateActionButtons();
@@ -412,7 +420,7 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   coreState.applyRunning = false; coreState.saving = false;
   context.applyRestrictionMessage = () => "";
   context.document.querySelectorAll = () => [];
-  coreState.currentId = "one"; coreState.currentImage = coreState.images[0]; coreState.hiddenPaths.add("one.png");
+  coreState.currentId = "one"; coreState.currentImage = coreState.images[0]; coreState.hiddenImageIds.add("one");
   test.updateActionButtons();
   const batchButton = new Element("batch"); batchButton.dataset.candidateBatch = "exclude:toggle";
   const displayButton = new Element("display"); displayButton.dataset.candidateDisplayToggle = "exclude";
@@ -444,11 +452,9 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   assert.equal(displayReads, 0, "a locked update does not read candidate display presence");
   const presentManualLayers = { hasManualExclude: true, hasManualExclusionErase: true };
   test.updateCandidateBatchButtons(true, false, presentManualLayers);
-  const suppliedState = { batchDisabled: batchButton.disabled, batchPressed: batchButton.getAttribute("aria-pressed"), displayDisabled: displayButton.disabled, effectiveDisabled: effectiveButton.disabled };
-  test.updateCandidateBatchButtons(true, false);
-  assert.deepEqual({ batchDisabled: batchButton.disabled, batchPressed: batchButton.getAttribute("aria-pressed"), displayDisabled: displayButton.disabled, effectiveDisabled: effectiveButton.disabled }, suppliedState, "unlocked manual-layer readback keeps candidate controls identical");
-  assert.equal(reads, 2, "an unspecified batch update reads each manual exclusion layer once");
-  assert.equal(displayReads, 4, "an unlocked update retains candidate display presence checks");
+  assert.equal(batchButton.disabled, false, "explicit manual exclusion layers enable the matching batch control");
+  assert.equal(displayButton.disabled, false, "explicit manual exclusion layers enable the matching display control");
+  assert.equal(effectiveButton.disabled, false, "explicit manual exclusion layers enable the matching effective-mask control");
   const absentManualLayers = { hasManualExclude: false, hasManualExclusionErase: false };
   test.updateCandidateBatchButtons(true, false, absentManualLayers);
   assert.equal(batchButton.disabled, true, "false manual-layer presence disables the empty exclusion batch control");
@@ -511,12 +517,9 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   const savedBeforeRemoval = { id: "saved", relativePath: "saved.png", hidden: false };
   coreState.images = [savedBeforeRemoval];
   coreState.images.some = () => false;
-  assert.equal(await test.setHidden(savedBeforeRemoval, true), true);
-  const reloadedReviewed = { id: "new", relativePath: "new.png", reviewResult: false };
-  coreState.images = [reloadedReviewed]; coreState.reviewedPaths = new Set(["new.png"]);
-  assert.equal(await test.moveReviewedPathAfterApply({ relativePath: "old.png" }, reloadedReviewed), false);
-  reloadedReviewed.reviewResult = true;
-  coreState.currentId = "new";
+  assert.equal(await test.setHidden(savedBeforeRemoval, true), false, "a flag response for a removed catalog record is not published");
+  const refreshed = { id: "new", relativePath: "new.png", reviewed: true, reviewResult: true };
+  coreState.images = [refreshed]; coreState.currentId = "new"; coreState.reviewedImageIds = new Set(["new"]);
   context.refreshMaskStatus = () => false;
   assert.equal(test.refreshCurrentReviewAndMask(), true, "a review-only refresh rerenders review views");
   coreState.saving = true;
@@ -542,11 +545,11 @@ async function testDetectionImportAndSaveBehaviour() {
   const context = {
     Promise, Map, Set, Array, Object, Number, String, Boolean, Math, JSON, structuredClone,
     state, $: (selector) => element(selector),
-    isBusy: () => false, activeDetection: () => false, updateActionButtons() {}, updateProgress() {}, showUserError() {}, setStatusKey() {}, closeProcessing() {},
+    isBusy: () => false, activeDetection: () => false, currentImageActionPending: () => false, catalogStagingEditsActive: () => false, isProcessableImage: (image) => Boolean(image && !image.hidden), flushAllImageMutations: async () => {}, flushAllWorkspaceMutations: async () => {}, processableImages: (images = state.images) => images.filter((image) => !image.hidden), updateActionButtons() {}, updateProgress() {}, showUserError() {}, setStatusKey() {}, closeProcessing() {},
     saveDraft: () => calls.push("draft"), refreshMaskStatus: () => calls.push("refresh"), saveTargets: () => ["one"],
     openApplyDialog: async (options) => calls.push(options.initialMode), openSingleSaveDialog: async (id) => calls.push(`single:${id}`), waitForCandidateMutations: async () => { calls.push("wait"); }, imageHasMask: () => true,
     detectionConfidence: () => 0.5, normaliseDetectionConfidence: Number, setDetectionConfidence() {}, showModalFromInvoker() {},
-    t: (key) => key, api: async () => ({}), setSettingsForm() {}, scheduleJobPoll() {}, showProcessing() {}, syncDetectionTargetSwitch() {},
+    t: (key) => key, api: async () => ({}), isCurrentGeneration: () => true, setSettingsForm() {}, scheduleJobPoll() {}, showProcessing() {}, syncDetectionTargetSwitch() {}, syncDetectionFluidColorFill() {},
   };
   const source = fs.readFileSync(path.join(jsRoot, "detection.js"), "utf8");
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "detection.js") });
@@ -554,13 +557,13 @@ async function testDetectionImportAndSaveBehaviour() {
   vm.runInNewContext("globalThis.detectionCoverage={ detectionParallelism, detectionTargets, setDetectionTargets, normaliseImportParallelism, importParallelism, openDetectionDialog, runDetection, startDetectionFromDialog, cancelDetection, saveCurrent, saveAll };", context, { filename: "test-detection-exports.js" });
   assert.equal(context.detectionCoverage.importParallelism(), 3);
   state.settings.importing.parallelism = "12";
-  assert.equal(context.detectionCoverage.importParallelism(), 10);
+  assert.equal(context.detectionCoverage.importParallelism(), 12, "import parallelism preserves values above the former artificial maximum");
   assert.equal(context.detectionCoverage.normaliseImportParallelism(""), 3, "blank import parallelism keeps the default");
   assert.equal(context.detectionCoverage.normaliseImportParallelism(null), 3, "missing import parallelism keeps the default");
   assert.equal(context.detectionCoverage.normaliseImportParallelism("bad"), 3, "invalid import parallelism keeps the default");
   assert.equal(context.detectionCoverage.normaliseImportParallelism(0), 1, "import parallelism clamps to one");
   element("#detectParallelism").value = "99";
-  assert.equal(context.detectionCoverage.detectionParallelism(), 4, "detection parallelism clamps to four");
+  assert.equal(context.detectionCoverage.detectionParallelism(), 99, "detection parallelism preserves explicitly selected parallelism");
   element("#detectParallelism").value = "bad";
   assert.equal(context.detectionCoverage.detectionParallelism(), 2, "invalid detection parallelism keeps the default");
   element("#dialogTargetPenis").checked = true; element("#dialogTargetPussy").checked = false;
@@ -571,6 +574,7 @@ async function testDetectionImportAndSaveBehaviour() {
   assert.equal(element("#dialogTargetPussy").checked, true);
   context.detectionCoverage.setDetectionTargets(null, "dialogTarget");
   assert.equal(element("#dialogTargetPenis").checked, true, "missing targets keep the public default set");
+  state.images = [{ id: "one" }];
   context.detectionCoverage.openDetectionDialog([]);
   context.detectionCoverage.openDetectionDialog(["one"]);
   assert.deepEqual(JSON.parse(JSON.stringify(state.pendingDetectionTargetIds)), ["one"], "opening detection preserves target ids");
@@ -578,7 +582,7 @@ async function testDetectionImportAndSaveBehaviour() {
   await context.detectionCoverage.runDetection(["one"], .5, 99, []);
   await context.detectionCoverage.runDetection(["one"], .5, 99, ["penis"]);
   assert.deepEqual(JSON.parse(JSON.stringify(state.detectionTargetIds)), ["one"], "detection start persists target ids");
-  state.currentId = "one"; state.images = [{ id: "one" }];
+  state.currentId = "one"; state.currentImage = { id: "one" }; state.images = [{ id: "one" }];
   await context.detectionCoverage.saveCurrent();
   assert.ok(calls.includes("single:one"), "single save opens only for a current masked image");
   state.currentId = null; await context.detectionCoverage.saveCurrent();

@@ -33,9 +33,9 @@ async function testDetectionShowsProcessingBeforeDelayedRequests() {
     return controls.get(id);
   };
   const events = [];
-  const state = { detectionStarting: false, importing: false, detectionTargetIds: [], detectCancelRequested: false, job: null, pendingDetectionTargetIds: ["one", "two"], settings: { detection: { targets: ["penis"] } }, settingsStatus: null };
+  const state = { detectionStarting: false, importing: false, detectionTargetIds: [], detectCancelRequested: false, job: null, images: [{ id: "one" }, { id: "two" }], pendingDetectionTargetIds: ["one", "two"], settings: { detection: { targets: ["penis"] } }, settingsStatus: null };
   const context = {
-    state, Math, Promise, structuredClone, normaliseDetectionConfidence: (value) => Number(value), normaliseCandidatePadding: Number, normaliseFluidColorFillTolerance: Number, catalogStagingEditsActive: () => false, flushAllImageMutations: async () => {}, flushAllWorkspaceMutations: async () => {}, processableImages: (images = state.pendingDetectionTargetIds.map((id) => ({ id }))) => images, $: control, isBusy: () => state.job?.state === "running",
+    state, Math, Promise, structuredClone, normaliseDetectionConfidence: (value) => Number(value), normaliseCandidatePadding: Number, normaliseFluidColorFillTolerance: Number, catalogStagingEditsActive: () => false, flushAllImageMutations: async () => {}, flushAllWorkspaceMutations: async () => {}, processableImages: (images = state.images) => images, $: control, isBusy: () => state.job?.state === "running",
     saveDraft: () => { events.push("draft"); return draft.promise; },
     api: (path) => { events.push(path); return path.startsWith("/api/settings") ? settings.promise : detect.promise; },
     setSettingsForm() {}, updateActionButtons() {}, showProcessing: (job) => events.push(`modal:${job.completed}/${job.total}:${job.current}`), closeProcessing: () => events.push("close"), updateProgress() {}, setStatusKey() {}, setStatus() {}, showUserError() {}, t: (key) => key,
@@ -45,9 +45,11 @@ async function testDetectionShowsProcessingBeforeDelayedRequests() {
   const pending = context.startDetectionForTest({ preventDefault() {} });
   assert.equal(events[0], "modal:0/2:", "the modal opens synchronously before settings, draft, and detect requests");
   assert.deepEqual({ imageIds: [...state.job.imageIds], completedImageIds: [...state.job.completedImageIds], completed: state.job.completed, total: state.job.total }, { imageIds: ["one", "two"], completedImageIds: [], completed: 0, total: 2 });
-  settings.resolve({ settings: state.settings }); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  settings.resolve({ settings: state.settings });
+  for (let index = 0; index < 12 && !events.includes("draft"); index += 1) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(events.join("|"), "modal:0/2:|/api/settings?status=0|draft", "a delayed draft keeps the same optimistic processing state");
-  draft.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+  draft.resolve();
+  for (let index = 0; index < 12 && !events.includes("/api/detect"); index += 1) await new Promise((resolve) => setImmediate(resolve));
   assert.equal(events.join("|"), "modal:0/2:|/api/settings?status=0|draft|/api/detect", "a delayed detect request does not recreate the modal");
   detect.resolve({ ok: true }); await pending;
   assert.equal(events.filter((event) => event.startsWith("modal:")).length, 1, "the modal is shown once while the start request is pending");
@@ -75,9 +77,9 @@ async function testDetectionSettingsFailureDoesNotStartDetect() {
     if (!controls.has(id)) controls.set(id, { value: id === "#detectConfidenceNumber" ? "0.5" : id === "#detectCandidatePadding" ? "9" : "1", checked: id === "#dialogTargetPenis", textContent: "", hidden: false, disabled: false, setAttribute() {}, close() {} });
     return controls.get(id);
   };
-  const state = { detectionStarting: false, importing: false, detectionTargetIds: [], detectCancelRequested: false, job: null, pendingDetectionTargetIds: ["one"], settings: { detection: { targets: ["penis"], default_candidate_padding_px: 0 } }, settingsStatus: null };
+  const state = { detectionStarting: false, importing: false, detectionTargetIds: [], detectCancelRequested: false, job: null, images: [{ id: "one" }], pendingDetectionTargetIds: ["one"], settings: { detection: { targets: ["penis"], default_candidate_padding_px: 0 } }, settingsStatus: null };
   const context = {
-    state, Math, Promise, structuredClone, normaliseDetectionConfidence: Number, normaliseCandidatePadding: Number, normaliseFluidColorFillTolerance: Number, catalogStagingEditsActive: () => false, flushAllImageMutations: async () => {}, flushAllWorkspaceMutations: async () => {}, processableImages: (images = state.pendingDetectionTargetIds.map((id) => ({ id }))) => images, $: control, isBusy: () => false,
+    state, Math, Promise, structuredClone, normaliseDetectionConfidence: Number, normaliseCandidatePadding: Number, normaliseFluidColorFillTolerance: Number, catalogStagingEditsActive: () => false, flushAllImageMutations: async () => {}, flushAllWorkspaceMutations: async () => {}, processableImages: (images = state.images) => images, $: control, isBusy: () => false,
     saveDraft: async () => { events.push("draft"); }, api: async (path) => { events.push(path); throw new Error("settings failed"); },
     setSettingsForm() {}, updateActionButtons() {}, showProcessing() { events.push("modal"); }, closeProcessing() { events.push("close"); }, updateProgress() {}, setStatusKey() {}, setStatus() {}, showUserError() { events.push("error"); }, t: (key) => key,
   };
@@ -97,12 +99,12 @@ async function testCompletionInvalidatesAndReloadsCandidates() {
     handledDetectionStartedAt: null, detectCancelRequested: false,
   };
   const context = {
-    state, Array, Number, Promise, Map,
+    state, Array, Number, Promise, Map, window: { addEventListener() {} },
     modalInvokers: new Map(),
     $: () => ({}),
     api: async () => ({ images: [newRecord] }),
     isCurrentGeneration: () => true, isCurrentCatalogEpoch: () => true,
-    pruneSourceAccess() {},
+    pruneSourceAccess() {}, loadReviewedPaths() {}, reconcileCatalogSnapshot(data) { state.images = data.images; return true; },
     releaseCandidateBundles: (id) => events.push(["release", id]),
     markImagesUnreviewed() {}, closeProcessing() {}, renderCatalogViews() {},
     selectImage: async (...args) => events.push(["select", ...args]),
