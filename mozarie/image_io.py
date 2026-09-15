@@ -101,15 +101,7 @@ def _png_with_original_chunks(source: bytes, image: Image.Image, *, normalize_or
 
     result = bytearray(PNG_SIGNATURE)
     wrote_idat = False
-    if normalize_orientation:
-        try:
-            normalized_exif = _png_exif_payload(_normalized_exif_bytes(source))
-        except ValueError as exc:
-            if not _png_text_expansion_error(exc):
-                raise
-            normalized_exif = None
-    else:
-        normalized_exif = None
+    normalized_exif = _png_exif_payload(_normalized_exif_bytes(source)) if normalize_orientation else None
     for chunk_type, chunk in source_chunks:
         if chunk_type == b"IHDR" and normalize_orientation:
             result.extend(encoded_ihdr)
@@ -191,10 +183,6 @@ def _assert_image_suffix_matches_format(suffix: str, image_format: str | None) -
         raise ClientError("The image content does not match its file extension.", "image_format_unsupported")
 
 
-def _png_text_expansion_error(error: ValueError) -> bool:
-    return "decompressed data too large" in str(error).casefold()
-
-
 def _write_png_without_text(source: BinaryIO, destination: BinaryIO) -> None:
     if source.read(len(PNG_SIGNATURE)) != PNG_SIGNATURE:
         raise OSError("invalid PNG signature")
@@ -229,24 +217,46 @@ def _write_png_without_text(source: BinaryIO, destination: BinaryIO) -> None:
             return
 
 
+def _png_has_text_chunks(source: BinaryIO) -> bool:
+    if source.read(len(PNG_SIGNATURE)) != PNG_SIGNATURE:
+        raise OSError("invalid PNG signature")
+    end = source.seek(0, os.SEEK_END)
+    source.seek(len(PNG_SIGNATURE))
+    has_text = False
+    while True:
+        header = source.read(8)
+        if len(header) != 8:
+            raise OSError("truncated PNG chunk header")
+        length = int.from_bytes(header[:4], "big")
+        chunk_type = header[4:]
+        if chunk_type == b"IEND" and length != 0:
+            raise OSError("invalid PNG end")
+        if length + 4 > end - source.tell():
+            raise OSError("truncated PNG chunk")
+        has_text = has_text or chunk_type in {b"tEXt", b"zTXt", b"iTXt"}
+        source.seek(length + 4, os.SEEK_CUR)
+        if chunk_type == b"IEND":
+            if source.tell() != end:
+                raise OSError("trailing PNG data")
+            return has_text
+
+
 @contextmanager
 def open_image_without_png_text(path: Path, raw: bytes | None = None):
-    """Open an image, retrying PNGs after streaming optional text into a temp input."""
-    try:
-        with Image.open(io.BytesIO(raw) if raw is not None else path) as image:
-            yield image
-        return
-    except ValueError as exc:
-        if path.suffix.lower() != ".png" or not _png_text_expansion_error(exc):
-            raise
+    """Open PNG pixels without handing optional text chunks to Pillow."""
     temporary_path: Path | None = None
     try:
-        with tempfile.NamedTemporaryFile(prefix="mozarie-png-", suffix=".png", delete=False) as temporary:
-            temporary_path = Path(temporary.name)
+        if path.suffix.lower() == ".png":
             with (io.BytesIO(raw) if raw is not None else path.open("rb")) as source:
-                _write_png_without_text(source, temporary)
-            temporary.flush()
-        with Image.open(temporary_path) as image:
+                strip_text = _png_has_text_chunks(source)
+                if strip_text:
+                    source.seek(0)
+                    with tempfile.NamedTemporaryFile(prefix="mozarie-png-", suffix=".png", delete=False) as temporary:
+                        temporary_path = Path(temporary.name)
+                        _write_png_without_text(source, temporary)
+                        temporary.flush()
+        image_source: Any = temporary_path if temporary_path is not None else (io.BytesIO(raw) if raw is not None else path)
+        with Image.open(image_source) as image:
             yield image
     finally:
         if temporary_path is not None:
