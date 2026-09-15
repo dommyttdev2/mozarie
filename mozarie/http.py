@@ -25,7 +25,7 @@ from .core import (
 )
 from . import state as state_module
 from .state import STATE, StudioState
-from .image_io import _decode_mask, _valid_color, calculate_block_size, inference_device_name, parse_png_chunks
+from .image_io import _decode_mask, _valid_color, calculate_block_size, inference_device_name, open_image_without_png_text, parse_png_chunks
 from .model_downloads import ModelDownloadError, ModelDownloadInProgress
 
 
@@ -462,6 +462,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
         try:
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
+            operation = _operation_log_spec("POST", path)
+            operation_started_at = _log_operation_started(operation, path, {})
             if STATE is None:
                 if path == "/api/workspace/recreate":
                     self._require_recovery_request()
@@ -476,6 +478,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     # The unavailable-state route does not consume arbitrary
                     # request bodies.  Close this connection so a rejected
                     # JSON body cannot be parsed as a second HTTP request.
+                    error = ClientError("作業データを作り直してから操作してください。", "workspace_recreate_required")
+                    _log_operation_failed(operation, operation_started_at, HTTPStatus.CONFLICT, error)
                     self._workspace_recreate_required()
                 else:
                     self._client_error(ClientError("ページが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
@@ -514,6 +518,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     self.close_connection = True
                     raise
                 response = None
+                succeeded = False
                 try:
                     with STATE.import_staging_gate:
                         staged_path = self._read_binary_body_to_file(content_length)
@@ -546,18 +551,28 @@ class MosaicHandler(BaseHTTPRequestHandler):
                             staged_path.unlink(missing_ok=True)
                     response = {"imported": imported, "catalogId": STATE.catalog_id,
                                 "catalogGeneration": STATE.catalog_snapshot()["catalogGeneration"]}
+                    succeeded = True
                 finally:
-                    STATE.end_import_transfer(import_session_id)
+                    STATE.end_import_transfer(import_session_id, succeeded=succeeded)
                 self._json(response)
                 return
             self._require_json_request()
             payload = self._read_json_body()
             expected_project_id, expected_catalog_generation = self._catalog_expectation(payload)
-            operation = _operation_log_spec("POST", path)
-            operation_started_at = _log_operation_started(operation, path, payload)
+            if operation is not None and (details := _operation_log_details(path, payload)):
+                LOGGER.info("操作対象: %s [%s]%s", operation[0], operation[1], details)
             if path == "/api/import/finish":
+                completed = payload.get("completed", 0)
+                if isinstance(completed, bool) or not isinstance(completed, int) or completed < 0:
+                    raise ClientError("画像追加の完了件数が正しくありません。", "input_invalid")
+                if any(not isinstance(payload.get(name, False), bool) for name in ("failed", "cancelled")):
+                    raise ClientError("画像追加の完了状態が正しくありません。", "input_invalid")
                 self._json(STATE.finish_import_session(str(payload.get("sessionId", "")), expected_project_id,
-                                                        expected_catalog_generation))
+                                                        expected_catalog_generation, {
+                                                            "completed": completed,
+                                                            "failed": bool(payload.get("failed", False)),
+                                                            "cancelled": bool(payload.get("cancelled", False)),
+                                                        }))
             elif path == "/api/folder":
                 _result, snapshot = self._catalog_transition_snapshot(
                     lambda: STATE.set_root(str(payload.get("path", "")), expected_project_id=expected_project_id,
@@ -822,11 +837,15 @@ class MosaicHandler(BaseHTTPRequestHandler):
         operation_started_at: float | None = None
         try:
             path = unquote(urlparse(self.path).path)
+            operation = _operation_log_spec("DELETE", path)
+            operation_started_at = _log_operation_started(operation, path, {})
             content_length = self._request_body_length()
             if STATE is None:
                 self._require_local_host()
                 self.close_connection = True
                 if _is_api_path(path):
+                    error = ClientError("作業データを作り直してから操作してください。", "workspace_recreate_required")
+                    _log_operation_failed(operation, operation_started_at, HTTPStatus.CONFLICT, error)
                     self._workspace_recreate_required()
                 else:
                     self._client_error(ClientError("ページが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
@@ -837,8 +856,6 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._require_json_request()
                 payload = self._read_json_body(content_length)
             expected_project_id, expected_catalog_generation = self._catalog_expectation(payload)
-            operation = _operation_log_spec("DELETE", path)
-            operation_started_at = _log_operation_started(operation, path, payload or {})
             if path.startswith("/api/catalog/image/"):
                 image_id = path.removeprefix("/api/catalog/image/")
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
@@ -954,7 +971,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                                 raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
                         temporary_path: Path | None = None
                         try:
-                            with Image.open(record.path) as image:
+                            with open_image_without_png_text(record.path) as image:
                                 image = ImageOps.exif_transpose(image)
                                 if record.flip_horizontal != record.source_flip_horizontal:
                                     image = ImageOps.mirror(image)

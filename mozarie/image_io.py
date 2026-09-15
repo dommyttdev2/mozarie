@@ -8,12 +8,13 @@ import shutil
 import tempfile
 import uuid
 import zlib
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageOps, PngImagePlugin, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .core import (
     APP_DIR, IO_CHUNK_BYTES, LOGGER, MAX_BODY_BYTES, PNG_SIGNATURE,
@@ -21,17 +22,6 @@ from .core import (
     safe_import_relative_path, torch_module, _read_save_suffix,
 )
 from .runtime import directml_devices, runtime_backend
-
-
-# Some image generators embed their prompt in a compressed PNG text chunk that
-# exceeds Pillow's 1 MiB per-chunk default.  Set the process-wide limit once at
-# import time so parallel scans cannot observe a temporary relaxed limit.  The
-# cumulative Pillow text limit remains 64 MiB and decompression-bomb checks
-# below stay enabled.
-PNG_MAX_TEXT_CHUNK_BYTES = 8 * 1024 * 1024
-PNG_MAX_TEXT_MEMORY_BYTES = 64 * 1024 * 1024
-PngImagePlugin.MAX_TEXT_CHUNK = PNG_MAX_TEXT_CHUNK_BYTES
-PngImagePlugin.MAX_TEXT_MEMORY = PNG_MAX_TEXT_MEMORY_BYTES
 
 
 def _valid_color(value: str) -> bool:
@@ -79,7 +69,8 @@ def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
 
 
 def _normalized_exif_bytes(source: bytes) -> bytes:
-    with Image.open(io.BytesIO(source)) as source_image:
+    suffix = ".png" if source.startswith(PNG_SIGNATURE) else ".jpg"
+    with open_image_without_png_text(Path(f"source{suffix}"), source) as source_image:
         exif = source_image.getexif()
     exif[274] = 1
     return exif.tobytes()
@@ -110,7 +101,15 @@ def _png_with_original_chunks(source: bytes, image: Image.Image, *, normalize_or
 
     result = bytearray(PNG_SIGNATURE)
     wrote_idat = False
-    normalized_exif = _png_exif_payload(_normalized_exif_bytes(source)) if normalize_orientation else None
+    if normalize_orientation:
+        try:
+            normalized_exif = _png_exif_payload(_normalized_exif_bytes(source))
+        except ValueError as exc:
+            if not _png_text_expansion_error(exc):
+                raise
+            normalized_exif = None
+    else:
+        normalized_exif = None
     for chunk_type, chunk in source_chunks:
         if chunk_type == b"IHDR" and normalize_orientation:
             result.extend(encoded_ihdr)
@@ -192,15 +191,77 @@ def _assert_image_suffix_matches_format(suffix: str, image_format: str | None) -
         raise ClientError("The image content does not match its file extension.", "image_format_unsupported")
 
 
+def _png_text_expansion_error(error: ValueError) -> bool:
+    return "decompressed data too large" in str(error).casefold()
+
+
+def _write_png_without_text(source: BinaryIO, destination: BinaryIO) -> None:
+    if source.read(len(PNG_SIGNATURE)) != PNG_SIGNATURE:
+        raise OSError("invalid PNG signature")
+    destination.write(PNG_SIGNATURE)
+    while True:
+        header = source.read(8)
+        if len(header) != 8:
+            raise OSError("truncated PNG chunk header")
+        length = int.from_bytes(header[:4], "big")
+        chunk_type = header[4:]
+        omit_text = chunk_type in {b"tEXt", b"zTXt", b"iTXt"}
+        if not omit_text:
+            destination.write(header)
+        crc = zlib.crc32(chunk_type)
+        remaining = length
+        while remaining:
+            block = source.read(min(IO_CHUNK_BYTES, remaining))
+            if not block:
+                raise OSError("truncated PNG chunk")
+            remaining -= len(block)
+            crc = zlib.crc32(block, crc)
+            if not omit_text:
+                destination.write(block)
+        expected_crc = source.read(4)
+        if len(expected_crc) != 4 or int.from_bytes(expected_crc, "big") != (crc & 0xFFFFFFFF):
+            raise OSError("invalid PNG chunk checksum")
+        if not omit_text:
+            destination.write(expected_crc)
+        if chunk_type == b"IEND":
+            if source.read(1):
+                raise OSError("trailing PNG data")
+            return
+
+
+@contextmanager
+def open_image_without_png_text(path: Path, raw: bytes | None = None):
+    """Open an image, retrying PNGs after streaming optional text into a temp input."""
+    try:
+        with Image.open(io.BytesIO(raw) if raw is not None else path) as image:
+            yield image
+        return
+    except ValueError as exc:
+        if path.suffix.lower() != ".png" or not _png_text_expansion_error(exc):
+            raise
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(prefix="mozarie-png-", suffix=".png", delete=False) as temporary:
+            temporary_path = Path(temporary.name)
+            with (io.BytesIO(raw) if raw is not None else path.open("rb")) as source:
+                _write_png_without_text(source, temporary)
+            temporary.flush()
+        with Image.open(temporary_path) as image:
+            yield image
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
     """Validate an input image without decoding its complete pixel payload."""
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(path) as image:
+            with open_image_without_png_text(path) as image:
                 _assert_image_suffix_matches_format(expected_suffix, image.format)
                 size = oriented_image_size(image)
-            with Image.open(path) as image:
+            with open_image_without_png_text(path) as image:
                 image.verify()
         if expected_suffix.lower() in {".jpg", ".jpeg"}:
             with path.open("rb") as source:
@@ -459,7 +520,7 @@ def read_stable_source_bytes(record: ImageRecord, expected: tuple[int, int] | No
 def canonical_image(record: ImageRecord, source: bytes | None = None) -> tuple[Image.Image, bytes, dict[str, Any]]:
     """Load source pixels into the stable, unflipped editing coordinate space."""
     raw = read_stable_source_bytes(record) if source is None else source
-    with Image.open(io.BytesIO(raw)) as image:
+    with open_image_without_png_text(record.path, raw) as image:
         image.load()
         normalized = ImageOps.exif_transpose(image)
         info = dict(image.info)
@@ -530,7 +591,7 @@ def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> 
     """Render one image without changing the source file or its catalogue state."""
     source = read_stable_source_bytes(record)
     suffix = record.path.suffix.lower()
-    with Image.open(io.BytesIO(source)) as source_image:
+    with open_image_without_png_text(record.path, source) as source_image:
         source_image.load()
         normalize_orientation = source_image.getexif().get(274, 1) not in {None, 1}
         normalized = ImageOps.exif_transpose(source_image)

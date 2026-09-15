@@ -505,6 +505,7 @@ async function importFiles(files) {
     pruneSourceAccess(); renderCatalogViews(); setStatusKey("gallery.imported", { count: supportedFiles.length });
     return !session.missingFileHandles;
   } catch (error) {
+    session.failed = true;
     try {
       const capturedProjectId = state.project?.id || null;
       const capturedCatalogGeneration = state.serverCatalogGeneration;
@@ -557,7 +558,7 @@ function beginImportSession({ allowDuringCatalogTransition = false } = {}) {
     setStatusKey("status.importUnavailable");
     return null;
   }
-  const session = { id: newClientKey(), epoch: state.catalogTransition?.epoch || beginCatalogEpoch(), expectedProjectId: state.project?.id || "", expectedCatalogGeneration: state.serverCatalogGeneration, paused: false, cancelled: false, completed: 0, total: 0, catalogId: null, sourceId: null, sourceKind: "browser-files", importIntent: "add" };
+  const session = { id: newClientKey(), epoch: state.catalogTransition?.epoch || beginCatalogEpoch(), expectedProjectId: state.project?.id || "", expectedCatalogGeneration: state.serverCatalogGeneration, paused: false, cancelled: false, failed: false, completed: 0, total: 0, catalogId: null, sourceId: null, sourceKind: "browser-files", importIntent: "add" };
   state.importing = true; state.importSession = session;
   updateActionButtons();
   return session;
@@ -570,6 +571,9 @@ async function finishImportServerSession(session) {
       sessionId: session.id,
       expectedProjectId: session.expectedProjectId,
       expectedCatalogGeneration: session.expectedCatalogGeneration,
+      completed: session.completed,
+      failed: Boolean(session.failed),
+      cancelled: Boolean(session.cancelled),
     }) });
   } catch {
     // The next claimed import expires an abandoned batch after its short TTL.

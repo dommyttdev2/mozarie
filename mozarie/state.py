@@ -292,8 +292,10 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                         raise ClientError("別の画像追加が完了するまでお待ちください。", "operation_in_progress")
                     self._assert_catalog_expectation(expected_project_id, expected_catalog_generation)
                     session = {"project_id": expected_project_id, "generation": expected_catalog_generation,
-                               "last_generation": expected_catalog_generation, "active": 0, "finish_requested": False, "touched": time.monotonic()}
+                               "last_generation": expected_catalog_generation, "active": 0, "finish_requested": False,
+                               "succeeded": 0, "failed": 0, "started_at": time.monotonic(), "outcome": {}, "touched": time.monotonic()}
                     self._import_sessions[session_id] = session
+                    LOGGER.info("ブラウザー画像読込を開始")
                 elif session["project_id"] != expected_project_id or session["generation"] != expected_catalog_generation:
                     raise ClientError("画像追加セッションが更新されています。", "stale_catalog")
                 elif session["finish_requested"]:
@@ -312,7 +314,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                     and self.catalog_id == expected_project_id
                     and self.catalog_generation >= expected_catalog_generation)
 
-    def end_import_transfer(self, session_id: str) -> None:
+    def end_import_transfer(self, session_id: str, *, succeeded: bool) -> None:
         with self.import_lock:
             with self.lock:
                 if self.active_import_count:
@@ -320,14 +322,25 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 session = self._import_sessions.get(session_id)
                 if session is not None:
                     session["active"] = max(0, session["active"] - 1)
+                    session["succeeded" if succeeded else "failed"] += 1
                     if not session["active"]:
                         session["last_generation"] = self.catalog_generation
                     session["touched"] = time.monotonic()
                     if session["finish_requested"] and not session["active"]:
+                        self._log_import_session_finished(session)
                         del self._import_sessions[session_id]
 
+    @staticmethod
+    def _log_import_session_finished(session: dict[str, Any]) -> None:
+        outcome = session.get("outcome", {})
+        LOGGER.info(
+            "ブラウザー画像読込を完了: 送信成功=%d件 送信失敗=%d件 完了=%d件 失敗=%s 取消=%s 所要=%.2f秒",
+            session["succeeded"], session["failed"], int(outcome.get("completed", session["succeeded"])),
+            bool(outcome.get("failed", False)), bool(outcome.get("cancelled", False)), time.monotonic() - session["started_at"],
+        )
+
     def finish_import_session(self, session_id: str, owner_project_id: str | None,
-                              owner_catalog_generation: int) -> dict[str, int | bool]:
+                              owner_catalog_generation: int, outcome: dict[str, Any] | None = None) -> dict[str, int | bool]:
         """Release a batch by its immutable starting owner, even after a view switch."""
         with self.import_lock:
             with self.lock:
@@ -338,9 +351,11 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 if session["project_id"] != owner_project_id or session["generation"] != owner_catalog_generation:
                     raise ClientError("画像追加セッションが更新されています。", "stale_catalog")
                 session["finish_requested"] = True
+                session["outcome"] = outcome or {}
                 session["touched"] = time.monotonic()
                 if session["active"]:
                     return {"ok": True, "pending": True, "catalogGeneration": self.catalog_generation}
+                self._log_import_session_finished(session)
                 del self._import_sessions[session_id]
                 return {"ok": True, "catalogGeneration": self.catalog_generation}
 

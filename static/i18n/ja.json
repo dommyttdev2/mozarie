@@ -17,7 +17,7 @@
   "status.pathCopied": "パスをコピーしました。",
   "status.importCancelled": "画像の読み込みを停止しました。{completed}件は読み込み済みです。",
   "status.importUnavailable": "画像の読み込みまたは処理が完了してから、もう一度実行してください。",
-  "status.folderPickerCancelled": "フォルダーの選択を取り消しました。",
+  "status.folderPickerCancelled": "フォルダーの選択を完了できませんでした。",
   "status.folderPickerFailed": "フォルダーを選択できませんでした。権限を確認して、もう一度実行してください。",
   "status.saving": "ファイルを保存しています...",
   "status.saved": "保存しました。",

@@ -327,16 +327,20 @@ class CatalogMixin:
                 source_id = staged_source_id
                 self.workspace_store.native_source(catalog_id, source_id)
             else:
-                source_id = relink_source_id or self.workspace_store.ensure_project_source(
-                    catalog_id, kind="native-folder", display_name=root.name or str(root), identity=native_source_identity(root),
-                )
+                source_id = relink_source_id
                 if relink_source_id:
                     self.workspace_store.native_source(catalog_id, source_id)
-            stored_metadata = self.workspace_store.source_image_metadata(source_id)
+                elif existing_source := next((source for source in self.workspace_store.project_sources(catalog_id)
+                                               if source["kind"] == "native-folder"
+                                               and source["identity"].casefold() == native_source_identity(root).casefold()), None):
+                    source_id = str(existing_source["id"])
+            if source_id is not None:
+                stored_metadata = self.workspace_store.source_image_metadata(source_id)
 
-        paths = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES]
         scan_started_at = time.monotonic()
-        LOGGER.info("フォルダー走査を開始: パス=%s 候補=%d件", root, len(paths))
+        LOGGER.info("フォルダー走査を開始: パス=%s", root)
+        paths = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES]
+        LOGGER.info("フォルダー候補の列挙を完了: パス=%s 候補=%d件 所要=%.2f秒", root, len(paths), time.monotonic() - scan_started_at)
         records: list[ImageRecord] = []
         records_lock = threading.Lock()
         skip_counts: dict[str, int] = {}
@@ -407,6 +411,14 @@ class CatalogMixin:
             "フォルダー走査を完了: パス=%s 候補=%d件 読込=%d件 スキップ=%s 所要=%.2f秒",
             root, len(paths), len(records), skip_summary, time.monotonic() - scan_started_at,
         )
+        if not paths:
+            raise ClientError("指定フォルダーに対応画像がありません。", "image_read_failed")
+        if not records:
+            raise ClientError("指定フォルダーの対応画像を読み込めませんでした。CMDの走査ログを確認してください。", "image_read_failed")
+        if catalog_id is not None and source_id is None:
+            source_id = self.workspace_store.ensure_project_source(
+                catalog_id, kind="native-folder", display_name=root.name or str(root), identity=native_source_identity(root),
+            )
         records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
         prehydrated: dict[str, tuple[int, list[Candidate]]] | None = None
         try:
