@@ -202,6 +202,7 @@ function renderGallery(force = false) {
   $("#galleryEmptyState").hidden = state.images.length !== 0;
   $("#galleryFilteredEmptyState").hidden = !(state.images.length && !visibleImages.length);
   renderCatalog("gallery", visibleImages, state.galleryNodes, { container: "#gallery", template: "#galleryItemTemplate", padding: 8, gap: 8, minWidth: 108, rowHeight: 152, overscan: 3 });
+  syncResourceOwnership();
   updateActionButtons();
 }
 
@@ -217,6 +218,12 @@ function imageMatchesGalleryFilter(image) {
   return imageMatchesStateFilter(image, state.galleryFilter);
 }
 function galleryFilteredImages() { return state.images.filter(imageMatchesGalleryFilter); }
+function galleryNavigationNeighbors(imageId) {
+  const images = galleryFilteredImages();
+  const index = images.findIndex((image) => image.id === imageId);
+  if (index < 0) return [...new Set([images.at(-1), images[0]].filter(Boolean))];
+  return [images[index - 1], images[index + 1]].filter(Boolean);
+}
 function nextVisibleImage(images, imageId, { excludedImageIds = new Set(), fallback = false } = {}) {
   const index = images.findIndex((image) => image.id === imageId);
   const next = images.slice(index < 0 ? 0 : index + 1).find((image) => !excludedImageIds.has(image.id));

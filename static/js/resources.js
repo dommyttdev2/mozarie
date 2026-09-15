@@ -23,13 +23,13 @@ function maskUrl(imageId, candidateId, revision) { return `/api/mask/${encodeURI
 async function fetchBitmap(url, signal) { const response = await fetch(url, { signal, headers: { "X-Mozarie-Token": document.querySelector('meta[name="mozarie-token"]')?.content || "" } }); if (!response.ok) throw responseError(response, await response.json().catch(() => ({}))); return createImageBitmap(await response.blob()); }
 function desiredImageResourceKeys(extra = []) {
   const keys = new Set(extra);
-  const current = state.images.find((image) => image.id === state.currentId);
-  if (current) {
-    const index = state.images.indexOf(current);
-    for (const image of [current, state.images[index - 1], state.images[index + 1]]) if (image) keys.add(imageCacheKey(image));
+  for (const imageId of [state.currentId, state.pendingImageId]) {
+    const image = state.images.find((item) => item.id === imageId);
+    if (image) keys.add(imageCacheKey(image));
   }
+  for (const image of galleryNavigationNeighbors(state.pendingImageId || state.currentId)) keys.add(imageCacheKey(image));
   if (state.pendingImageKey) keys.add(state.pendingImageKey);
-  const hovered = state.images.find((image) => image.id === state.hoverPrefetchId);
+  const hovered = galleryFilteredImages().find((image) => image.id === state.hoverPrefetchId);
   if (hovered) keys.add(imageCacheKey(hovered));
   return keys;
 }

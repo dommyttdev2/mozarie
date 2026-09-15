@@ -221,11 +221,7 @@ async function cachedImage(record) {
 }
 
 function prefetchNeighbors(record) {
-  const index = state.images.findIndex((item) => item.id === record.id);
-  for (const neighbor of [state.images[index - 1], state.images[index + 1]]) {
-    if (!neighbor) continue;
-    schedulePrefetch(neighbor);
-  }
+  for (const neighbor of galleryNavigationNeighbors(record.id)) schedulePrefetch(neighbor);
 }
 
 function releaseImageCaches(imageId = null) {

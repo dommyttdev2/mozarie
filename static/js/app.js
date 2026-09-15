@@ -957,6 +957,7 @@ function bindEvents() {
   document.querySelectorAll("[data-gallery-filter]").forEach((input) => input.addEventListener("change", () => {
     if (isBusy() || state.importing) return;
     state.galleryFilter = new Set([...document.querySelectorAll("[data-gallery-filter]:checked")].map((item) => item.dataset.galleryFilter));
+    syncResourceOwnership();
     renderGallery();
   }));
   $("#overviewButton").addEventListener("click", () => { if (!isBusy() && !state.importing) setViewMode("overview"); });
