@@ -1236,7 +1236,8 @@ class CatalogMixin:
         if re.fullmatch(rf"\.{re.escape(source.name)}\.mozarie-delete-[0-9a-f]{{32}}", quarantine.name) is None:
             return source, quarantine, "quarantine_name_invalid"
         try: stat = quarantine.stat()
-        except OSError: return source, quarantine, "quarantine_missing"
+        except FileNotFoundError: return source, quarantine, "quarantine_missing"
+        except OSError as exc: return source, quarantine, f"quarantine_unavailable:{type(exc).__name__}"
         try: fingerprint = (int(plan.get("mtimeNs", -1)), int(plan.get("sizeBytes", -1)))
         except (TypeError, ValueError): return source, quarantine, "quarantine_fingerprint_invalid"
         if (stat.st_mtime_ns, stat.st_size) != fingerprint:
