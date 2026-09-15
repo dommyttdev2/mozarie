@@ -597,12 +597,12 @@ function queueImageMutation(imageId, send, { lockCandidateControls = false } = {
 async function flushAllImageMutations() {
   while (state.imageMutationChains.size) await Promise.allSettled([...state.imageMutationChains.values()]);
 }
-function saveWorkspaceFlagNow(image, field, desired, onSaved) {
+function saveWorkspaceFlagNow(image, field, desired, onSaved, force = false) {
   if (!image) return Promise.resolve(false);
   const key = `${image.id}:${field}`;
   const pending = state.workspaceFlagPending.get(key);
-  if (pending?.desired === desired) return pending.promise;
-  if (!pending && image[field] === desired) return Promise.resolve(true);
+  if (!force && pending?.desired === desired) return pending.promise;
+  if (!force && !pending && image[field] === desired) return Promise.resolve(true);
   let promise;
   promise = queueWorkspaceFlags(image.id, { [field]: desired }).then((flags) => {
     if (!publishWorkspaceFlags(image.id, flags)) return false;
@@ -634,9 +634,13 @@ function setHidden(image, hidden) {
     // Non-displayable images reject later manual saves. Persist the current
     // drawing before publishing the hidden flag so hiding never drops it.
     if (hidden) await flushWorkspaceDraft(image.id);
+    const changed = image.hidden !== hidden;
     return saveWorkspaceFlagNow(image, "hidden", hidden, () => {
       if (!state.images.some((item) => item.id === image.id)) return;
       preserveCatalogScroll(renderCatalogViews, scroll); updateSelectionActionBar(); updateNavigationControls(); updateActionButtons();
+    }).then((saved) => {
+      if (saved && changed && !state.project?.id && image.id === state.currentId && typeof recordHistoryOperation === "function") recordHistoryOperation({ kind: "workspaceFlag" });
+      return saved;
     });
   }, { lockCandidateControls: true }).catch((error) => {
     showUserError(error);
@@ -676,8 +680,14 @@ function refreshReviewViews(scroll = null) {
 }
 function setReviewed(image, reviewed) {
   const scroll = state.contextMenuScroll;
-  return saveWorkspaceFlag(image, "reviewed", reviewed, () => {
+  if (!image) return Promise.resolve(false);
+  const previous = image.reviewed === true;
+  publishWorkspaceFlags(image.id, { reviewed });
+  return queueImageMutation(image.id, () => saveWorkspaceFlagNow(image, "reviewed", reviewed, () => {
     if (state.images.some((item) => item.id === image.id)) refreshReviewViews(scroll);
+  }, true), { lockCandidateControls: true }).then((saved) => {
+    if (!saved) publishWorkspaceFlags(image.id, { reviewed: previous });
+    return saved;
   });
 }
 function markImagesUnreviewed(imageIds, renderAfter = true) {

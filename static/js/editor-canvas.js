@@ -453,10 +453,11 @@ async function saveDraft() {
     manualEnabled: state.manualEnabled, manualExclusionEnabled: state.manualExclusionEnabled, manualExclusionEraseEnabled: state.manualExclusionEraseEnabled,
     manualMaskPresent: state.manualMaskPresent, manualExclusionForced: state.manualExclusionForced,
     candidateRevision: Number(currentRecord()?.candidateRevision || 0), removedCandidateIds: [...state.removedCandidateIds],
-    history: keepLocalHistory ? state.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined })) : [],
+    history: keepLocalHistory ? state.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined, editorState: stroke.editorState ? structuredClone(stroke.editorState) : undefined })) : [],
     historyIndex: keepLocalHistory ? state.historyIndex : 0,
     historyRemovedCandidateIds: keepLocalHistory ? [...(state.historyRemovedCandidateIds || [])] : [],
     historyCandidateIds: keepLocalHistory ? [...(state.historyCandidateIds || [])] : [],
+    historyEditorState: keepLocalHistory && state.historyEditorState ? structuredClone(state.historyEditorState) : null,
     hasEffectiveMask: hasEffectiveMask(), defaultManualExclusionForced: state.settings?.detection?.exclude_forced_default !== false,
   };
   state.draftDirty = false;
@@ -525,6 +526,7 @@ async function saveDraft() {
           exclusionErase: encodedHistoryBase.exclusionErase ?? retained.historyBase?.exclusionErase ?? "",
           removedCandidateIds: snapshot.historyRemovedCandidateIds,
           candidateIds: snapshot.historyCandidateIds,
+          editorState: snapshot.historyEditorState,
         },
       } : {}),
       dirtyLayers: [...pendingLayers], dirtyRois: pendingRois,
@@ -570,13 +572,14 @@ async function restoreDraft(imageId, generation, draft = state.drafts.get(imageI
       if (historyAddImage) historyAddCanvas.getContext("2d").drawImage(historyAddImage, 0, 0);
       if (historyExclusionImage) historyExclusionCanvas.getContext("2d").drawImage(historyExclusionImage, 0, 0);
       if (historyExclusionEraseImage) historyExclusionEraseCanvas.getContext("2d").drawImage(historyExclusionEraseImage, 0, 0);
-      const originalHistory = draft.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined }));
+      const originalHistory = draft.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined, editorState: stroke.editorState ? structuredClone(stroke.editorState) : undefined }));
       const candidateOperation = (stroke) => ["removeCandidates", "restoreCandidates", "addCandidates"].includes(stroke.kind);
       state.history = candidateRevisionMatches ? originalHistory : originalHistory.filter((stroke) => !candidateOperation(stroke));
       state.historyRemovedCandidateIds = new Set(candidateRevisionMatches
         ? (draft.historyBase.removedCandidateIds || []).filter((id) => currentCandidateIds.has(id))
         : retainedRemovedIds);
       state.historyCandidateIds = new Set(candidateRevisionMatches ? (draft.historyBase.candidateIds || state.candidates.map((candidate) => candidate.id)) : state.candidates.map((candidate) => candidate.id));
+      state.historyEditorState = candidateRevisionMatches && draft.historyBase.editorState ? structuredClone(draft.historyBase.editorState) : historyEditorState();
       const oldIndex = Math.max(0, Math.min(originalHistory.length, Number(draft.historyIndex) || 0));
       state.historyIndex = candidateRevisionMatches ? Math.min(state.history.length, oldIndex) : originalHistory.slice(0, oldIndex).filter((stroke) => !candidateOperation(stroke)).length;
       rebuildManualMaskFromHistory(); updateHistoryButtons();

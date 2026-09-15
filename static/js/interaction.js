@@ -767,7 +767,7 @@ function navigationShortcutAction(event) {
   if (actionForBinding === "removeImage" && event.repeat) return "removeImageRepeat";
   if (actionForBinding === "removeImage" && !canRemoveCurrentImage()) return null;
   if ((currentImageActionPending() || state.projectReadOnly || currentRecord()?.sourceDimensionsChanged
-    || (!isProcessableImage(currentRecord()) && ["undo", "redo"].includes(actionForBinding)))
+    || (!currentRecord() && ["undo", "redo"].includes(actionForBinding)))
     && ["reviewAndNext", "undo", "redo"].includes(actionForBinding)) return null;
   return actionForBinding;
 }

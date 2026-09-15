@@ -9,6 +9,17 @@ function manualLayerPresence() {
   };
 }
 
+function setEditorUnreviewed() {
+  const record = currentRecord();
+  if (!record) return Promise.resolve(false);
+  if (state.project?.id) {
+    publishWorkspaceFlags(record.id, { reviewed: false });
+    refreshReviewViews();
+    return Promise.resolve(true);
+  }
+  return setReviewed(record, false);
+}
+
 function refreshManualLayerPresence(...layers) {
   for (const layer of layers) {
     if (layer === "add") state.manualMaskPresent = canvasHasPixels(addCtx, addCanvas);
@@ -99,11 +110,16 @@ async function commitCandidatePadding() {
   if (appliedValue === session.original) { closeCandidatePadding({ restoreFocus: true }); return true; }
   session.committing = true;
   const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
-  candidate.expandPx = appliedValue; markMaskDirty(); setReviewed(currentRecord(), false);
-  recordHistoryOperation({ kind: "candidateState" }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
+  const previousReviewed = currentRecord()?.reviewed === true;
+  candidate.expandPx = appliedValue; markMaskDirty(); setEditorUnreviewed();
+  const editorState = historyEditorState(); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
   closeCandidatePadding();
-  await updateCandidate(candidate, candidate.enabled, previousMaskStatus, candidate.forced, session.original);
-  return true;
+  if (await updateCandidate(candidate, candidate.enabled, previousMaskStatus, candidate.forced, session.original)) {
+    recordHistoryOperation({ kind: "candidateState", editorState });
+    return true;
+  }
+  restoreCandidateMutationReview(previousReviewed);
+  return false;
 }
 
 async function commitBatchCandidatePadding(session, value) {
@@ -120,7 +136,7 @@ async function commitBatchCandidatePadding(session, value) {
     if (state.currentId === imageId && isCurrentGeneration(generation)) {
       await reconcileCurrentCandidates(imageId, generation);
       retainCurrentCandidateBundle(imageId, result.candidateRevision);
-      markMaskDirty(); await saveWorkspaceFlagNow(currentRecord(), "reviewed", false); recordHistoryOperation({ kind: "candidateBatch" }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
+      markMaskDirty(); setEditorUnreviewed(); recordHistoryOperation({ kind: "candidateBatch" }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
     } else await refreshCandidateRecord(imageId, true);
       return result;
     });
@@ -142,7 +158,7 @@ function changeCandidatePaddingDraft(delta) {
   const input = $("#candidatePaddingInput");
   const value = candidatePaddingValue(input);
   const base = value === null ? candidatePaddingSession?.original || 0 : value;
-  input.value = String(Math.max(0, Math.min(Number(input.max), base + delta)));
+  input.value = String(Math.max(0, Math.min(Number.MAX_SAFE_INTEGER, base + delta)));
   validateCandidatePadding(); input.focus(); input.select();
 }
 
@@ -241,9 +257,8 @@ function renderCandidates() {
     const enabled = makeToggle(isEnabled, isApply ? t("candidates.manualToggle") : t("candidates.manualExcludeToggle"), () => {
       if (isBusy() || state.importing || currentImageActionPending()) return;
       if (isApply) state.manualEnabled = !state.manualEnabled; else state.manualExclusionEnabled = !state.manualExclusionEnabled;
+      markMaskDirty(); saveDraft(); setEditorUnreviewed();
       recordHistoryOperation({ kind: "manualState" });
-      markMaskDirty(); saveDraft();
-      setReviewed(currentRecord(), false);
       refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
     }, state.projectReadOnly || candidateLocked);
     const blinkId = `manual:${role}`;
@@ -258,8 +273,7 @@ function renderCandidates() {
       const forced = makeForceToggle(state.manualExclusionForced, () => {
         if (isBusy() || state.importing || currentImageActionPending()) return;
         state.manualExclusionForced = !state.manualExclusionForced; markMaskDirty(); saveDraft();
-        recordHistoryOperation({ kind: "manualState" });
-        setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
+        setEditorUnreviewed(); recordHistoryOperation({ kind: "manualState" }); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
       }, state.projectReadOnly || candidateLocked);
       appendRow(row, label, enabled, [blink, candidateEffectiveToggle(blinkId), forced, remove]);
     } else appendRow(row, label, enabled, [blink, candidateEffectiveToggle(blinkId), remove]);
@@ -274,9 +288,7 @@ function renderCandidates() {
     const enabled = makeToggle(state.manualExclusionEraseEnabled, t("candidates.manualExcludeEraseToggle"), () => {
       if (isBusy() || state.importing || currentImageActionPending()) return;
       state.manualExclusionEraseEnabled = !state.manualExclusionEraseEnabled; markMaskDirty();
-      recordHistoryOperation({ kind: "manualState" });
-      saveDraft();
-      setReviewed(currentRecord(), false); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
+      saveDraft(); setEditorUnreviewed(); recordHistoryOperation({ kind: "manualState" }); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
     }, state.projectReadOnly || candidateLocked);
     const blink = makeDisplay(blinkId);
     row.dataset.candidateBlinkId = blinkId; row.dataset.candidateBlinkRole = "exclude";
@@ -298,10 +310,13 @@ function renderCandidates() {
       if (isBusy() || state.importing || currentImageActionPending()) return;
       const previousEnabled = candidate.enabled;
       const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
+      const previousReviewed = currentRecord()?.reviewed === true;
       candidate.enabled = !candidate.enabled;
       markMaskDirty();
-      setReviewed(currentRecord(), false);
-      recordHistoryOperation({ kind: "candidateState" }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render(); await updateCandidate(candidate, previousEnabled, previousMaskStatus);
+      setEditorUnreviewed();
+      const editorState = historyEditorState(); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
+      if (await updateCandidate(candidate, previousEnabled, previousMaskStatus)) recordHistoryOperation({ kind: "candidateState", editorState });
+      else restoreCandidateMutationReview(previousReviewed);
     }, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId));
     const blink = makeDisplay(candidate.id);
     row.dataset.candidateBlinkId = candidate.id; row.dataset.candidateBlinkRole = role;
@@ -319,10 +334,12 @@ function renderCandidates() {
         if (isBusy() || state.importing || currentImageActionPending()) return;
         const previousForced = candidate.forced !== false;
         const previousMaskStatus = state.maskStatus.has(state.currentId) ? state.maskStatus.get(state.currentId) : imageHasMask(currentRecord());
-        candidate.forced = !previousForced; setReviewed(currentRecord(), false);
+        const previousReviewed = currentRecord()?.reviewed === true;
+        candidate.forced = !previousForced; setEditorUnreviewed();
         markMaskDirty();
-        recordHistoryOperation({ kind: "candidateState" }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
-        await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
+        const editorState = historyEditorState(); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); render();
+        if (await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced)) recordHistoryOperation({ kind: "candidateState", editorState });
+        else restoreCandidateMutationReview(previousReviewed);
       }, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId));
       appendRow(row, label, enabled, [blink, candidateEffectiveToggle(candidate.id), makeExpandButton(candidate, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId), labelText), forced, remove]);
     } else appendRow(row, label, enabled, [blink, candidateEffectiveToggle(candidate.id), makeExpandButton(candidate, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId), labelText), remove]);
@@ -367,14 +384,14 @@ function syncCandidateDisplayButtons(presence) {
   document.querySelectorAll("[data-candidate-blink-id]").forEach((row) => row.classList.toggle("blink-selected", candidateDisplayMode(row.dataset.candidateBlinkId) !== "off"));
 }
 
-function clearCandidateBlink() {
-  state.blinkCandidateIds.clear(); state.blinkModes.clear(); state.blinkRoleModes.clear(); state.blinkPhase = false;
+function clearCandidateBlink({ clearRoles = true } = {}) {
+  state.blinkCandidateIds.clear(); state.blinkModes.clear(); if (clearRoles) state.blinkRoleModes.clear(); state.blinkPhase = false;
   if (state.blinkTimer) { clearInterval(state.blinkTimer); state.blinkTimer = null; }
   $("#candidatePane")?.classList.remove("blink-active", "blink-phase");
 }
 
 function syncCandidateBlinkTimer() {
-  if (!state.blinkCandidateIds.size) { clearCandidateBlink(); return; }
+  if (!state.blinkCandidateIds.size) { clearCandidateBlink({ clearRoles: false }); return; }
   if (!state.blinkTimer) {
     state.blinkPhase = true;
     state.blinkTimer = setInterval(() => {
@@ -480,10 +497,19 @@ async function waitForCandidateMutations() {
   }
 }
 
+function restoreCandidateMutationReview(reviewed) {
+  const record = currentRecord();
+  if (!record) return;
+  record.reviewed = reviewed;
+  if (reviewed) state.reviewedImageIds.add(record.id); else state.reviewedImageIds.delete(record.id);
+  void saveWorkspaceFlagNow(record, "reviewed", reviewed, undefined, true);
+  refreshMaskStatus(true); updateCandidateStatus(); renderCandidates(); render(); renderCatalogViews();
+}
+
 async function updateCandidate(candidate, previousEnabled, previousMaskStatus, previousForced = candidate.forced, previousExpandPx = candidate.expandPx || 0) {
   const imageId = state.currentId;
   const generation = state.imageGeneration;
-  if (!imageId || currentImageActionPending()) return;
+  if (!imageId || currentImageActionPending()) return false;
   const targetCandidates = [...state.candidates];
   clearRoleCandidateDisplayMode(candidate.role);
   const mutationKey = candidateMutationKey(imageId, candidate.id);
@@ -496,8 +522,8 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus, p
       const result = await api(`/api/candidate/${encodeURIComponent(imageId)}/${encodeURIComponent(candidate.id)}`, {
         method: "POST", body: JSON.stringify({ enabled: desired, color: candidate.color, ...(desiredExpandPx !== previousExpandPx ? { expandPx: desiredExpandPx } : {}), ...(candidate.role === "exclude" ? { forced: desiredForced } : {}) }),
       });
-      if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
-      if (desiredExpandPx !== previousExpandPx && !await refreshCandidateBitmap(candidate, imageId, result.candidateRevision, generation, mutationKey, version)) return;
+      if (state.candidateUpdateVersions.get(mutationKey) !== version) return false;
+      if (desiredExpandPx !== previousExpandPx && !await refreshCandidateBitmap(candidate, imageId, result.candidateRevision, generation, mutationKey, version)) return false;
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         const currentCandidate = state.candidates.find((item) => item.id === candidate.id);
         if (currentCandidate) { currentCandidate.enabled = desired; currentCandidate.forced = desiredForced; currentCandidate.expandPx = desiredExpandPx; }
@@ -508,19 +534,20 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus, p
         renderCatalogViews();
       }
       if (state.project?.id) void refreshProjectHistory(imageId);
+      return true;
     } catch (error) {
-      if (state.candidateUpdateVersions.get(mutationKey) !== version) return;
+      if (state.candidateUpdateVersions.get(mutationKey) !== version) return false;
       if (state.currentId === imageId && isCurrentGeneration(generation)) {
         try {
           if (await reconcileCurrentCandidates(imageId, generation)) {
             showUserError(error);
-            return;
+            return false;
           }
         } catch {
           if (state.currentId === imageId && isCurrentGeneration(generation)) {
             candidate.enabled = previousEnabled; candidate.forced = previousForced; candidate.expandPx = previousExpandPx; syncCurrentCandidateRecord(); refreshMaskStatus(true); requestMosaicPreview(); renderCandidates(); render();
             showUserError(error);
-            return;
+            return false;
           }
         }
       }
@@ -531,6 +558,7 @@ async function updateCandidate(candidate, previousEnabled, previousMaskStatus, p
         await refreshCandidateRecord(imageId, true);
       } catch { /* The local rollback already removed the optimistic aggregate. */ }
       renderCatalogViews();
+      return false;
     }
   };
   return enqueueCandidateMutation(imageId, send);
@@ -544,8 +572,7 @@ async function deleteCandidate(candidate) {
   if (state.currentId !== imageId || !isCurrentGeneration(generation) || currentImageActionPending() || !state.candidates.some((item) => item.id === candidate.id)) return;
   clearRoleCandidateDisplayMode(candidate.role); state.removedCandidateIds.add(candidate.id);
   setCandidateDisplayMode([candidate.id], "off");
-  recordHistoryOperation({ kind: "removeCandidates", ids: [candidate.id] });
-  markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
+  markMaskDirty(); setEditorUnreviewed(); recordHistoryOperation({ kind: "removeCandidates", ids: [candidate.id] }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
 }
 
 function deleteManualMask() {
@@ -553,7 +580,7 @@ function deleteManualMask() {
   addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
   state.manualMaskPresent = false; state.manualEnabled = true;
   setCandidateDisplayMode(["manual:apply"], "off");
-  setReviewed(currentRecord(), false);
+  setEditorUnreviewed();
   recordHistoryOperation({ kind: "clearManual", role: "apply" }); markMaskDirty(); markDraftDirty("add"); saveDraft(); requestMosaicPreview(); updateCandidateStatus(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
@@ -563,7 +590,7 @@ function deleteManualExclusion() {
   state.manualExclusionPresent = false;
   state.manualExclusionEnabled = true;
   setCandidateDisplayMode(["manual:exclude"], "off");
-  setReviewed(currentRecord(), false);
+  setEditorUnreviewed();
   recordHistoryOperation({ kind: "clearManual", role: "exclude" }); markMaskDirty(); markDraftDirty("exclusion"); saveDraft(); requestMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
@@ -573,7 +600,7 @@ function deleteManualExclusionErase() {
   state.manualExclusionErasePresent = false;
   state.manualExclusionEraseEnabled = true;
   setCandidateDisplayMode(["manual:excludeErase"], "off");
-  setReviewed(currentRecord(), false);
+  setEditorUnreviewed();
   recordHistoryOperation({ kind: "clearManual", role: "excludeErase" }); markMaskDirty(); markDraftDirty("exclusionErase"); saveDraft(); requestMosaicPreview(); refreshCurrentReviewAndMask(); renderCandidates(); render();
 }
 
@@ -602,8 +629,7 @@ async function batchCandidateOperation(spec) {
     const ids = changed.map((item) => item.id);
     setCandidateDisplayMode(ids, "off");
     ids.forEach((id) => state.removedCandidateIds.add(id));
-    if (ids.length) recordHistoryOperation({ kind: "removeCandidates", ids });
-    markMaskDirty(); setReviewed(currentRecord(), false); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
+    markMaskDirty(); setEditorUnreviewed(); if (ids.length) recordHistoryOperation({ kind: "removeCandidates", ids }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
     return;
   }
   state.candidateBatchPending.add(imageId);
@@ -625,7 +651,7 @@ async function batchCandidateOperation(spec) {
       if (manualErase) { state.manualExclusionEraseEnabled = operation === "enable"; markMaskDirty(); }
       if (manual || manualErase) saveDraft();
       retainCurrentCandidateBundle(imageId, result.candidateRevision);
-      await saveWorkspaceFlagNow(currentRecord(), "reviewed", false);
+      setEditorUnreviewed();
       recordHistoryOperation({ kind: "candidateBatch" }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
       if (state.project?.id) void refreshProjectHistory(imageId);
     } catch (error) {
@@ -679,7 +705,7 @@ async function addBoundaryCandidate() {
       invalidateCandidateBundles(imageId); catalogChanged = true;
     }
     if (catalogChanged) {
-      markImagesUnreviewed([imageId], false);
+      setEditorUnreviewed();
       if (state.currentId === imageId && state.imageGeneration === viewGeneration) {
         await reconcileCurrentCandidates(imageId, viewGeneration);
         if (createdCandidateIds.length) { recordHistoryOperation({ kind: "addCandidates", ids: createdCandidateIds }); saveDraft(); }
@@ -742,7 +768,7 @@ function copyCanvas(source, target) {
 }
 
 function updateHistoryButtons() {
-  const locked = !isProcessableImage(currentRecord()) || currentImageActionPending() || isBusy() || state.importing;
+  const locked = !currentRecord() || currentImageActionPending() || isBusy() || state.importing;
   if (state.project?.id) {
     const history = state.projectHistory.get(state.currentId) || {};
     $("#undoButton").disabled = locked || state.projectReadOnly || state.projectHistoryBusy || history.canUndo !== true;
@@ -777,6 +803,7 @@ function historyEditorState() {
     manualExclusionEnabled: state.manualExclusionEnabled !== false,
     manualExclusionEraseEnabled: state.manualExclusionEraseEnabled !== false,
     manualExclusionForced: state.manualExclusionForced !== false,
+    hidden: currentRecord()?.hidden === true,
     reviewed: currentRecord()?.reviewed === true,
     removedCandidateIds: [...state.removedCandidateIds],
     candidates: state.candidates.map((candidate) => ({ id: candidate.id, enabled: candidate.enabled !== false, forced: candidate.forced !== false, expandPx: candidate.expandPx || 0, color: candidate.color })),
@@ -789,7 +816,13 @@ function applyHistoryEditorState(snapshot) {
   state.manualExclusionEnabled = snapshot.manualExclusionEnabled !== false;
   state.manualExclusionEraseEnabled = snapshot.manualExclusionEraseEnabled !== false;
   state.manualExclusionForced = snapshot.manualExclusionForced !== false;
-  const record = currentRecord(); if (record) record.reviewed = snapshot.reviewed === true;
+  const record = currentRecord();
+  if (record) {
+    record.hidden = snapshot.hidden === true;
+    record.reviewed = snapshot.reviewed === true;
+    if (record.hidden) state.hiddenImageIds.add(record.id); else state.hiddenImageIds.delete(record.id);
+    if (record.reviewed) state.reviewedImageIds.add(record.id); else state.reviewedImageIds.delete(record.id);
+  }
   state.removedCandidateIds = new Set(snapshot.removedCandidateIds || []);
   const candidates = new Map((snapshot.candidates || []).map((candidate) => [candidate.id, candidate]));
   for (const candidate of state.candidates) {
@@ -860,6 +893,7 @@ function paintStroke(from, to, tool, size) {
 
 function markStrokeDirty(tool, points = null, size = Number($("#brushSize").value)) {
   const roi = points?.length ? strokeDirtyRoi(points, tool, size) : null;
+  if (roi && state.activeStroke) state.activeStroke.dirtyRoi = mergeMosaicPreviewRoi(state.activeStroke.dirtyRoi, roi);
   markMaskDirty();
   if (tool === "brush" || tool === "mosaic_eraser") markDraftDirtyRoi("add", roi);
   if (tool === "brush" && !state.manualExclusionForced) markDraftDirtyRoi("exclusion", roi);
@@ -873,7 +907,7 @@ function paintStrokePath(points, tool, size, startIndex = 0) {
   else if (tool === "exclude_eraser") strokePath(exclusionEraseCtx, points, size, "source-over", startIndex);
   else if (tool === "eraser") { strokePath(exclusionCtx, points, size, "source-over", startIndex); strokePath(exclusionEraseCtx, points, size, "destination-out", startIndex); }
   else { strokePath(addCtx, points, size, "source-over", startIndex); if (!state.manualExclusionForced) strokePath(exclusionCtx, points, size, "destination-out", startIndex); }
-  markStrokeDirty(tool, points, size);
+  markStrokeDirty(tool, [points[startIndex], points.at(-1)], size);
 }
 
 function fillAt(point, tool = state.tool) {
@@ -891,7 +925,10 @@ function fillAt(point, tool = state.tool) {
     else if (tool === "mosaic_eraser") refreshManualLayerPresence("add");
     else if (tool === "eraser" || tool === "exclude_bucket") refreshManualLayerPresence("exclusion", "exclusionErase");
     else if (tool === "exclude_eraser") refreshManualLayerPresence("exclusionErase");
-    state.fillPending = false; scheduleManualWorkspaceSave(); setReviewed(currentRecord(), false); recordHistoryOperation({ tool, spans }); updateHistoryButtons(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
+    state.fillPending = false;
+    if (tool === "bucket" && shouldBlinkNewManual("apply")) inheritRoleCandidateDisplayMode("apply", ["manual:apply"]);
+    if (tool === "exclude_bucket" && shouldBlinkNewManual("exclude")) inheritRoleCandidateDisplayMode("exclude", ["manual:exclude"]);
+    scheduleManualWorkspaceSave(); setEditorUnreviewed(); recordHistoryOperation({ tool, spans }); updateHistoryButtons(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
   };
   if (typeof Worker !== "function") { showUserError("internal_error"); return; }
   state.fillWorker?.terminate?.(); state.fillPending = true;
@@ -969,7 +1006,6 @@ function paintPendingManualStroke() {
   if (!stroke || stroke.paintedPointCount >= stroke.points.length) return;
   paintStrokePath(stroke.points, stroke.tool, stroke.size, Math.max(0, stroke.paintedPointCount - 1));
   stroke.paintedPointCount = stroke.points.length;
-  requestMosaicPreview();
 }
 
 function cancelManualStroke() {
@@ -1004,7 +1040,7 @@ function trimHistory() {
 
 function recordHistoryOperation(operation) {
   if (state.project?.id) { state.history = []; state.historyIndex = 0; updateHistoryButtons(); return; }
-  operation.editorState = historyEditorState();
+  operation.editorState ||= historyEditorState();
   state.history.splice(state.historyIndex);
   state.history.push(operation); trimHistory(); state.historyIndex = state.history.length;
   updateHistoryButtons();
@@ -1035,15 +1071,10 @@ function completeManualStroke() {
   else if (stroke.tool === "mosaic_eraser") refreshManualLayerPresence("add");
   else if (stroke.tool === "eraser" || stroke.tool === "exclude_bucket") refreshManualLayerPresence("exclusion", "exclusionErase");
   else if (stroke.tool === "exclude_eraser") refreshManualLayerPresence("exclusionErase");
-  // The live ROI previews are intentionally provisional: after pointerup,
-  // rebuild the whole mask once so every exclusion and candidate is exact
-  // before history/workspace persistence and the final preview.
-  state.maskDirty = true;
-  flushMaskComposition();
   scheduleManualWorkspaceSave();
-  setReviewed(currentRecord(), false);
+  setEditorUnreviewed();
   recordHistoryOperation(stroke);
-  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates();
+  updateHistoryButtons(); updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview(stroke.dirtyRoi); renderCandidates();
 }
 
 async function refreshProjectHistory(imageId = state.currentId) {
@@ -1059,7 +1090,7 @@ async function restoreProjectHistory(direction) {
   if (catalogStagingEditsActive()) return;
   const imageId = state.currentId;
   const generation = state.imageGeneration;
-  if (!state.project?.id || !isProcessableImage(currentRecord()) || !imageId || state.projectReadOnly || state.projectHistoryBusy || isBusy() || state.importing || isGestureActive() || currentImageActionPending()) return;
+  if (!state.project?.id || !currentRecord() || !imageId || state.projectReadOnly || state.projectHistoryBusy || isBusy() || state.importing || isGestureActive() || currentImageActionPending()) return;
   state.projectHistoryBusy = true; updateHistoryButtons();
   try {
     await queueImageMutation(imageId, async () => {
@@ -1130,7 +1161,7 @@ async function syncProjectlessCandidateHistory(imageId, previous, generation) {
 function restoreSnapshot(index) {
   if (catalogStagingEditsActive()) return;
   if (state.project?.id) { void restoreProjectHistory(index < state.historyIndex ? "undo" : "redo"); return; }
-  if (!isProcessableImage(currentRecord()) || isBusy() || state.importing || isGestureActive() || currentImageActionPending() || index < 0 || index > state.history.length) return;
+  if (!currentRecord() || isBusy() || state.importing || isGestureActive() || currentImageActionPending() || index < 0 || index > state.history.length) return;
   if (index === state.historyIndex) return;
   const imageId = state.currentId;
   const generation = state.imageGeneration;
@@ -1140,14 +1171,15 @@ function restoreSnapshot(index) {
   state.historyIndex = index;
   rebuildManualMaskFromHistory();
   scheduleManualWorkspaceSave();
-  if (previousEditorState.reviewed !== historyEditorState().reviewed) void saveWorkspaceFlagNow(currentRecord(), "reviewed", currentRecord()?.reviewed === true);
+  const restoredEditorState = historyEditorState();
+  if (previousEditorState.reviewed !== restoredEditorState.reviewed) void saveWorkspaceFlagNow(currentRecord(), "reviewed", restoredEditorState.reviewed, undefined, true);
+  if (previousEditorState.hidden !== restoredEditorState.hidden) void saveWorkspaceFlagNow(currentRecord(), "hidden", restoredEditorState.hidden, undefined, true);
   void syncLocalTransformFromHistory(imageId, generation, previousHistoryIndex);
   void syncProjectlessCandidateHistory(imageId, previousEditorState, generation).catch((error) => showUserError(error));
-  setReviewed(currentRecord(), false);
   updateHistoryButtons(); renderCandidates(); render();
   requestAnimationFrame(() => {
     if (restoreToken !== state.historyRestoreToken || state.currentId !== imageId || !isCurrentGeneration(generation) || currentImageActionPending()) return;
-    updateCandidateStatus(); refreshCurrentReviewAndMask(); requestMosaicPreview();
+    updateCandidateStatus(); refreshMaskStatus(true); refreshReviewViews(); requestMosaicPreview();
   });
 }
 

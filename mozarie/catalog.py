@@ -2313,6 +2313,7 @@ class CatalogMixin:
                             max_expand_px = int(np.ceil(np.hypot(record.width - 1, record.height - 1)))
                             if isinstance(expand_px, bool) or not isinstance(expand_px, int) or expand_px < 0:
                                 raise ClientError("候補の枠pxは0以上の整数で指定してください。", "input_invalid")
+                            image_expand_px = min(expand_px, max_expand_px)
                         current = self.candidates.get(image_id, [])
                         if operation == "delete":
                             updates[image_id] = [replace(item) for item in current if item not in selected]
@@ -2321,7 +2322,7 @@ class CatalogMixin:
                             candidates = [replace(item) for item in current]
                             for candidate in candidates:
                                 if candidate.role.value == role:
-                                    if operation == "set_padding": candidate.expand_px = expand_px
+                                    if operation == "set_padding": candidate.expand_px = image_expand_px
                                     else: candidate.enabled = operation == "enable"
                             updates[image_id] = candidates
                         revisions[image_id] = self._candidate_revision(image_id) + 1

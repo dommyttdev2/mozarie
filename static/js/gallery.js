@@ -358,6 +358,7 @@ async function reviewAndMoveNext() {
     });
   }, { lockCandidateControls: true });
   if (!reviewed) return null;
+  if (!state.project?.id && state.currentId === currentId && typeof recordHistoryOperation === "function") recordHistoryOperation({ kind: "workspaceFlag" });
   if (state.currentId !== currentId) return target;
   if (target && state.images.some((image) => image.id === target.id)) {
     await selectImage(target.id);

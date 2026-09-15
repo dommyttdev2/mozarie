@@ -1194,9 +1194,10 @@ function bindEvents() {
     const image = state.images.find((item) => item.id === state.contextMenuImageId);
     if (image) {
       const scroll = state.contextMenuScroll;
-      await queueImageMutation(image.id, () => saveWorkspaceFlagNow(image, "reviewed", !isReviewed(image), () => {
+      const changed = await queueImageMutation(image.id, () => saveWorkspaceFlagNow(image, "reviewed", !isReviewed(image), () => {
         if (state.images.some((item) => item.id === image.id)) refreshReviewViews(scroll);
       }), { lockCandidateControls: true });
+      if (changed && !state.project?.id && image.id === state.currentId) recordHistoryOperation({ kind: "workspaceFlag" });
     }
   })();
     closeCatalogContextMenu();
