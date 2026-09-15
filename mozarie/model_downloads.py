@@ -14,6 +14,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from .core import LOGGER
+
 
 class ModelDownloadError(RuntimeError):
     pass
@@ -122,6 +124,7 @@ class ModelDownloadManager:
             }
             self._thread = threading.Thread(target=self._run, args=(keys,), daemon=True, name="mozarie-model-download")
             self._thread.start()
+            LOGGER.info("モデルダウンロードを開始: 対象=%d件", len(keys))
             return self.snapshot()
 
     def cancel(self) -> dict[str, Any]:
@@ -129,6 +132,7 @@ class ModelDownloadManager:
             if self._job.get("state") == "running":
                 self._cancel.set()
                 self._job["state"] = "cancelling"
+                LOGGER.info("モデルダウンロードのキャンセルを受け付け")
             return self.snapshot()
 
     def shutdown(self, timeout: float = 5) -> bool:
@@ -173,6 +177,13 @@ class ModelDownloadManager:
             with self._lock:
                 self._job.update(result)
                 self._thread = None
+            state = str(result.get("state", "failed"))
+            if state == "complete":
+                LOGGER.info("モデルダウンロードが完了: 完了=%d件", len(paths))
+            elif state == "cancelled":
+                LOGGER.info("モデルダウンロードをキャンセル: 完了=%d件", len(paths))
+            else:
+                LOGGER.error("モデルダウンロードに失敗: error_code=%s 完了=%d件", result.get("errorCode", "internal_error"), len(paths))
 
     def _download(self, entry: ModelDownload) -> Path:
         destination = entry.destination(self.app_dir)

@@ -48,6 +48,100 @@ def _is_api_path(path: str) -> bool:
     return path == "/api" or path.startswith("/api/")
 
 
+_POST_OPERATION_LABELS = {
+    "/api/import/finish": "ブラウザー画像の読み込み確定",
+    "/api/folder": "フォルダー読み込み",
+    "/api/projects": "プロジェクト作成",
+    "/api/project/name": "プロジェクト名変更",
+    "/api/project/complete": "プロジェクト完了",
+    "/api/project/close": "プロジェクトを閉じる",
+    "/api/project/open": "プロジェクトを開く",
+    "/api/project/resume": "プロジェクトを再開",
+    "/api/project/mismatches": "元画像の差分解決",
+    "/api/project/source-check": "元フォルダー確認",
+    "/api/project/source/relink": "元フォルダー再指定",
+    "/api/catalog/clear": "画像一覧クリア",
+    "/api/workspace/images": "画像状態の一括変更",
+    "/api/catalog/remove": "画像一覧から削除",
+    "/api/masks/clear": "モザイク指定クリア",
+    "/api/detect": "自動検出",
+    "/api/candidates/batch": "候補の一括変更",
+    "/api/settings": "設定保存",
+    "/api/settings/gpu-diagnostic": "GPU診断",
+    "/api/settings/reset": "設定初期化",
+    "/api/model-file/pick": "モデルファイル選択",
+    "/api/model-download/start": "モデルダウンロード開始",
+    "/api/model-download/cancel": "モデルダウンロード取消",
+    "/api/update/start": "更新開始",
+    "/api/boundary": "境界候補追加",
+    "/api/save/prepare": "ブラウザー保存準備",
+    "/api/apply": "ファイル保存",
+    "/api/job/pause": "バックグラウンド処理一時停止",
+    "/api/job/resume": "バックグラウンド処理再開",
+    "/api/job/cancel": "バックグラウンド処理取消",
+}
+
+_DELETE_OPERATION_LABELS = {
+    "/api/catalog/image/": "画像一覧から削除",
+    "/api/project/": "プロジェクト削除",
+}
+
+
+def _operation_log_spec(method: str, path: str) -> tuple[str, str] | None:
+    """Return a user-facing operation name and an ID-free route for CMD logs."""
+    if method == "POST":
+        label = _POST_OPERATION_LABELS.get(path)
+        if label is not None:
+            return label, path
+        if path.startswith("/api/project/history/"):
+            return "プロジェクト履歴", "/api/project/history"
+        if path.startswith("/api/workspace/image/"):
+            return "画像状態変更", "/api/workspace/image"
+        if path.startswith("/api/images/") and path.endswith("/transform"):
+            return "画像反転", "/api/images/transform"
+        return None
+    if method == "DELETE":
+        for prefix, label in _DELETE_OPERATION_LABELS.items():
+            if path.startswith(prefix):
+                return label, prefix.rstrip("/")
+    return None
+
+
+def _operation_log_details(path: str, payload: dict[str, Any]) -> str:
+    details: list[str] = []
+    image_ids = payload.get("imageIds")
+    if isinstance(image_ids, list):
+        details.append(f"対象={len(image_ids)}件")
+    if path in {"/api/folder", "/api/project/source-check", "/api/project/source/relink"}:
+        source_path = payload.get("path")
+        if isinstance(source_path, str) and source_path:
+            details.append(f"パス={source_path}")
+    return f" {' '.join(details)}" if details else ""
+
+
+def _log_operation_started(operation: tuple[str, str] | None, path: str, payload: dict[str, Any]) -> float | None:
+    if operation is None:
+        return None
+    label, route = operation
+    LOGGER.info("操作開始: %s [%s]%s", label, route, _operation_log_details(path, payload))
+    return time.monotonic()
+
+
+def _log_operation_finished(operation: tuple[str, str] | None, started_at: float | None) -> None:
+    if operation is None or started_at is None:
+        return
+    label, route = operation
+    LOGGER.info("操作完了: %s [%s] status=200 所要=%.2f秒", label, route, time.monotonic() - started_at)
+
+
+def _log_operation_failed(operation: tuple[str, str] | None, started_at: float | None, status: HTTPStatus, error: Exception) -> None:
+    if operation is None or started_at is None:
+        return
+    label, route = operation
+    error_code = error.error_code if isinstance(error, ClientError) else "internal_error"
+    LOGGER.warning("操作失敗: %s [%s] status=%d error_code=%s 所要=%.2f秒", label, route, int(status), error_code, time.monotonic() - started_at)
+
+
 def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]]) -> dict[str, object]:
     """Format health device data without probing a GPU for a CPU selection."""
     if provider != "gpu":
@@ -363,6 +457,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
             self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 
     def do_POST(self) -> None:  # noqa: N802
+        operation: tuple[str, str] | None = None
+        operation_started_at: float | None = None
         try:
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
@@ -457,6 +553,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
             self._require_json_request()
             payload = self._read_json_body()
             expected_project_id, expected_catalog_generation = self._catalog_expectation(payload)
+            operation = _operation_log_spec("POST", path)
+            operation_started_at = _log_operation_started(operation, path, payload)
             if path == "/api/import/finish":
                 self._json(STATE.finish_import_session(str(payload.get("sessionId", "")), expected_project_id,
                                                         expected_catalog_generation))
@@ -699,21 +797,29 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "candidateRevision": revision})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
+            _log_operation_finished(operation, operation_started_at)
         except ForbiddenClientError as exc:
+            _log_operation_failed(operation, operation_started_at, HTTPStatus.FORBIDDEN, exc)
             self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
-            self._client_error(exc, HTTPStatus.CONFLICT if exc.error_code == "stale_catalog" else HTTPStatus.BAD_REQUEST)
+            status = HTTPStatus.CONFLICT if exc.error_code == "stale_catalog" else HTTPStatus.BAD_REQUEST
+            _log_operation_failed(operation, operation_started_at, status, exc)
+            self._client_error(exc, status)
         except Exception as exc:
             # Recovery can fail while no state exists.  It is not a GPU error,
             # and must still return the normal structured server error.
             if STATE is not None and (gpu_oom := STATE.recover_gpu_oom_for_request(exc)) is not None:
                 LOGGER.error("POST リクエストでGPUメモリが不足: %s", self.path)
+                _log_operation_failed(operation, operation_started_at, HTTPStatus.BAD_REQUEST, gpu_oom)
                 self._client_error(gpu_oom, HTTPStatus.BAD_REQUEST)
                 return
+            _log_operation_failed(operation, operation_started_at, HTTPStatus.INTERNAL_SERVER_ERROR, exc)
             LOGGER.exception("POST リクエストの処理に失敗: %s", self.path)
             self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 
     def do_DELETE(self) -> None:  # noqa: N802
+        operation: tuple[str, str] | None = None
+        operation_started_at: float | None = None
         try:
             path = unquote(urlparse(self.path).path)
             content_length = self._request_body_length()
@@ -731,6 +837,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._require_json_request()
                 payload = self._read_json_body(content_length)
             expected_project_id, expected_catalog_generation = self._catalog_expectation(payload)
+            operation = _operation_log_spec("DELETE", path)
+            operation_started_at = _log_operation_started(operation, path, payload or {})
             if path.startswith("/api/catalog/image/"):
                 image_id = path.removeprefix("/api/catalog/image/")
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
@@ -755,15 +863,21 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
+            _log_operation_finished(operation, operation_started_at)
         except ForbiddenClientError as exc:
+            _log_operation_failed(operation, operation_started_at, HTTPStatus.FORBIDDEN, exc)
             self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
-            self._client_error(exc, HTTPStatus.CONFLICT if exc.error_code == "stale_catalog" else HTTPStatus.BAD_REQUEST)
+            status = HTTPStatus.CONFLICT if exc.error_code == "stale_catalog" else HTTPStatus.BAD_REQUEST
+            _log_operation_failed(operation, operation_started_at, status, exc)
+            self._client_error(exc, status)
         except Exception as exc:
             if STATE is not None and (gpu_oom := STATE.recover_gpu_oom_for_request(exc)) is not None:
                 LOGGER.error("DELETE リクエストでGPUメモリが不足: %s", self.path)
+                _log_operation_failed(operation, operation_started_at, HTTPStatus.BAD_REQUEST, gpu_oom)
                 self._client_error(gpu_oom, HTTPStatus.BAD_REQUEST)
                 return
+            _log_operation_failed(operation, operation_started_at, HTTPStatus.INTERNAL_SERVER_ERROR, exc)
             LOGGER.exception("DELETE リクエストの処理に失敗: %s", self.path)
             self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 

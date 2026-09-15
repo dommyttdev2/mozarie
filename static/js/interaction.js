@@ -553,7 +553,10 @@ async function importSingleFile(entry, clientKey, catalogId = null, sourceId = n
 }
 
 function beginImportSession({ allowDuringCatalogTransition = false } = {}) {
-  if (isBusy() || state.importing || (state.catalogTransition && !allowDuringCatalogTransition)) return null;
+  if (isBusy() || state.importing || (state.catalogTransition && !allowDuringCatalogTransition)) {
+    setStatusKey("status.importUnavailable");
+    return null;
+  }
   const session = { id: newClientKey(), epoch: state.catalogTransition?.epoch || beginCatalogEpoch(), expectedProjectId: state.project?.id || "", expectedCatalogGeneration: state.serverCatalogGeneration, paused: false, cancelled: false, completed: 0, total: 0, catalogId: null, sourceId: null, sourceKind: "browser-files", importIntent: "add" };
   state.importing = true; state.importSession = session;
   updateActionButtons();
@@ -706,8 +709,11 @@ async function pickImageFiles() {
 async function pickImageDirectory() {
   $("#pickerMenu").hidePopover();
   const session = beginImportSession(); if (!session) return;
-  try { await importDirectoryHandle(await window.showDirectoryPicker({ mode: "readwrite", id: "mozarie-source" }), session); }
-  catch (error) { if (error?.name !== "AbortError") showUserError(error); finishImportSession(session); }
+  try { await importDirectoryHandle(await window.showDirectoryPicker({ mode: "read", id: "mozarie-source" }), session); }
+  catch (error) {
+    if (error?.name === "AbortError") setStatusKey("status.folderPickerCancelled");
+    else { setStatusKey("status.folderPickerFailed"); showUserError(error); }
+  } finally { finishImportSession(session); }
 }
 
 async function importDroppedFiles(event) {

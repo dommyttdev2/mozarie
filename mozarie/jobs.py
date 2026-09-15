@@ -140,6 +140,8 @@ class JobsMixin:
                 if self.job.state == "paused":
                     self.job.current = ""
                     self._pause_job_clock()
+                kind, completed, total, state = self.job.kind, self.job.completed, self.job.total, self.job.state
+        LOGGER.info("バックグラウンド処理を一時停止: %s 完了=%d/%d 状態=%s", JOB_LABELS.get(kind, kind), completed, total, state)
         return self.job
 
     def resume_job(self) -> Job:
@@ -151,7 +153,9 @@ class JobsMixin:
             self.job_control.pause_requested.clear()
             self._resume_job_clock()
             self.job.state = "running"
-            return self.job
+            job = self.job
+        LOGGER.info("バックグラウンド処理を再開: %s 完了=%d/%d", JOB_LABELS.get(job.kind, job.kind), job.completed, job.total)
+        return job
 
 
     def request_cancel(self) -> Job:
@@ -172,6 +176,7 @@ class JobsMixin:
                 control.pause_requested.clear()
                 self.job.cancel_requested = True
                 job = self.job
+        LOGGER.info("バックグラウンド処理のキャンセルを受け付け: %s 完了=%d/%d", JOB_LABELS.get(job.kind, job.kind), job.completed, job.total)
         return job
 
     def _records_for_ids(self, image_ids: list[str]) -> list[ImageRecord]:
@@ -268,7 +273,7 @@ class JobsMixin:
             )
             self._job_output_slots: dict[int, str] = {}
             self.job_control = control
-        LOGGER.debug("バックグラウンド処理を開始: %s (%d件)", JOB_LABELS.get(kind, kind), len(records))
+        LOGGER.info("バックグラウンド処理を開始: %s 対象=%d件", JOB_LABELS.get(kind, kind), len(records))
         def run_worker() -> None:
             try:
                 worker(
@@ -307,6 +312,10 @@ class JobsMixin:
                 self.job.ended_at = time.time()
                 self.job.current = ""
                 self.job.active_count = 0
+                kind, completed, total = self.job.kind, self.job.completed, self.job.total
+            else:
+                return
+        LOGGER.info("バックグラウンド処理をキャンセル: %s 完了=%d/%d", JOB_LABELS.get(kind, kind), completed, total)
     def combined_candidate_mask(
         self,
         image_id: str,
@@ -511,7 +520,8 @@ class JobsMixin:
             self.job.active_count = 0
             kind = self.job.kind
             total = self.job.total
-        LOGGER.debug("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
+            started_at = self.job.started_at
+        LOGGER.info("バックグラウンド処理が完了: %s 完了=%d件 所要=%.2f秒", JOB_LABELS.get(kind, kind), total, max(0.0, time.time() - started_at))
 
     def _fail_job(self, exc: Exception, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
         unexpected: Exception | None = None
@@ -548,7 +558,8 @@ class JobsMixin:
             self.job.params = dict(exc.params)
             self.job.current = ""
             self.job.active_count = 0
+            error_code = self.job.error_code
         if unexpected is not None:
-            LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc, exc_info=unexpected)
+            LOGGER.error("バックグラウンド処理に失敗: %s error_code=%s: %s", JOB_LABELS.get(kind, kind), error_code, exc, exc_info=unexpected)
         else:
-            LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc)
+            LOGGER.error("バックグラウンド処理に失敗: %s error_code=%s: %s", JOB_LABELS.get(kind, kind), error_code, exc)

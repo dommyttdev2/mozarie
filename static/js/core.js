@@ -961,7 +961,10 @@ function updateProgress(job) {
 }
 
 async function loadFolder({ skipSameSourceWarning = false, path: suppliedPath = null, allowDuringCatalogTransition = false } = {}) {
-  if (isBusy() || state.importing || (state.catalogTransition && !allowDuringCatalogTransition)) return;
+  if (isBusy() || state.importing || (state.catalogTransition && !allowDuringCatalogTransition)) {
+    setStatusKey("status.importUnavailable");
+    return;
+  }
   const path = suppliedPath || $("#folderPath").value.trim();
   if (!path) return setStatusKey("status.enterFolder");
   if (!skipSameSourceWarning && typeof openSameSourceDialog === "function" && await openSameSourceDialog(path)) return;

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageOps, PngImagePlugin, UnidentifiedImageError
 
 from .core import (
     APP_DIR, IO_CHUNK_BYTES, LOGGER, MAX_BODY_BYTES, PNG_SIGNATURE,
@@ -21,6 +21,17 @@ from .core import (
     safe_import_relative_path, torch_module, _read_save_suffix,
 )
 from .runtime import directml_devices, runtime_backend
+
+
+# Some image generators embed their prompt in a compressed PNG text chunk that
+# exceeds Pillow's 1 MiB per-chunk default.  Set the process-wide limit once at
+# import time so parallel scans cannot observe a temporary relaxed limit.  The
+# cumulative Pillow text limit remains 64 MiB and decompression-bomb checks
+# below stay enabled.
+PNG_MAX_TEXT_CHUNK_BYTES = 8 * 1024 * 1024
+PNG_MAX_TEXT_MEMORY_BYTES = 64 * 1024 * 1024
+PngImagePlugin.MAX_TEXT_CHUNK = PNG_MAX_TEXT_CHUNK_BYTES
+PngImagePlugin.MAX_TEXT_MEMORY = PNG_MAX_TEXT_MEMORY_BYTES
 
 
 def _valid_color(value: str) -> bool:
@@ -197,7 +208,8 @@ def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
                 if source.read() != b"\xff\xd9":
                     raise OSError("truncated JPEG")
         return size
-    except (OSError, RuntimeError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+    except (OSError, RuntimeError, ValueError, SyntaxError, UnidentifiedImageError,
+            Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise ClientError("追加画像を読み込めません。", "image_read_failed") from exc
 
 

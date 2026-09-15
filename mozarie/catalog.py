@@ -335,10 +335,23 @@ class CatalogMixin:
             stored_metadata = self.workspace_store.source_image_metadata(source_id)
 
         paths = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES]
+        scan_started_at = time.monotonic()
+        LOGGER.info("フォルダー走査を開始: パス=%s 候補=%d件", root, len(paths))
         records: list[ImageRecord] = []
         records_lock = threading.Lock()
+        skip_counts: dict[str, int] = {}
+        skip_examples: dict[str, str] = {}
         next_path = 0
         paths_lock = threading.Lock()
+
+        def record_skip(reason: str, path: Path) -> None:
+            try:
+                relative_path = path.resolve().relative_to(root).as_posix()
+            except (OSError, ValueError):
+                relative_path = path.name
+            with records_lock:
+                skip_counts[reason] = skip_counts.get(reason, 0) + 1
+                skip_examples.setdefault(reason, relative_path)
 
         def inspect_path() -> None:
             nonlocal next_path
@@ -359,6 +372,7 @@ class CatalogMixin:
                         width, height = inspect_import_image(resolved, resolved.suffix)
                     after = resolved.stat()
                     if (before.st_mtime_ns, before.st_size) != (after.st_mtime_ns, after.st_size):
+                        record_skip("scan_changed", path)
                         continue
                     record = ImageRecord(
                         image_id=uuid.uuid4().hex,
@@ -369,7 +383,9 @@ class CatalogMixin:
                         mtime_ns=after.st_mtime_ns,
                         size_bytes=after.st_size,
                     )
-                except (OSError, UnidentifiedImageError, ValueError, ClientError):
+                except (OSError, UnidentifiedImageError, ValueError, ClientError) as exc:
+                    reason = exc.error_code if isinstance(exc, ClientError) else type(exc).__name__
+                    record_skip(reason, path)
                     continue
                 with records_lock:
                     records.append(record)
@@ -383,6 +399,14 @@ class CatalogMixin:
                 workers = [executor.submit(inspect_path) for _ in range(worker_count)]
                 for worker in workers:
                     worker.result()
+        skip_summary = ", ".join(
+            f"{reason}={count}件（例: {skip_examples[reason]}）"
+            for reason, count in sorted(skip_counts.items())
+        ) or "なし"
+        LOGGER.info(
+            "フォルダー走査を完了: パス=%s 候補=%d件 読込=%d件 スキップ=%s 所要=%.2f秒",
+            root, len(paths), len(records), skip_summary, time.monotonic() - scan_started_at,
+        )
         records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
         prehydrated: dict[str, tuple[int, list[Candidate]]] | None = None
         try:
