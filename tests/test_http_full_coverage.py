@@ -53,10 +53,12 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
 
         restored = Mock(); success = handler(); success.path = "/api/workspace/recreate"; success._require_recovery_request = lambda: None; success._read_json_body = lambda: {}
         success._json = Mock()
-        with patch.object(http_module, "STATE", None), patch.object(http_module.state_module, "recreate_workspace", return_value=restored):
+        with patch.object(http_module, "STATE", None), patch.object(http_module.state_module, "recreate_workspace", return_value=restored), \
+                self.assertLogs("mozarie.core", "INFO") as logs:
             success.do_POST()
             self.assertIs(http_module.STATE, restored)
         success._json.assert_called_once_with({"ok": True})
+        self.assertIn("操作完了: 作業データ再作成 [/api/workspace/recreate] status=200", "\n".join(logs.output))
 
         failed = handler(); failed.path = "/api/workspace/recreate"; failed._require_recovery_request = lambda: None; failed._read_json_body = lambda: {}
         errors: list[tuple[object, object]] = []; failed._client_error = lambda error, status, *_args: errors.append((error, status))

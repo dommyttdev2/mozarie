@@ -330,24 +330,25 @@ function settingsPayload() {
   };
 }
 
-function isAbsoluteSettingsPath(value) {
+function isWindowsAbsoluteSettingsPath(value, allowEmpty = false) {
   const path = String(value || "").trim();
-  return !path || /^(?:[a-zA-Z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+|\/)/.test(path);
+  if (!path) return allowEmpty;
+  return /^(?:[a-zA-Z]:[\\/]|(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+)/.test(path);
 }
 
 function validateAbsoluteSettingsPaths() {
   const fields = [
-    ["settingsDefaultOutputDirectory", "settings.defaultOutputDirectory", "general"],
-    ["settingsTargetModel", "settings.targetModel", "models"],
-    ["settingsNtd11Model", "settings.ntd11Model", "models"],
-    ["settingsSensitiveModel", "settings.sensitiveModel", "models"],
-    ["settingsSamModel", "settings.samModel", "models"],
-    ["settingsHandModel", "settings.handModel", "models"],
-    ["settingsHandSegmentationModel", "settings.handSegmentationModel", "models"],
+    ["settingsDefaultOutputDirectory", "settings.defaultOutputDirectory", "general", false],
+    ["settingsTargetModel", "settings.targetModel", "models", true],
+    ["settingsNtd11Model", "settings.ntd11Model", "models", true],
+    ["settingsSensitiveModel", "settings.sensitiveModel", "models", true],
+    ["settingsSamModel", "settings.samModel", "models", true],
+    ["settingsHandModel", "settings.handModel", "models", true],
+    ["settingsHandSegmentationModel", "settings.handSegmentationModel", "models", true],
   ];
   document.querySelectorAll("#settingsForm input[aria-invalid='true']").forEach((input) => input.setAttribute("aria-invalid", "false"));
-  const invalid = fields.find(([id]) => !isAbsoluteSettingsPath($(`#${id}`).value))
-    || (!Object.values(samCheckpointPaths).every(isAbsoluteSettingsPath) ? ["settingsSamModel", "settings.samModel", "models"] : null);
+  const invalid = fields.find(([id, _label, _tab, allowEmpty]) => !isWindowsAbsoluteSettingsPath($(`#${id}`).value, allowEmpty))
+    || (!Object.values(samCheckpointPaths).every((path) => isWindowsAbsoluteSettingsPath(path, true)) ? ["settingsSamModel", "settings.samModel", "models"] : null);
   if (!invalid) return true;
   const [id, label, tab] = invalid;
   selectSettingsTab(tab);

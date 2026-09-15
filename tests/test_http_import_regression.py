@@ -163,3 +163,23 @@ class FolderLoadLoggingContractTests(unittest.TestCase):
             warning = "\n".join(warning_logs.output)
             self.assertIn("status=400 error_code=input_invalid", warning)
             self.assertNotIn(secret, warning)
+
+    def test_dynamic_mutation_routes_log_normalized_success_and_failure_without_ids(self) -> None:
+        secret = "candidate-and-workspace-secret"
+        routes = [
+            ("POST", f"/api/candidate/{secret}/{secret}", "候補変更", "/api/candidate"),
+            ("DELETE", f"/api/candidate/{secret}/{secret}", "候補削除", "/api/candidate"),
+            ("DELETE", f"/api/workspace/manual/{secret}", "手描き範囲削除", "/api/workspace/manual"),
+            ("POST", "/api/workspace/recreate", "作業データ再作成", "/api/workspace/recreate"),
+        ]
+        for method, path, label, route in routes:
+            operation = http_module._operation_log_spec(method, path)
+            self.assertEqual(operation, (label, route))
+            with self.assertLogs("mozarie.core", "INFO") as completed_logs:
+                started = http_module._log_operation_started(operation, path, {"token": secret, "body": secret})
+                http_module._log_operation_finished(operation, started)
+            with self.assertLogs("mozarie.core", "WARNING") as failed_logs:
+                http_module._log_operation_failed(operation, started, HTTPStatus.BAD_REQUEST, ClientError(secret, "input_invalid"))
+            for log in ("\n".join(completed_logs.output), "\n".join(failed_logs.output)):
+                self.assertIn(f"[{route}]", log)
+                self.assertNotIn(secret, log)

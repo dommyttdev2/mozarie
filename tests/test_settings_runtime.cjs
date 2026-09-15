@@ -76,7 +76,7 @@ const context = {
   confirmAction: async () => true,
 };
 vm.runInNewContext(source, context, { filename: settingsPath });
-vm.runInNewContext("globalThis.settingsTest={renderModelStatus,renderSamVariantStatuses,selectedSamType,selectSamVariant,selectSettingsTab,moveSettingsTab,setToolRailTabStop,renderSettingsStatus,setSettingsForm,openSettings,saveSettings,resetSettings,chooseSettingsOutputDirectory,chooseSettingsModelFile,handleToolRailKeydown,modelDownloadInput,renderModelDownload,refreshModelDownload,showUnsupportedModelDownload,modelDownloadConfirmation,startModelDownload,beginModelDownload,cancelModelDownload,refreshSettingsStatus,checkForUpdate,startUpdate,samTypeFromPath,shortcutFromEvent,gpuMemoryLabel,modelCardEnabled,setHandSegmentationAvailable,setPrecisionDetectionEnabled,setFluidExclusionEnabled,setFillColorTolerance,saveFillColorTolerance,validateAbsoluteSettingsPaths};", context, { filename: "test-settings-exports.js" });
+vm.runInNewContext("globalThis.settingsTest={renderModelStatus,renderSamVariantStatuses,selectedSamType,selectSamVariant,selectSettingsTab,moveSettingsTab,setToolRailTabStop,renderSettingsStatus,setSettingsForm,openSettings,saveSettings,resetSettings,chooseSettingsOutputDirectory,chooseSettingsModelFile,handleToolRailKeydown,modelDownloadInput,renderModelDownload,refreshModelDownload,refreshSettingsStatus,showUnsupportedModelDownload,modelDownloadConfirmation,startModelDownload,beginModelDownload,cancelModelDownload,checkForUpdate,startUpdate,samTypeFromPath,shortcutFromEvent,gpuMemoryLabel,modelCardEnabled,setHandSegmentationAvailable,setPrecisionDetectionEnabled,setFluidExclusionEnabled,setFillColorTolerance,saveFillColorTolerance,isWindowsAbsoluteSettingsPath,validateAbsoluteSettingsPaths};", context, { filename: "test-settings-exports.js" });
 
 (async () => {
   assert.equal(context.settingsTest.shortcutFromEvent({ ctrlKey: true, metaKey: false, shiftKey: true, altKey: true, key: "a" }), "Ctrl+Shift+Alt+A", "shortcut capture normalizes modifiers and single letters");
@@ -84,6 +84,10 @@ vm.runInNewContext("globalThis.settingsTest={renderModelStatus,renderSamVariantS
   assert.equal(context.settingsTest.gpuMemoryLabel(0), "", "missing GPU memory is not rendered as a capacity");
   assert.equal(context.settingsTest.gpuMemoryLabel(8 * 1024 ** 3), "8", "whole GPU GiB values avoid unnecessary decimals");
   assert.equal(context.settingsTest.gpuMemoryLabel(7.5 * 1024 ** 3), "7.5", "fractional GPU GiB values retain one useful decimal");
+  for (const [value, allowEmpty, expected] of [
+    ["", false, false], ["", true, true], ["G:\\\\output", false, true], ["Z:/models/model.onnx", false, true],
+    ["\\\\server\\share\\model.onnx", false, true], ["//server/share/model.onnx", false, true], ["/not-a-windows-path", false, false], ["relative\\model.onnx", false, false],
+  ]) assert.equal(context.settingsTest.isWindowsAbsoluteSettingsPath(value, allowEmpty), expected, `Windows absolute path validation handles ${JSON.stringify(value)}`);
   element("#settingsHandToggle").checked = true; element("#settingsHandSegmentationToggle").checked = true;
   assert.equal(context.settingsTest.modelCardEnabled("hand_segmentation"), true, "hand segmentation requires both public model switches");
   element("#settingsHandToggle").checked = false;
@@ -134,6 +138,7 @@ vm.runInNewContext("globalThis.settingsTest={renderModelStatus,renderSamVariantS
 
   state.settings = { general: {}, models: { gpu_device: 0 }, display: {} };
   context.validateDetectionTargets = () => true;
+  element("#settingsDefaultOutputDirectory").value = "G:\\output";
   element("#settingsSamModel").value = "";
   shortcutBindings.push(
     { dataset: { shortcutAction: "previous" }, value: "Ctrl+P" },
@@ -159,6 +164,12 @@ vm.runInNewContext("globalThis.settingsTest={renderModelStatus,renderSamVariantS
   await context.settingsTest.saveSettings({ preventDefault() {} });
   assert.equal(element("#settingsDefaultOutputDirectory").getAttribute("aria-invalid"), "true", "the relative output folder field is marked invalid");
   assert.equal(tabs[0].classList.contains("active"), true, "an output path error opens the General settings tab");
+  element("#settingsDefaultOutputDirectory").value = "/not-a-windows-path";
+  await context.settingsTest.saveSettings({ preventDefault() {} });
+  assert.equal(element("#settingsDefaultOutputDirectory").getAttribute("aria-invalid"), "true", "a POSIX-looking path is not accepted as a Windows output directory");
+  element("#settingsDefaultOutputDirectory").value = "";
+  await context.settingsTest.saveSettings({ preventDefault() {} });
+  assert.equal(element("#settingsDefaultOutputDirectory").getAttribute("aria-invalid"), "true", "an empty output directory is rejected before settings are posted");
 
   element("#settingsDefaultOutputDirectory").value = "";
   context.pickOutputDirectory = async () => { state.outputDirectoryHandle = { name: "output" }; return state.outputDirectoryHandle; };
@@ -313,6 +324,7 @@ vm.runInNewContext("globalThis.settingsTest={renderModelStatus,renderSamVariantS
   context.loadTranslations = async () => { translations += 1; };
   state.settings = { general: { language: "ja" }, models: { gpu_device: 0 }, display: {} };
   context.validateDetectionTargets = () => true;
+  element("#settingsDefaultOutputDirectory").value = "G:\\output";
   context.api = async (url) => {
     if (url === "/api/settings?status=0") return { settings: { general: { language: "en", shortcuts_enabled: true }, display: { mosaic_preview: false } }, version: "v2" };
     throw new Error(`unexpected ${url}`);

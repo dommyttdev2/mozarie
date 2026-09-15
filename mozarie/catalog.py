@@ -129,6 +129,7 @@ class CatalogMixin:
                 draft["hasEffectiveMask"] = self._effective_mask_for_draft(image_id, candidates, draft)
         self.candidates[image_id] = candidates
         self.candidate_revisions[image_id] = revision
+        self.images[image_id].reviewed = False
         return revision
 
     def _commit_candidate_snapshot_outside_state_lock(
@@ -2917,6 +2918,7 @@ class CatalogMixin:
                             draft["hasEffectiveMask"] = projectless_effective[image_id]
                         self.candidates[image_id] = updates[image_id]
                         self.candidate_revisions[image_id] = revisions[image_id]
+                        self.images[image_id].reviewed = False
                     result = revisions
                 self._delete_mask_files(delete_paths, [])
                 return result

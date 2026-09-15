@@ -14,6 +14,7 @@
 | --- | --- | --- | --- |
 | SD-141 | 新規設定の相対モデル・保存先を拒否し、該当タブと入力欄を案内する | `tests.test_absolute_path_regression.AbsolutePathRegressionTests.test_relative_model_and_output_paths_are_rejected_for_new_settings`、`tests/test_settings_runtime.cjs` | 実在するモデル選択時の表示 |
 | SD-142 | 旧設定の相対モデル・保存先を一度だけ絶対化して保存する | `tests.test_absolute_path_regression.AbsolutePathRegressionTests.test_legacy_relative_paths_are_migrated_to_absolute_paths_once` | 実際の起動、既存local.json、利用者の作業フォルダーでの表示 |
+| SD-144 | 保存先選択後も未保存の一般設定入力を保持し、Windows絶対パスだけを保存先として受け付ける | `tests/test_import_picker_e2e.cjs`、`tests/test_settings_runtime.cjs` | OSの保存先ダイアログ、実UNCパス、選択取消時の表示 |
 | SV-073 | 保存応答が一つの版とtokenを返す | `tests.test_http_live_endpoints.LiveHttpEndpointTests.test_live_browser_save_render_streams_a_stable_image_response` | 遅延応答中の別タブ更新・削除、実ブラウザーのダウンロードと一時ファイル解放 |
 | SV-076 | 未作成の展開先で更新ZIPを展開できる | `tests.test_updater_extract_regression.UpdaterExtractRegressionTests.test_extract_archive_allows_a_missing_destination_directory` | 実リリースZIP、実ドライブの空き容量不足と更新前バックアップ |
 | SV-077 | source snapshot失敗時にコピーを残し削除・確定を開始しない | `tests/test_save_source_snapshot_contract.cjs` | File System Access APIでの実ファイル、画面の`source_restore_failed`案内 |
@@ -31,6 +32,8 @@
 | WS-117 | 高位操作は正規化ルート、status/error_code、所要だけを記録し、ID・本文・token・headerを記録しない | `tests.test_http_import_regression.FolderLoadLoggingContractTests.test_handler_logs_normalized_routes_without_request_secrets` | 全高位操作をCMDで実行した際の表示 |
 | WS-118 | pause/resume/cancelを含む処理状態は操作面と対象数を保ち、画像単位の正常処理はINFOへ出さない | `tests/test_import_picker_e2e.cjs`、`tests.test_http_import_regression.FolderLoadLoggingContractTests.test_per_image_success_logs_are_suppressed_but_failures_are_safe_warnings` | 実モデルの開始・停止、CMDの進捗表示 |
 | WS-135 | ブラウザー追加は設定値と対象数だけで実効worker数を決め、全入力を完了する | `tests/test_import_picker_e2e.cjs` | 実ブラウザーのNetwork表示と実ファイルの読込 |
+| WS-119 | 動的候補・手描き削除・作業データ再作成も、ID・本文・tokenを出さない固定ルートで成功・失敗を記録する | `tests.test_http_import_regression.FolderLoadLoggingContractTests.test_dynamic_mutation_routes_log_normalized_success_and_failure_without_ids` | 実CMDで各操作を実行した際の表示 |
+| DI-255 | 候補の単体・一括変更を確定した直後の一覧は未確認を返し、永続化失敗では公開状態を変えない | `tests.test_project_catalog_coverage.ProjectCatalogCoverageTests.test_candidate_history_batch_and_failure_guards`、`tests.test_project_catalog_coverage.ProjectCatalogCoverageTests.test_projectless_candidate_change_publishes_unreviewed_only_after_persistence` | PJ・無名作業での実画面、API遅延・SQLite I/O失敗時の案内 |
 | ED-129 | 画像外で始めた各編集操作を拒否し、画像内開始後の通常ブラシ移動を端へ丸める | `tests/test_app_core_detection_coverage.cjs` | 実ブラウザーの余白、拡大率、比較表示での全編集操作 |
 | ED-130 | 無名作業の履歴復元を直列に保存し、部分成功を含む失敗後は強制再選択で再同期する | `tests/test_editor_masks_behavior.cjs` | 実ブラウザーと実サーバー通信での表示・再同期順 |
 

@@ -84,6 +84,7 @@ _POST_OPERATION_LABELS = {
     "/api/masks/clear": "モザイク指定クリア",
     "/api/detect": "自動検出",
     "/api/candidates/batch": "候補の一括変更",
+    "/api/workspace/recreate": "作業データ再作成",
     "/api/settings": "設定保存",
     "/api/settings/gpu-diagnostic": "GPU診断",
     "/api/settings/reset": "設定初期化",
@@ -141,11 +142,17 @@ def _operation_log_spec(method: str, path: str) -> tuple[str, str] | None:
             return "画像状態変更", "/api/workspace/image"
         if path.startswith("/api/images/") and path.endswith("/transform"):
             return "画像反転", "/api/images/transform"
+        if path.startswith("/api/candidate/"):
+            return "候補変更", "/api/candidate"
         return None
     if method == "DELETE":
         for prefix, label in _DELETE_OPERATION_LABELS.items():
             if path.startswith(prefix):
                 return label, prefix.rstrip("/")
+        if path.startswith("/api/candidate/"):
+            return "候補削除", "/api/candidate"
+        if path.startswith("/api/workspace/manual/"):
+            return "手描き範囲削除", "/api/workspace/manual"
     return None
 
 
@@ -588,6 +595,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     restored = state_module.recreate_workspace()
                     globals()["STATE"] = restored
                     self._json({"ok": True})
+                    _log_operation_finished(operation, operation_started_at)
                     return
                 self._require_local_host()
                 self.close_connection = True

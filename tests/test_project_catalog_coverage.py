@@ -207,7 +207,11 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         for index, image_id in enumerate(image_ids):
             self.commit_candidates(state, image_id, [self.candidate(state, image_id, f"apply-{index}")])
 
+        state.set_image_flags(image_ids[0], {"reviewed": True})
         self.assertEqual(state.set_candidate_state(image_ids[0], "apply-0", {"expandPx": 3, "color": "#112233", "enabled": False}), 2)
+        self.assertFalse(state.images[image_ids[0]].reviewed)
+        self.assertFalse(next(image for image in state.list_images() if image["id"] == image_ids[0])["reviewed"])
+        self.assertEqual(state.workspace_store.image_state(image_ids[0])[1], False)
         self.assertTrue(state.project_history_status(image_ids[0])["canUndo"])
         undone = state.restore_project_history(image_ids[0], "undo")
         self.assertTrue(undone["current"]["candidates"][0]["enabled"])
@@ -223,8 +227,10 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         with self.assertRaises(ClientError): state.set_candidate_state(image_ids[0], "apply-0", {"forced": True})
         with self.assertRaises(ClientError): state.set_candidate_state(image_ids[0], "apply-0", {"expandPx": True})
 
+        state.set_image_flags_bulk({"imageIds": image_ids, "reviewed": True})
         revisions = state.batch_update_candidates_many(image_ids + [image_ids[0]], {"role": "apply", "operation": "enable"})
         self.assertEqual(set(revisions), set(image_ids))
+        self.assertTrue(all(not image["reviewed"] for image in state.list_images() if image["id"] in image_ids))
         self.assertEqual(set(state.restore_project_history(image_ids[1], "undo")["changedImageIds"]), set(image_ids))
         self.assertGreater(state.batch_update_candidates(image_ids[0], {"role": "apply", "operation": "delete"}), 0)
         self.assertFalse((state.cache_dir / image_ids[0] / "apply-0.png").exists())
@@ -233,9 +239,11 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         with self.assertRaises(ClientError): state.batch_update_candidates(image_ids[0], {"role": "bad", "operation": "enable"})
 
         # A durable batch write failure leaves the live candidate snapshot unchanged.
+        state.set_image_flags(image_ids[1], {"reviewed": True})
         with patch.object(state.workspace_store, "commit_candidate_states", side_effect=RuntimeError("second failed")):
             with self.assertRaisesRegex(RuntimeError, "second failed"):
                 state.batch_update_candidates_many([image_ids[1]], {"role": "apply", "operation": "enable"})
+        self.assertTrue(state.images[image_ids[1]].reviewed)
 
         # The clear transaction must mark a batch history group failed if SQLite rejects it.
         with patch.object(state.workspace_store, "clear_image_workspaces", side_effect=RuntimeError("write failed")):
@@ -259,6 +267,20 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         self.commit_candidates(state, image_ids[0], state.candidates[image_ids[0]])
         self.commit_candidates(state, image_ids[1], state.candidates[image_ids[1]])
         state.set_candidate_state(image_ids[0], "role", {"role": "exclude", "forced": True})
+
+    def test_projectless_candidate_change_publishes_unreviewed_only_after_persistence(self) -> None:
+        root = self.root / "images"; self.image(root, "one.png")
+        state = self.state(); image_id = state.set_root(str(root))[0]["id"]
+        self.commit_candidates(state, image_id, [self.candidate(state, image_id, "apply")])
+        state.set_image_flags(image_id, {"reviewed": True})
+        with patch.object(state.workspace_store, "commit_candidate_state", side_effect=sqlite3.OperationalError("write failed")):
+            with self.assertRaises(sqlite3.OperationalError):
+                state.set_candidate_state(image_id, "apply", {"enabled": False})
+        self.assertTrue(state.images[image_id].reviewed)
+        self.assertTrue(next(image for image in state.list_images() if image["id"] == image_id)["reviewed"])
+        state.set_candidate_state(image_id, "apply", {"enabled": False})
+        self.assertFalse(state.images[image_id].reviewed)
+        self.assertFalse(next(image for image in state.list_images() if image["id"] == image_id)["reviewed"])
 
     def test_catalog_input_validation_provisional_and_removed_sources(self) -> None:
         state = self.state()

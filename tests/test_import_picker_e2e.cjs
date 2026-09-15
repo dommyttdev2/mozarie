@@ -2467,6 +2467,13 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
   for (const [id, value] of [["settingsLanguage", "en"], ["settingsPort", "8767"], ["settingsDefaultOutputDirectory", "G:\\output"], ["settingsImportParallelism", "2"], ["settingsSaveParallelism", "1"], ["settingsOpenBrowser", true]]) await input(id, value);
   await click("settingsChooseOutputDirectory");
   await page.waitForFunction(() => !state.outputDirectoryPicking);
+  assert.deepEqual(await page.evaluate(() => ({
+    language: document.querySelector("#settingsLanguage").value,
+    port: document.querySelector("#settingsPort").value,
+    importParallelism: document.querySelector("#settingsImportParallelism").value,
+    saveParallelism: document.querySelector("#settingsSaveParallelism").value,
+    openBrowser: document.querySelector("#settingsOpenBrowser").checked,
+  })), { language: "en", port: "8767", importParallelism: "2", saveParallelism: "1", openBrowser: true }, "selecting a server output directory preserves unsaved settings form edits");
   if (await page.locator("#errorDialog").evaluate((dialog) => dialog.open)) await page.locator("#errorDialogClose").click();
   await click("settingsTabModels");
   await input("settingsTargetModel", "gpu-options.onnx"); await input("settingsProvider", "gpu");

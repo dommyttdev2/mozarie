@@ -484,7 +484,8 @@ async function pickOutputDirectory() {
     }).then((data) => {
         if (data.cancelled) return null;
         state.settings = data.settings;
-        if (typeof setSettingsForm === "function") setSettingsForm(data.settings, state.settingsStatus);
+        // The picker persists only the output directory.  Re-rendering the
+        // whole settings form here would discard edits the user has not saved.
         renderOutputDirectory();
         return data.path;
       })
