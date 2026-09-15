@@ -440,7 +440,8 @@ async function importFiles(files) {
     await flushAllWorkspaceMutations();
     session.total = supportedFiles.length; session.completed = 0; session.paused = false; session.cancelled = false;
     showProcessing({ kind: "import", state: "running", total: session.total, completed: 0, current: "" });
-    const workerCount = Math.min(supportedFiles.length, importParallelism());
+    session.requestedParallelism = importParallelism();
+    const workerCount = Math.min(supportedFiles.length, session.requestedParallelism);
     session.parallelism = workerCount;
     let nextIndex = 0;
     const worker = async () => {
@@ -538,7 +539,7 @@ async function importSingleFile(entry, clientKey, catalogId = null, sourceId = n
       ...(sourceKind ? { "X-Mozarie-Source-Kind": sourceKind } : {}),
       "X-Mozarie-Import-Intent": importIntent,
       "X-Mozarie-Import-Session": session?.id || "",
-      "X-Mozarie-Import-Parallelism": String(session?.parallelism || 1),
+      "X-Mozarie-Import-Parallelism": String(session?.requestedParallelism || 1),
       "X-Mozarie-Import-Target-Count": String(session?.total || 1),
       ...(catalogId ? { "X-Mozarie-Catalog-Id": encodeURIComponent(catalogId) } : {}),
       "X-Mozarie-Expected-Project-Id": encodeURIComponent(session?.expectedProjectId ?? state.project?.id ?? ""),
