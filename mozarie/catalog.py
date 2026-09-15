@@ -1217,10 +1217,15 @@ class CatalogMixin:
     def _commit_prepared_source_delete(self, delete_token: str, requested_ids: list[str], browser_deleted: set[str],
                                         records: dict[str, ImageRecord | None], started_at: float) -> dict[str, Any]:
         removable: list[ImageRecord] = []
+        durable_only_ids: list[str] = []
         failures: list[dict[str, str]] = []
+        operation = self.workspace_store.source_delete_operation(delete_token) or {}
+        source_kinds = {str(item["imageId"]): str(item.get("sourceKind", "")) for item in operation.get("items", [])}
         for image_id in requested_ids:
             record = records.get(image_id)
             if record is None:
+                if source_kinds.get(image_id) == "session" and image_id in browser_deleted:
+                    durable_only_ids.append(image_id); continue
                 failures.append({"imageId": image_id, "reason": "image_not_found"}); continue
             if record.source_kind == "filesystem":
                 try: stat = record.path.stat()
@@ -1239,11 +1244,12 @@ class CatalogMixin:
             except OSError:
                 failures.append({"imageId": record.image_id, "reason": "source_delete_failed"}); continue
             renamed.append((record, quarantine)); confirmed.append(record)
-        if confirmed:
+        if confirmed or durable_only_ids:
             try:
-                durable_result = {"removedImageIds": [record.image_id for record in confirmed], "failed": failures,
+                durable_result = {"removedImageIds": [record.image_id for record in confirmed] + durable_only_ids, "failed": failures,
                                   "state": "cleanup_pending", "quarantinePaths": [str(path) for _record, path in renamed]}
-                removed = self.remove_images_from_catalog([record.image_id for record in confirmed], source_delete_token=delete_token, source_delete_result=durable_result)
+                removed = self.remove_images_from_catalog([record.image_id for record in confirmed], source_delete_token=delete_token,
+                                                          source_delete_result=durable_result, source_delete_extra_ids=durable_only_ids)
             except Exception:
                 for record, quarantine in reversed(renamed):
                     try:
@@ -1261,6 +1267,7 @@ class CatalogMixin:
                 failures.append({"imageId": record.image_id, "reason": "source_delete_failed"}); cleanup_paths.append(str(quarantine))
         result = {**removed, "failed": failures, "state": "cleanup_pending" if cleanup_paths else "committed", "quarantinePaths": cleanup_paths}
         names = {image_id: record.relative_path for image_id, record in records.items() if record is not None}
+        names.update({str(item["imageId"]): str(item.get("relativePath", item["imageId"])) for item in operation.get("items", [])})
         for failure in result["failed"]:
             if failure.get("imageId") in names: failure["relativePath"] = names[failure["imageId"]]
         with self.lock: self.source_delete_receipts[delete_token] = dict(result)
@@ -1312,7 +1319,8 @@ class CatalogMixin:
                 LOGGER.info("元画像削除の後処理を完了")
 
     def remove_images_from_catalog(self, image_ids: list[str], *, source_delete_token: str | None = None,
-                                   source_delete_result: dict[str, Any] | None = None) -> dict[str, Any]:
+                                   source_delete_result: dict[str, Any] | None = None,
+                                   source_delete_extra_ids: list[str] | None = None) -> dict[str, Any]:
         """Remove saved images from the working catalog without deleting source files."""
         if not isinstance(image_ids, list):
             raise ClientError("画像IDの一覧が正しくありません。", "input_invalid")
@@ -1323,6 +1331,7 @@ class CatalogMixin:
             with self.lock:
                 self._assert_catalog_mutable(allow_terminal_cleanup=True)
                 records = [self.images[image_id] for image_id in requested_ids if image_id in self.images]
+                extra_ids = [str(image_id) for image_id in (source_delete_extra_ids or []) if str(image_id) not in self.images]
             locks = [(record.image_id, self.image_io_lock(record.image_id)) for record in records]
             with ExitStack() as stack:
                 for _image_id, image_lock in sorted(locks):
@@ -1330,7 +1339,7 @@ class CatalogMixin:
                 with self.lock:
                     self._assert_catalog_mutable(allow_terminal_cleanup=True)
                     records = [self.images[record.image_id] for record in records if record.image_id in self.images]
-                    removed_ids = [record.image_id for record in records]
+                    removed_ids = [record.image_id for record in records] + extra_ids
                     mask_paths = [candidate.mask_path for record in records for candidate in self.candidates.get(record.image_id, [])]
                     session_paths = [record.path for record in records if record.source_kind == "session"]
                     session_imports_dir = self.session_imports_dir
