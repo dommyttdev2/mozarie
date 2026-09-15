@@ -1310,6 +1310,14 @@ class CatalogMixin:
             progress = {"plannedQuarantines": plans, "renamedImageIds": [current.image_id for current, _path in renamed], "failed": failures,
                         "prepareFailures": (operation.get("result") or {}).get("prepareFailures", [])}
             self.workspace_store.update_source_delete_operation(delete_token, "renaming", progress, expected_states={"renaming"})
+        # A direct retry may include an ID already rejected by prepare. Keep
+        # the original prepare reason and return one result per image.
+        unique_failures: dict[str, dict[str, str]] = {}
+        for failure in failures:
+            image_id = str(failure.get("imageId", ""))
+            if image_id not in unique_failures:
+                unique_failures[image_id] = failure
+        failures = list(unique_failures.values())
         if confirmed or durable_only_ids:
             try:
                 durable_result = {"removedImageIds": [record.image_id for record in confirmed] + durable_only_ids, "failed": failures,
