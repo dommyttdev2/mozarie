@@ -35,6 +35,13 @@ from .workspace import WorkspaceOpenError, WorkspaceStore
 _IMPORT_SESSION_TTL_SECONDS = 30.0
 
 
+def _is_canonical_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
     """List CUDA devices that this PyTorch build can actually execute on."""
     cuda = torch.cuda
@@ -103,6 +110,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.lock = threading.RLock()
         self.import_lock = threading.RLock()
         self._request_catalog_expectation = threading.local()
+        self.shutdown_requested = threading.Event()
         self.active_import_count = 0
         self._import_sessions: dict[str, dict[str, Any]] = {}
         self._cache_lock_handle: Any | None = None
@@ -166,6 +174,11 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.hand_segmentation_lock = self.sam_lock
         self.inference_lock = InferenceGate()
         self._cleanup_stale_sessions()
+
+    def begin_shutdown(self) -> None:
+        """Let long-lived local operations leave cleanly during process shutdown."""
+        self.shutdown_requested.set()
+        self.workspace_store.shutdown()
 
     def set_image_flags_bulk(self, payload: dict[str, Any]) -> dict[str, dict[str, bool]]:
         """Keep durable bulk flags and a concurrent catalog publication in one state epoch."""
@@ -294,7 +307,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
 
     def begin_import_transfer(self, session_id: str, expected_project_id: str | None, expected_catalog_generation: int) -> None:
         """Claim one browser import batch without serialising its file I/O."""
-        if not isinstance(session_id, str) or not session_id or len(session_id) > 128:
+        if not isinstance(session_id, str) or not _is_canonical_uuid(session_id):
             raise ClientError("画像追加セッションが正しくありません。", "input_invalid")
         with self.import_lock:
             with self.lock:
@@ -357,6 +370,8 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
     def finish_import_session(self, session_id: str, owner_project_id: str | None,
                               owner_catalog_generation: int, outcome: dict[str, Any] | None = None) -> dict[str, int | bool]:
         """Release a batch by its immutable starting owner, even after a view switch."""
+        if not _is_canonical_uuid(session_id):
+            raise ClientError("画像追加セッションが正しくありません。", "input_invalid")
         with self.import_lock:
             with self.lock:
                 self._cleanup_import_sessions_unchecked()

@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 import zipfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -32,6 +33,13 @@ from .model_downloads import ModelDownloadError, ModelDownloadInProgress
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 _update_start_lock = threading.Lock()
 _update_start_requested = False
+
+
+def _is_canonical_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 def _reserve_update_start() -> bool:
@@ -180,16 +188,25 @@ def _run_native_picker(script: str, environment: dict[str, str], *, failed_messa
             raise ClientError(failed_message, "model_picker_failed")
         encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encoded_script],
-                stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=300, shell=False, env=environment,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, env=environment,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            while True:
+                try:
+                    stdout, _stderr = process.communicate(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    if state.shutdown_requested.is_set():
+                        process.terminate()
+                        process.communicate()
+                        raise ClientError(failed_message, "model_picker_failed")
+        except OSError as exc:
             raise ClientError(failed_message, "model_picker_failed") from exc
-        if completed.returncode:
+        if process.returncode:
             raise ClientError(failed_message, "model_picker_failed")
-        encoded = completed.stdout.strip()
+        encoded = stdout.strip()
         if not encoded:
             return None
         try:
@@ -514,7 +531,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 import_session_id = self.headers.get("X-Mozarie-Import-Session", "")
                 raw_mtime = self.headers.get("X-Mozarie-File-Mtime", "0")
                 raw_size = self.headers.get("X-Mozarie-File-Size", "0")
-                if (source_identity and (len(source_identity) > 128 or not source_identity.replace("-", "").isalnum())
+                if (source_identity and not _is_canonical_uuid(source_identity)
                         or source_kind not in {"browser-files", "browser-directory"}
                         or import_intent not in {"add", "restore"}
                         or not raw_mtime.isdigit() or not raw_size.isdigit()):
