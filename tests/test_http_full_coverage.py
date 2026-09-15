@@ -259,33 +259,33 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
             request.do_DELETE()
         self.assertEqual([status for _error, status in emitted], [http_module.HTTPStatus.INTERNAL_SERVER_ERROR, http_module.HTTPStatus.BAD_REQUEST, http_module.HTTPStatus.BAD_REQUEST, http_module.HTTPStatus.FORBIDDEN, http_module.HTTPStatus.BAD_REQUEST])
 
-    def test_upload_activates_requested_catalog_and_rejects_invalid_provisional_id(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
-            staged = Path(directory) / "upload.png"; staged.write_bytes(b"fixture")
-            state = Mock()
-            state.catalog_id = None; state.workspace_id = None
-            state.import_lock = threading.RLock()
-            state.import_image_file_for_api.return_value = ([], True)
-            request = handler(headers={"X-Mozarie-Catalog-Id": "catalog"}); request.path = "/api/import/file"
-            request._require_binary_import_request = lambda: None; request._read_binary_body_to_file = lambda: staged; request._json = Mock()
-            with patch.object(http_module, "STATE", state):
-                request.do_POST()
-            state.open_project.assert_not_called()
-
-            staged.write_bytes(b"fixture")
-            state.catalog_id = "catalog"
-            request = handler(headers={}); request.path = "/api/import/file"
-            request._require_binary_import_request = lambda: None; request._read_binary_body_to_file = lambda: staged; request._json = Mock()
-            with patch.object(http_module, "STATE", state):
-                request.do_POST()
-            state.workspace_store.active_projectless_catalog.assert_not_called()
-
-        state = Mock(); request = handler(); request.path = "/api/workspace/catalog"
-        request._require_json_request = lambda: None; request._read_json_body = lambda: {"provisional": True, "catalogId": "not-allowed"}
-        errors: list[object] = []; request._client_error = lambda error, *_args, **_kwargs: errors.append(error)
+    def test_upload_rejects_an_unknown_import_session_before_reading_the_binary_body(self) -> None:
+        state = Mock()
+        state.begin_import_transfer.side_effect = ClientError("読み込みセッションが見つかりません。", "import_session_not_found")
+        request = handler(headers={
+            "X-Mozarie-Name": "upload.png",
+            "X-Mozarie-Relative-Path": "upload.png",
+            "X-Mozarie-Client-Key": "key",
+            "X-Mozarie-Source-Kind": "browser-files",
+            "X-Mozarie-Import-Intent": "add",
+            "X-Mozarie-Import-Session": "missing",
+            "X-Mozarie-File-Mtime": "1",
+            "X-Mozarie-File-Size": "7",
+        })
+        request.path = "/api/import/file"
+        request._require_binary_import_request = lambda: None
+        request._request_body_length = lambda *, required: 7
+        request._catalog_expectation = lambda: ("project", 3)
+        request._read_binary_body_to_file = Mock()
+        request._reject_unread_request = lambda error: (_ for _ in ()).throw(error)
+        errors: list[tuple[object, object]] = []
+        request._client_error = lambda error, status, *_args: errors.append((error, status))
         with patch.object(http_module, "STATE", state):
             request.do_POST()
-        self.assertEqual(getattr(errors[0], "error_code", None), "input_invalid")
+        state.begin_import_transfer.assert_called_once_with("missing", "project", 3)
+        request._read_binary_body_to_file.assert_not_called()
+        self.assertEqual(getattr(errors[0][0], "error_code", None), "import_session_not_found")
+        self.assertEqual(errors[0][1], http_module.HTTPStatus.BAD_REQUEST)
 
     def test_thumbnail_initial_stale_missing_file_and_stream_disconnects_are_safe(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
