@@ -17,6 +17,7 @@
 | SV-073 | 保存応答が一つの版とtokenを返す | `tests.test_http_live_endpoints.LiveHttpEndpointTests.test_live_browser_save_render_streams_a_stable_image_response` | 遅延応答中の別タブ更新・削除、実ブラウザーのダウンロードと一時ファイル解放 |
 | SV-076 | 未作成の展開先で更新ZIPを展開できる | `tests.test_updater_extract_regression.UpdaterExtractRegressionTests.test_extract_archive_allows_a_missing_destination_directory` | 実リリースZIP、実ドライブの空き容量不足と更新前バックアップ |
 | SV-077 | source snapshot失敗時にコピーを残し削除・確定を開始しない | `tests/test_save_source_snapshot_contract.cjs` | File System Access APIでの実ファイル、画面の`source_restore_failed`案内 |
+| ED-128 | 候補編集操作が候補ビューのロック中に無効になる | `tests/test_candidate_mutation_lock_contract.cjs` | 読み込み中・保存中・処理中の実画面表示と、完了後の操作再開 |
 | DI-237 | receiptとcleanup状態を永続化し、再試行で回収する | `tests.test_save_recovery.SaveRecoveryTests.test_workspace_receipt_is_durable`、`tests.test_save_recovery.SaveRecoveryTests.test_startup_compacts_only_cancelled_rows` | 応答喪失、タブ終了、再起動後の画面復帰とCMD記録 |
 | DI-239 | ack失敗時もreceiptを保持し、再ackで回収する | `tests.test_save_recovery.SaveRecoveryTests.test_receipt_ack_retries_after_workspace_delete_failure`、`tests.test_save_recovery.SaveRecoveryTests.test_ack_keeps_receipt_when_commit_cleanup_is_pending` | 複数タブ、commit/ack応答喪失、再起動後のstatusと画面の再送 |
 

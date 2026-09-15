@@ -261,12 +261,12 @@ function renderCandidates() {
       markMaskDirty(); saveDraft(); setEditorUnreviewed();
       recordHistoryOperation({ kind: "manualState" });
       refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
-    }, state.projectReadOnly || candidateLocked);
+    }, candidateMutationLocked);
     const blinkId = `manual:${role}`;
     const blink = makeDisplay(blinkId, role);
     row.dataset.candidateBlinkId = blinkId; row.dataset.candidateBlinkRole = role;
     const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manual");
-    const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×"; remove.disabled = state.projectReadOnly || candidateLocked;
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×"; remove.disabled = candidateMutationLocked;
     remove.title = isApply ? t("candidates.deleteManual") : t("candidates.deleteManualExclude");
     remove.setAttribute("aria-label", remove.title);
     remove.addEventListener("click", isApply ? deleteManualMask : deleteManualExclusion);
@@ -275,7 +275,7 @@ function renderCandidates() {
         if (isBusy() || state.importing || currentImageActionPending()) return;
         state.manualExclusionForced = !state.manualExclusionForced; markMaskDirty(); saveDraft();
         setEditorUnreviewed(); recordHistoryOperation({ kind: "manualState" }); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
-      }, state.projectReadOnly || candidateLocked);
+      }, candidateMutationLocked);
       appendRow(row, label, enabled, [blink, candidateEffectiveToggle(blinkId, role), forced, remove]);
     } else appendRow(row, label, enabled, [blink, candidateEffectiveToggle(blinkId, role), remove]);
     list.append(row);
@@ -290,11 +290,11 @@ function renderCandidates() {
       if (isBusy() || state.importing || currentImageActionPending()) return;
       state.manualExclusionEraseEnabled = !state.manualExclusionEraseEnabled; markMaskDirty();
       saveDraft(); setEditorUnreviewed(); recordHistoryOperation({ kind: "manualState" }); refreshCurrentReviewAndMask(); requestMosaicPreview(); renderCandidates(); render();
-    }, state.projectReadOnly || candidateLocked);
+    }, candidateMutationLocked);
     const blink = makeDisplay(blinkId, "exclude");
     row.dataset.candidateBlinkId = blinkId; row.dataset.candidateBlinkRole = "exclude";
     const label = document.createElement("span"); label.className = "candidate-label"; label.textContent = t("candidates.manual");
-    const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×"; remove.disabled = state.projectReadOnly || candidateLocked;
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×"; remove.disabled = candidateMutationLocked;
     remove.title = t("candidates.deleteManualExcludeErase"); remove.setAttribute("aria-label", remove.title);
     remove.addEventListener("click", deleteManualExclusionErase);
     appendRow(row, label, enabled, [blink, candidateEffectiveToggle(blinkId, "exclude"), remove]); excludeList.append(row);
@@ -320,7 +320,7 @@ function renderCandidates() {
       const updated = await updateCandidate(candidate, previousEnabled, previousMaskStatus);
       if (updated) recordHistoryOperation({ kind: "candidateState", editorState });
       else if (updated === false) restoreCandidateMutationReview(imageId, catalogEpoch, record, generation, previousReviewed);
-    }, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId));
+    }, deleting || candidateMutationLocked);
     const blink = makeDisplay(candidate.id, role);
     row.dataset.candidateBlinkId = candidate.id; row.dataset.candidateBlinkRole = role;
     const label = document.createElement("span"); label.className = "candidate-label";
@@ -328,7 +328,7 @@ function renderCandidates() {
     const confidence = document.createElement("span"); confidence.className = "candidate-conf";
     confidence.textContent = Number.isFinite(candidate.confidence) ? `${Math.max(0, Math.min(100, Math.round(candidate.confidence * 100)))}%` : "";
     label.append(name, confidence);
-    const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×"; remove.disabled = deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId);
+    const remove = document.createElement("button"); remove.type = "button"; remove.className = "candidate-delete"; remove.textContent = "×"; remove.disabled = deleting || candidateMutationLocked;
     const deleteLabel = t("candidates.delete", { label: labelText });
     remove.title = deleteLabel; remove.setAttribute("aria-label", deleteLabel);
     remove.addEventListener("click", () => deleteCandidate(candidate));
@@ -345,9 +345,9 @@ function renderCandidates() {
         const updated = await updateCandidate(candidate, candidate.enabled, previousMaskStatus, previousForced);
         if (updated) recordHistoryOperation({ kind: "candidateState", editorState });
         else if (updated === false) restoreCandidateMutationReview(imageId, catalogEpoch, record, generation, previousReviewed);
-      }, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId));
-      appendRow(row, label, enabled, [blink, candidateEffectiveToggle(candidate.id, role), makeExpandButton(candidate, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId), labelText), forced, remove]);
-    } else appendRow(row, label, enabled, [blink, candidateEffectiveToggle(candidate.id, role), makeExpandButton(candidate, deleting || state.projectReadOnly || candidateLocked || state.candidateBatchPending.has(state.currentId), labelText), remove]);
+      }, deleting || candidateMutationLocked);
+      appendRow(row, label, enabled, [blink, candidateEffectiveToggle(candidate.id, role), makeExpandButton(candidate, deleting || candidateMutationLocked, labelText), forced, remove]);
+    } else appendRow(row, label, enabled, [blink, candidateEffectiveToggle(candidate.id, role), makeExpandButton(candidate, deleting || candidateMutationLocked, labelText), remove]);
     (role === "apply" ? applyList : excludeList).append(row);
   }
   appendEmpty(applyList); appendEmpty(excludeList);
