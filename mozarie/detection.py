@@ -618,7 +618,7 @@ class DetectionMixin:
     def _high_precision_segments(
         self, models: DetectionModels, record: ImageRecord, rgb: np.ndarray, segments: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Keep only target regions confirmed by high-precision SAM."""
+        """Refine target regions without discarding detector evidence."""
         if not any(segment.get("class_name") in DETECTED_TARGET_CLASSES for segment in segments):
             return segments
         with self.sam_lock:
@@ -637,6 +637,8 @@ class DetectionMixin:
             hand_mask = np.asarray(segment.get("_confirmed_hand", np.zeros_like(source_mask)) > 0, dtype=np.uint8)
             coordinates = np.argwhere(source_mask > 0)
             if not len(coordinates):
+                segment["refinement"] = "sam_fallback"
+                refined_segments.append(segment)
                 continue
             top, left = coordinates.min(axis=0)
             bottom, right = coordinates.max(axis=0) + 1
@@ -646,6 +648,10 @@ class DetectionMixin:
                    min(width, int(right + padding)), min(height, int(bottom + padding)))
             prompt_points, labels = sam_refinement_prompts(source_mask, hand_mask)
             if not len(prompt_points):
+                segment["mask"] = source_mask
+                segment["_apply_mask"] = source_mask
+                segment["refinement"] = "sam_fallback"
+                refined_segments.append(segment)
                 continue
             consensus = len(segment.get("_consensus_sources", frozenset({str(segment["source"])}))) >= 2
 
@@ -673,6 +679,10 @@ class DetectionMixin:
             clipped_masks = np.asarray([clip_mask_to_roi(mask, roi) for mask in masks])
             selected, initial_relaxed = select_mask(clipped_masks, scores)
             if selected is None:
+                segment["mask"] = source_mask
+                segment["_apply_mask"] = source_mask
+                segment["refinement"] = "sam_fallback"
+                refined_segments.append(segment)
                 continue
             refined, selected_index = selected
             hand_overlap = int(np.count_nonzero((refined > 0) & (hand_mask > 0)))
