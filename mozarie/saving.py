@@ -89,18 +89,30 @@ class SavingMixin:
     ) -> Path:
         """Copy one unchanged source to a response file without a bytes buffer."""
         rendered_dir = self.cache_dir / "browser-save"
-        rendered_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            rendered_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ClientError(
+                "保存用の一時ファイルを作成できませんでした。空き容量と書込権限を確認してください。",
+                "save_write_failed",
+            ) from exc
         staged_path: Path | None = None
         try:
             with record.path.open("rb") as source:
                 before = source.stat()
                 if (before.st_mtime_ns, before.st_size) != fingerprint:
                     raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
-                with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=suffix, delete=False) as destination:
-                    staged_path = Path(destination.name)
-                    while chunk := source.read(IO_CHUNK_BYTES):
-                        destination.write(chunk)
-                    destination.flush()
+                try:
+                    with tempfile.NamedTemporaryFile(dir=rendered_dir, suffix=suffix, delete=False) as destination:
+                        staged_path = Path(destination.name)
+                        while chunk := source.read(IO_CHUNK_BYTES):
+                            destination.write(chunk)
+                        destination.flush()
+                except OSError as exc:
+                    raise ClientError(
+                        "保存用の一時ファイルへ書き込めませんでした。空き容量と書込権限を確認してください。",
+                        "save_write_failed",
+                    ) from exc
                 after = source.stat()
                 if (after.st_mtime_ns, after.st_size) != fingerprint:
                     raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")

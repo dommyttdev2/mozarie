@@ -961,12 +961,18 @@ function applyProjectSnapshot(snapshot) {
 function hasDurableHistory() { return state.historyDurable === true; }
 
 function discardCatalogNodes(nodes, container) {
+  let clearedHover = false;
   for (const item of nodes.values()) {
+    if (state.hoverPrefetchId === item.dataset?.id) {
+      state.hoverPrefetchId = null;
+      clearedHover = true;
+    }
     const preview = item.querySelector?.("img");
     if (preview) forgetThumbnail(preview);
     item.remove?.();
   }
   nodes.clear();
+  if (clearedHover) syncResourceOwnership();
 }
 
 function updateProgress(job) {
