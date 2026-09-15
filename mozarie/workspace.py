@@ -1936,7 +1936,7 @@ class WorkspaceStore:
             def group_ready(entry: sqlite3.Row | None, direction: str) -> bool:
                 if entry is None or not entry["group_id"]: return entry is not None
                 group = db.execute("SELECT status FROM history_groups WHERE group_id=?", (entry["group_id"],)).fetchone()
-                if group is None or str(group["status"]) == "building":
+                if group is None or str(group["status"]) != "committed":
                     return False
                 members = db.execute("SELECT image_id,entry_id FROM history_entries WHERE group_id=?", (entry["group_id"],)).fetchall()
                 for member in members:
@@ -1994,7 +1994,7 @@ class WorkspaceStore:
                     db.execute("COMMIT"); return []
                 if entry["group_id"]:
                     group = db.execute("SELECT status FROM history_groups WHERE group_id=?", (entry["group_id"],)).fetchone()
-                    if group is None or str(group["status"]) == "building":
+                    if group is None or str(group["status"]) != "committed":
                         db.execute("COMMIT"); return []
                     for member in entries:
                         cursor_row = db.execute("SELECT entry_id FROM history_cursors WHERE image_id=?", (member["image_id"],)).fetchone()
