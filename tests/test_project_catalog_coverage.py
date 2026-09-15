@@ -76,7 +76,16 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         state = self.state()
         project = state.create_project("catalog coverage")
         first = state.set_root(str(first_root)); first_id = first[0]["id"]
-        both = state.set_root(str(second_root))
+        second_path = second_root / "nested/b.png"
+        second_stat = second_path.stat()
+        second_source = state.workspace_store.ensure_project_source(
+            project["id"], kind="native-folder", display_name=second_root.name, identity=str(second_root.resolve()),
+        )
+        state.workspace_store.reconcile_images(project["id"], [
+            SimpleNamespace(relative_path="nested/b.png", size_bytes=second_stat.st_size,
+                            mtime_ns=second_stat.st_mtime_ns, width=8, height=8),
+        ], second_source)
+        both = state.open_project(project["id"])["images"]
         self.assertEqual(len(both), 2)
         # The active project is deliberately excluded: this query drives the
         # warning shown only when another project already owns the folder.
@@ -116,9 +125,8 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         self.assertTrue(state.source_mismatch_snapshot()[0]["dimensionsChanged"])
         state.resolve_source_mismatches([first_id], False)
         self.assertTrue(state.source_mismatch_snapshot())
-        second_path = second_root / "nested/b.png"
         Image.new("RGB", (9, 9), "gray").save(second_path)
-        state.set_root(str(second_root))
+        state.open_project(project["id"])
         changed_ids = [entry["id"] for entry in state.source_mismatch_snapshot()]
         with patch.object(state.workspace_store, "clear_image_workspaces", side_effect=RuntimeError("clear failed")):
             with self.assertRaisesRegex(RuntimeError, "clear failed"):
@@ -227,6 +235,11 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         with self.assertRaises(ClientError): state.batch_update_candidates_many([], {"role": "apply", "operation": "enable"})
         with self.assertRaises(ClientError): state.batch_update_candidates(image_ids[0], {"role": "bad", "operation": "enable"})
 
+        # A durable batch write failure leaves the live candidate snapshot unchanged.
+        with patch.object(state.workspace_store, "commit_candidate_states", side_effect=RuntimeError("second failed")):
+            with self.assertRaisesRegex(RuntimeError, "second failed"):
+                state.batch_update_candidates_many([image_ids[1]], {"role": "apply", "operation": "enable"})
+
         # The clear transaction must mark a batch history group failed if SQLite rejects it.
         with patch.object(state.workspace_store, "clear_image_workspaces", side_effect=RuntimeError("write failed")):
             with self.assertRaisesRegex(RuntimeError, "write failed"):
@@ -239,17 +252,16 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
             with self.assertRaises(ClientError): state.set_candidate_state(image_ids[0], "missing", {"enabled": True})
             with self.assertRaises(ClientError): state.batch_update_candidates(image_ids[0], {"role": "apply", "operation": "enable"})
             with self.assertRaises(ClientError): state.delete_candidate(image_ids[0], "missing")
-        with patch.object(state, "_assert_catalog_mutable", side_effect=[None, None]):
-            with self.assertRaises(ClientError): state.clear_masks(image_ids)
+        state.worker_thread = types.SimpleNamespace(is_alive=lambda: True, join=lambda: None)
+        with self.assertRaises(ClientError):
+            state.clear_masks(image_ids)
         state.worker_thread = None
 
         state.candidates[image_ids[0]] = [self.candidate(state, image_ids[0], "role", enabled=True)]
+        state.candidates[image_ids[1]] = [self.candidate(state, image_ids[1], "role-2", enabled=True)]
+        self.commit_candidates(state, image_ids[0], state.candidates[image_ids[0]])
+        self.commit_candidates(state, image_ids[1], state.candidates[image_ids[1]])
         state.set_candidate_state(image_ids[0], "role", {"role": "exclude", "forced": True})
-
-        # A failing member marks the multi-image history group failed.
-        with patch.object(state, "batch_update_candidates", side_effect=[1, RuntimeError("second failed")]):
-            with self.assertRaisesRegex(RuntimeError, "second failed"):
-                state.batch_update_candidates_many(image_ids, {"role": "apply", "operation": "enable"})
 
     def test_catalog_input_validation_provisional_and_removed_sources(self) -> None:
         state = self.state()
@@ -259,12 +271,7 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         with self.assertRaises(ClientError): state.name_current_project("name")
         with self.assertRaises(ClientError): state.complete_project()
         with self.assertRaises(ClientError): state.project_mask_images()
-        with self.assertRaises(ClientError): state.activate_browser_catalog("missing")
-
-        catalog_id = state.activate_browser_catalog()
-        self.assertEqual(state.finalize_browser_catalog(), (catalog_id, {}))
-        self.assertEqual(state.finalize_browser_catalog(), (catalog_id, {}))
-        state.detach_catalog()
+        with self.assertRaises(ValueError): state.workspace_store.activate_projectless_catalog("missing")
         with self.assertRaises(ClientError): state._set_root(str(self.root), "missing")
 
         # A project that only has browser sources opens without a filesystem
@@ -282,12 +289,13 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         # client metadata before they mutate a session directory.
         staged = self.root / "staged.png"; staged.write_bytes(self.png())
         with self.assertRaises(ClientError):
-            state._import_images([{"name": "bad.png", "relativePath": "bad.png", "stagedPath": staged, "mtimeNs": -1}])
+            state._import_images([{"name": "bad.png", "relativePath": "bad.png", "stagedPath": staged, "mtimeNs": -1}], intent="add")
         with self.assertRaises(ClientError):
-            state._import_images([{"name": "bad.png", "relativePath": "bad.png", "stagedPath": staged, "sizeBytes": 1}])
+            state._import_images([{"name": "bad.png", "relativePath": "bad.png", "stagedPath": staged, "sizeBytes": 1}], intent="add")
+        staged.write_bytes(self.png())
         images, imported = state._import_images([{"name": "ok.png", "relativePath": "ok.png", "stagedPath": staged,
                                                    "mtimeNs": 123, "sizeBytes": len(self.png()), "clientKey": "ok"}],
-                                                 source_identity="directory-id", source_kind="browser-directory")
+                                                 source_identity="directory-id", source_kind="browser-directory", intent="add")
         self.assertEqual(imported[0]["clientKey"], "ok")
         self.assertEqual(images[0]["sourceKind"], "session")
 
@@ -442,7 +450,6 @@ class ProjectCatalogCoverageTests(unittest.TestCase):
         ):
             with self.subTest(malformed=malformed["manual"].get("removed", "candidate")), self.assertRaisesRegex(ClientError, "保存済みマスク"):
                 state._export_workspace_mask_raw(malformed, "mosaic")
+        self.assertEqual(list(state.iter_project_mask_exports("bad", "mosaic")), [])
         with self.assertRaises(ClientError):
-            list(state.iter_project_mask_exports("bad"))
-        with self.assertRaises(ClientError):
-            list(state.iter_project_mask_exports("mosaic"))
+            list(state.iter_project_mask_exports(str(state.catalog_id), "bad"))
