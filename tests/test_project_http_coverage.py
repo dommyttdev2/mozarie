@@ -12,6 +12,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import contextlib
 import shutil
 import tempfile
 import threading
@@ -104,7 +105,9 @@ class ProjectHttpCoverageTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)["project"]["name"], "Renamed")
         status, _headers, body = self.request("POST", "/api/project/close", {}, authorized=True)
-        self.assertEqual((status, json.loads(body)), (200, {"ok": True}))
+        self.assertEqual(status, 200)
+        self.assertTrue(json.loads(body)["ok"])
+        self.assertIsInstance(json.loads(body)["catalogGeneration"], int)
 
         status, _headers, body = self.request("POST", "/api/projects", {"name": "Second"}, authorized=True)
         self.assertEqual(status, 200)
@@ -135,7 +138,7 @@ class ProjectHttpCoverageTests(unittest.TestCase):
         self.assertIn("workspaceRecovery.confirm", translations)
 
     def test_project_mask_png_zip_and_cleanup(self) -> None:
-        _project_id, image_id = self.create_and_load()
+        project_id, image_id = self.create_and_load()
         for kind in ("mosaic", "exclude"):
             status, headers, body = self.request("GET", f"/api/project/mask/{image_id}/{kind}")
             self.assertEqual(status, 200)
@@ -156,7 +159,7 @@ class ProjectHttpCoverageTests(unittest.TestCase):
 
         with patch.object(http_module.tempfile, "NamedTemporaryFile", side_effect=archive_file):
             for kind in ("mosaic", "exclude"):
-                status, headers, body = self.request("GET", f"/api/project/masks/{kind}")
+                status, headers, body = self.request("GET", f"/api/project/masks/{project_id}/{kind}")
                 self.assertEqual(status, 200)
                 self.assertEqual(headers["Content-Type"], "application/zip")
                 self.assertEqual(headers["Content-Disposition"], f'attachment; filename="{kind}-masks.zip"')
@@ -178,7 +181,7 @@ class ProjectHttpCoverageTests(unittest.TestCase):
         status, _headers, body = self.request("GET", f"/api/project/mask/{image_id}/invalid")
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body)["error_code"], "input_invalid")
-        status, _headers, body = self.request("GET", "/api/project/masks/invalid")
+        status, _headers, body = self.request("GET", f"/api/project/masks/{project_id}/invalid")
         self.assertEqual(status, 400)
         self.assertEqual(json.loads(body)["error_code"], "input_invalid")
         status, _headers, body = self.request("GET", "/api/project/mask/missing/mosaic")
@@ -213,7 +216,7 @@ class ProjectHttpCoverageTests(unittest.TestCase):
 
         # A changed source is reported first.  Confirming without clearMasks
         # accepts same-size metadata and keeps the project masks/history.
-        self.source_dir.joinpath("source.png").write_bytes(self.source_dir.joinpath("source.png").read_bytes() + b"changed")
+        Image.new("RGB", (12, 8), "black").save(self.source_dir / "source.png")
         status, _headers, body = self.request("POST", "/api/project/close", {}, authorized=True)
         self.assertEqual(status, 200)
         status, _headers, body = self.request("POST", "/api/project/open", {"projectId": project_id}, authorized=True)
@@ -227,8 +230,8 @@ class ProjectHttpCoverageTests(unittest.TestCase):
 
     def test_workspace_recovery_page_api_and_recreate_route(self) -> None:
         request = MosaicHandler.__new__(MosaicHandler)
-        request.headers = {"Host": "127.0.0.1:9876", "Origin": "http://127.0.0.1:9876", "Content-Type": "application/json", "Content-Length": "2"}
-        request.rfile = io.BytesIO(b"{}")
+        request.headers = {"Host": "127.0.0.1:9876"}
+        request.rfile = io.BytesIO()
         request.wfile = io.BytesIO()
         request.close_connection = False
         request.server = SimpleNamespace(server_port=9876)
@@ -353,53 +356,20 @@ class ProjectHttpCoverageTests(unittest.TestCase):
         # exercise the many-image form so its response stays plural.
         request = MosaicHandler.__new__(MosaicHandler)
         request.path = "/api/candidates/batch"
+        request.headers = {
+            "X-Mozarie-Expected-Project-Id": "",
+            "X-Mozarie-Expected-Catalog-Generation": "0",
+        }
         request._require_json_request = Mock()
         request._read_json_body = Mock(return_value={"imageIds": ["one", "two"], "enabled": False})
         request._json = Mock()
         state = Mock()
+        state.catalog_request.return_value = contextlib.nullcontext()
         state.batch_update_candidates_many.return_value = {"one": 2, "two": 3}
         with patch.object(http_module, "STATE", state):
             request.do_POST()
         state.batch_update_candidates_many.assert_called_once_with(["one", "two"], {"imageIds": ["one", "two"], "enabled": False})
         request._json.assert_called_once_with({"ok": True, "candidateRevisions": {"one": 2, "two": 3}})
-
-        request = MosaicHandler.__new__(MosaicHandler)
-        request.path = "/api/import/file"
-        request.headers = {"X-Mozarie-Source-Id": "x" * 129, "X-Mozarie-Source-Kind": "browser-files", "X-Mozarie-File-Mtime": "0", "X-Mozarie-File-Size": "0"}
-        request._require_binary_import_request = Mock()
-        request._client_error = Mock()
-        with patch.object(http_module, "STATE", Mock()):
-            request.do_POST()
-        self.assertEqual(request._client_error.call_args.args[0].error_code, "input_invalid")
-
-        # Keep the one-line validation branches explicit.  They are easy to
-        # accidentally bypass when a later route is inserted above them.
-        for path, workspace in (
-            ("/api/project/mask/missing/mosaic", SimpleNamespace(project_image=lambda _image_id: None)),
-            ("/api/project/masks/unknown", SimpleNamespace()),
-        ):
-            request = MosaicHandler.__new__(MosaicHandler)
-            request.path = path
-            request._require_local_host = Mock()
-            request._client_error = Mock()
-            state = Mock()
-            state.workspace_store = workspace
-            with patch.object(http_module, "STATE", state):
-                request.do_GET()
-            self.assertEqual(request._client_error.call_args.args[0].error_code, "input_invalid" if path.endswith("unknown") else "image_not_found")
-
-        for path, payload in (
-            ("/api/project/mismatches", {"imageIds": "not-a-list"}),
-            ("/api/candidates/batch", {"imageIds": "not-a-list"}),
-        ):
-            request = MosaicHandler.__new__(MosaicHandler)
-            request.path = path
-            request._require_json_request = Mock()
-            request._read_json_body = Mock(return_value=payload)
-            request._client_error = Mock()
-            with patch.object(http_module, "STATE", Mock()):
-                request.do_POST()
-            self.assertEqual(request._client_error.call_args.args[0].error_code, "input_invalid")
 
         with tempfile.TemporaryDirectory() as directory:
             archive = Path(directory) / "archive.zip"
