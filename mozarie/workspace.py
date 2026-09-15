@@ -497,10 +497,6 @@ class WorkspaceStore:
             db.execute("INSERT INTO meta(key,value) VALUES('active_projectless_catalog_id',?) "
                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (catalog_id,))
 
-    def clear_active_projectless_catalog(self, catalog_id: str) -> None:
-        with self._lock, self._connect() as db:
-            db.execute("DELETE FROM meta WHERE key='active_projectless_catalog_id' AND value=?", (catalog_id,))
-
     def project(self, catalog_id: str) -> dict[str, Any] | None:
         with self._connect() as db:
             row = db.execute("""SELECT catalogs.*,COUNT(images.image_id) AS image_count FROM catalogs
