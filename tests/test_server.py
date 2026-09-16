@@ -5038,12 +5038,13 @@ class MozarieTests(unittest.TestCase):
             state = self.new_state()
             record = state.image_for_id(state.set_root(directory)[0]["id"])
             state.settings["models"]["provider"] = "cpu"
-            with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 7)), patch.object(state, "_start_job") as start:
+            catalog_generation = state.catalog_generation
+            with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], catalog_generation)), patch.object(state, "_start_job") as start:
                 state.start_detection([record.image_id], 0.65)
             self.assertEqual(start.call_args.args[0], "detect")
             self.assertEqual(start.call_args.args[3:5], (0.65, 2))
             self.assertEqual(start.call_args.args[5], {"penis", "pussy"})
-            self.assertEqual(start.call_args.kwargs["expected_catalog_generation"], 7)
+            self.assertEqual(start.call_args.kwargs["expected_catalog_generation"], catalog_generation)
             for mode in ("standard", "high_precision"):
                 state.settings["detection"]["mode"] = mode
                 seen_modes: list[str] = []
@@ -8522,7 +8523,7 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
         state = self.new_state()
         state.settings["detection"]["targets"] = ["penis"]
         with patch.object(state, "_require_supported_gpu"), \
-                patch.object(state, "_records_for_ids_with_catalog", return_value=([], 2)), \
+                patch.object(state, "_records_for_ids_with_catalog", return_value=([], state.catalog_generation)), \
                 patch.object(state, "_start_job") as start:
             state.start_detection([], .6, 3)
         self.assertEqual(start.call_args.args[-2], {"penis"})
