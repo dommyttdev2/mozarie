@@ -34,6 +34,7 @@ function loadThumbnail(image) {
   if (notice) notice.hidden = true;
   image.dataset.loaded = source;
   image.onerror = () => thumbnailFailure(image);
+  image.onload = () => { if (image.dataset.loaded === source) image.onerror = null; };
   image.src = source;
 }
 function observeThumbnail(image, record, scope = "gallery") {

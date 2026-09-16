@@ -2831,6 +2831,29 @@ async function main() {
         summary: "0件を読み込み、1件を読み込めませんでした。",
         failures: ["only-broken.png: 画像を読み込めません"],
       }, "an all-corrupt browser selection shows the complete file list instead of a generic error");
+      await parallelismPage.locator("#importFailuresClose").click();
+      await parallelismPage.evaluate(async () => {
+        let uploads = 0;
+        window.fetch = (input, init) => {
+          const url = new URL(typeof input === "string" ? input : input.url, location.href);
+          if (url.pathname !== "/api/import/file") return window.__nativeFixtureFetch(input, init);
+          uploads += 1;
+          return Promise.resolve(new Response(JSON.stringify({ error_code: "stale_catalog" }), { status: 409, headers: { "Content-Type": "application/json" } }));
+        };
+        state.settings.importing.parallelism = 1;
+        await importFiles([
+          new File(["first"], "fatal-first.png", { type: "image/png" }),
+          new File(["second"], "must-not-upload.png", { type: "image/png" }),
+        ]);
+        window.__fatalImportUploads = uploads;
+      });
+      await parallelismPage.waitForFunction(() => document.querySelector("#errorDialog").open);
+      assert.deepEqual(await parallelismPage.evaluate(() => ({
+        uploads: window.__fatalImportUploads,
+        importing: state.importing,
+        failureList: document.querySelector("#importFailuresDialog").open,
+      })), { uploads: 1, importing: false, failureList: false }, "a stale catalog response stops later browser uploads and uses the normal catalog resync failure path");
+      await parallelismPage.locator("#errorDialogClose").click();
       await parallelismPage.evaluate(() => { window.fetch = window.__nativeFixtureFetch; });
     } finally {
       await parallelismPage.evaluate(() => { window.__importUploadRegistry = null; }).catch(() => {});

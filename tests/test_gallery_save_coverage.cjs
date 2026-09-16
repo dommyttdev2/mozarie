@@ -133,6 +133,7 @@ async function galleryInteractions() {
   assert.equal(retryNotice.getAttribute("role"), "button", "the thumbnail retry is keyboard-accessible");
   retryNotice.onclick({ preventDefault() {}, stopPropagation() {} });
   assert.equal(retryNotice.hidden, true, "retry clears only the failed card marker"); assert.equal(retryPreview.src, "retry-thumb", "retry issues a fresh request for the failed thumbnail");
+  retryPreview.onload(); assert.equal(retryPreview.onerror, null, "a successful thumbnail retry removes the completed request error handler");
 
   runtime.renderGallery();
   assert.equal(runtime.gallery.children.length, 4, "the virtualized gallery keeps one spacer and its mounted window");

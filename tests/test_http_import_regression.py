@@ -8,6 +8,7 @@ import json
 import shutil
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 import unittest
 from unittest.mock import Mock, patch
@@ -107,6 +108,18 @@ class FolderLoadLoggingContractTests(unittest.TestCase):
         self.assertEqual(state.catalog_snapshot(), before)
         self.assertEqual(state.list_images(), before_images)
 
+        unreadable = self.root / "unreadable"
+        unreadable.mkdir()
+        (unreadable / "broken.png").write_bytes(b"not an image")
+        with self.assertLogs("mozarie.core", "INFO") as unreadable_logs:
+            with self.assertRaisesRegex(ClientError, "読み込めません") as raised:
+                state.set_root(str(unreadable))
+        self.assertEqual(raised.exception.error_code, "image_read_failed")
+        self.assertEqual(raised.exception.params, {"failures": [{"relativePath": "broken.png", "reason": "image_read_failed"}]})
+        self.assertIn("候補=1件 読込=0件 スキップ=image_read_failed=1件（例: broken.png）", "\n".join(unreadable_logs.output))
+        self.assertEqual(state.catalog_snapshot(), before)
+        self.assertEqual(state.list_images(), before_images)
+
     def test_folder_endpoint_returns_mixed_failures_and_all_invalid_failure_list(self) -> None:
         from http.server import ThreadingHTTPServer
 
@@ -157,16 +170,66 @@ class FolderLoadLoggingContractTests(unittest.TestCase):
                 httpd.shutdown()
                 httpd.server_close()
 
-        unreadable = self.root / "unreadable"
-        unreadable.mkdir()
-        (unreadable / "broken.png").write_bytes(b"not an image")
-        with self.assertLogs("mozarie.core", "INFO") as unreadable_logs:
-            with self.assertRaisesRegex(ClientError, "読み込めません") as raised:
-                state.set_root(str(unreadable))
-        self.assertEqual(raised.exception.error_code, "image_read_failed")
-        self.assertEqual(raised.exception.params, {"failures": [{"relativePath": "broken.png", "reason": "image_read_failed"}]})
-        self.assertIn("候補=1件 読込=0件 スキップ=image_read_failed=1件（例: broken.png）", "\n".join(unreadable_logs.output))
-        self.assertEqual([image["relativePath"] for image in state.list_images()], ["valid.png"])
+    def test_binary_browser_import_keeps_later_valid_file_after_a_bad_upload(self) -> None:
+        from http.server import ThreadingHTTPServer
+
+        state = self.new_state()
+        valid = self.root / "valid.png"
+        self.write_png(valid)
+        valid_bytes = valid.read_bytes()
+        session_id = str(uuid.uuid4())
+        source_id = str(uuid.uuid4())
+        with patch.object(http_module, "STATE", state), patch.object(state_module, "STATE", state):
+            httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
+            thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+            thread.start()
+            connection = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+            try:
+                def mutation_headers() -> dict[str, str]:
+                    return {
+                        "Host": f"127.0.0.1:{httpd.server_port}",
+                        "Origin": f"http://127.0.0.1:{httpd.server_port}",
+                        "X-Mozarie-Token": state.session_token,
+                        "X-Mozarie-Expected-Project-Id": "",
+                        "X-Mozarie-Expected-Catalog-Generation": "0",
+                    }
+
+                connection.request("POST", "/api/import/start", json.dumps({
+                    "sessionId": session_id, "expectedProjectId": None, "expectedCatalogGeneration": 0,
+                }).encode("utf-8"), {**mutation_headers(), "Content-Type": "application/json"})
+                start_response = connection.getresponse()
+                self.assertEqual(start_response.status, 200)
+                start_response.read()
+
+                def upload(name: str, body: bytes, client_key: str) -> int:
+                    headers = {
+                        **mutation_headers(), "Content-Type": "application/octet-stream",
+                        "X-Mozarie-Name": name, "X-Mozarie-Relative-Path": name,
+                        "X-Mozarie-Client-Key": client_key, "X-Mozarie-File-Mtime": "0",
+                        "X-Mozarie-File-Size": str(len(body)), "X-Mozarie-Source-Id": source_id,
+                        "X-Mozarie-Source-Kind": "browser-files", "X-Mozarie-Import-Intent": "add",
+                        "X-Mozarie-Import-Session": session_id,
+                    }
+                    connection.request("POST", "/api/import/file", body, headers)
+                    response = connection.getresponse()
+                    response.read()
+                    return response.status
+
+                self.assertEqual(upload("valid-first.png", valid_bytes, "first"), 200)
+                self.assertEqual(upload("broken-middle.png", b"not an image", "broken"), 400)
+                self.assertEqual(upload("valid-last.png", valid_bytes, "last"), 200)
+                connection.request("POST", "/api/import/finish", json.dumps({
+                    "sessionId": session_id, "expectedProjectId": None, "expectedCatalogGeneration": 0,
+                    "completed": 3, "failed": True, "cancelled": False,
+                }).encode("utf-8"), {**mutation_headers(), "Content-Type": "application/json"})
+                finish_response = connection.getresponse()
+                self.assertEqual(finish_response.status, 200)
+                finish_response.read()
+                self.assertEqual([image["relativePath"] for image in state.list_images()], ["valid-first.png", "valid-last.png"])
+            finally:
+                connection.close()
+                httpd.shutdown()
+                httpd.server_close()
 
     def test_handler_logs_normalized_routes_without_request_secrets(self) -> None:
         secret_id = "image-id-secret"
