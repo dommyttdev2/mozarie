@@ -56,6 +56,8 @@ EXIT_CANCELLED = 20
 EXIT_RUNNING = 30
 EXIT_RUNNING_CHECK_FAILED = 31
 
+_PENDING_UPDATE_FILE = ".mozarie-cache/update-pending.json"
+
 
 MESSAGES = {
     "ja": {
@@ -244,6 +246,41 @@ def read_local_version(app_dir: Path = APP_DIR) -> str:
         return path.read_text(encoding="utf-8").strip()
     except OSError as exc:
         raise UpdateError(tr("version_read")) from exc
+
+
+def _read_pending_update(app_dir: Path) -> tuple[tuple[int, int, int], bool] | None:
+    """Return the release left incomplete after dependencies or app files changed."""
+    path = app_dir / _PENDING_UPDATE_FILE
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or value.get("schema") != 1:
+            return None
+        version = value.get("version")
+        runtime_changed = value.get("runtime_changed")
+        if not isinstance(version, str) or not isinstance(runtime_changed, bool):
+            return None
+        return parse_version(version), runtime_changed
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError):
+        return None
+
+
+def _write_pending_update(app_dir: Path, version: str, *, runtime_changed: bool) -> None:
+    path = app_dir / _PENDING_UPDATE_FILE
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"schema": 1, "version": display_version(version), "runtime_changed": runtime_changed}),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise UpdateError(tr("requirements_failed")) from exc
+
+
+def _clear_pending_update(app_dir: Path) -> None:
+    try:
+        (app_dir / _PENDING_UPDATE_FILE).unlink(missing_ok=True)
+    except OSError as exc:
+        raise UpdateError(tr("requirements_failed")) from exc
 
 
 def fetch_latest_release(opener: Callable[..., Any] = urllib.request.urlopen) -> dict[str, Any]:
@@ -493,7 +530,7 @@ def mozarie_running_status(app_dir: Path = APP_DIR) -> str:
     return "none"
 
 
-def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
+def install_requirements(source_root: Path, app_dir: Path = APP_DIR, *, pending_version: str | None = None) -> bool:
     if not any((source_root / name).is_file() for name in ("requirements.txt", "mozarie/requirements-directml.txt", "mozarie/requirements-cpu.txt")):
         return False
     profile = _installed_runtime_profile(app_dir)
@@ -510,6 +547,8 @@ def install_requirements(source_root: Path, app_dir: Path = APP_DIR) -> bool:
     python = app_dir / ".venv" / "Scripts" / "python.exe"
     _verify_installed_runtime_profile(app_dir, source_root, python, profile)
     print(tr("requirements_updating"))
+    if pending_version is not None:
+        _write_pending_update(app_dir, pending_version, runtime_changed=True)
     (app_dir / ".venv" / ".mozarie-ready").unlink(missing_ok=True)
     result = subprocess.run(
         [str(python), "-m", "pip", "install", "--disable-pip-version-check", "--progress-bar", "on", "-r", str(incoming)],
@@ -672,7 +711,10 @@ def _perform_update(
     current = display_version(current_raw)
     latest = display_version(latest_raw)
 
-    if parse_version(latest_raw) <= parse_version(current_raw):
+    latest_version = parse_version(latest_raw)
+    pending = _read_pending_update(app_dir)
+    retry_pending = pending is not None and pending[0] == latest_version
+    if latest_version <= parse_version(current_raw) and not retry_pending:
         print(tr("current", version=current))
         return EXIT_CURRENT
 
@@ -699,9 +741,11 @@ def _perform_update(
         print(tr("verifying"))
         source_root = extract_archive(archive, extracted, app_dir)
         archive_version = read_local_version(source_root)
-        if parse_version(archive_version) != parse_version(latest_raw):
+        if parse_version(archive_version) != latest_version:
             raise UpdateError(tr("archive_version_mismatch"))
-        requirements_updated = install_requirements(source_root, app_dir)
+        if not retry_pending:
+            _write_pending_update(app_dir, latest_raw, runtime_changed=False)
+        requirements_updated = install_requirements(source_root, app_dir, pending_version=latest_raw)
         print(tr("updating"))
         try:
             apply_update(source_root, app_dir)
@@ -709,11 +753,12 @@ def _perform_update(
             if requirements_updated:
                 raise UpdateError(tr("update_deps_changed")) from exc
             raise
-        if requirements_updated is True:
+        if requirements_updated is True or (retry_pending and pending[1]):
             run_gpu_smoke(app_dir)
             ready_marker = app_dir / ".venv" / ".mozarie-ready"
             if ready_marker.parent.is_dir():
                 ready_marker.write_text("ready\n", encoding="utf-8")
+        _clear_pending_update(app_dir)
 
     print(tr("version_change", current=current, latest=latest))
     print(tr("updated", current=current, latest=latest))

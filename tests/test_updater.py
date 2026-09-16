@@ -264,6 +264,87 @@ class UpdaterTests(unittest.TestCase):
                     updater.perform_update(app, input_fn=lambda _prompt: "y")
             self.assertFalse((app / ".venv" / ".mozarie-ready").exists())
 
+    def test_git_archive_includes_every_file_required_by_the_installed_updater(self):
+        """The public archive must satisfy the unchanged v0.5.13 member contract."""
+        repository = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            archive = root / "mozarie.zip"
+            subprocess.run(
+                ["git", "archive", "--format=zip", "--worktree-attributes", "--prefix=mozarie-release/", "--output", str(archive), "HEAD"],
+                cwd=str(repository),
+                check=True,
+            )
+            with zipfile.ZipFile(archive) as bundle:
+                names = set(bundle.namelist())
+            for relative in updater.MANAGED_FILES:
+                self.assertIn(f"mozarie-release/{relative}", names)
+            extracted = updater.extract_archive(archive, root / "extracted", make_install(root / "installed"))
+            self.assertTrue((extracted / ".gitattributes").is_file())
+            self.assertTrue((extracted / ".gitignore").is_file())
+
+    def test_dependency_update_apply_failure_keeps_a_retryable_pending_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = make_install(root / "install")
+            source = make_source(root / "source")
+            (source / "requirements.txt").write_text("new-dependency\n", encoding="utf-8")
+            python = app / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            write_runtime_marker(app)
+            release = make_release()
+            successful_process = type("Result", (), {"returncode": 0})()
+            with patch("updater.fetch_latest_release", return_value=release), \
+                    patch("updater.download_archive"), \
+                    patch("updater.extract_archive", return_value=source), \
+                    patch("updater.subprocess.run", return_value=successful_process), \
+                    patch("updater.apply_update", side_effect=updater.UpdateError("copy failed")):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("update_deps_changed"))):
+                    updater.perform_update(app, input_fn=lambda _prompt: "y")
+            self.assertEqual(updater._read_pending_update(app), ((1, 2, 0), True))
+            self.assertEqual((app / "VERSION").read_text(encoding="utf-8"), "1.1.0")
+
+            with patch("updater.fetch_latest_release", return_value=release), \
+                    patch("updater.download_archive"), \
+                    patch("updater.extract_archive", return_value=source), \
+                    patch("updater.subprocess.run", return_value=successful_process), \
+                    patch("updater.run_gpu_smoke") as smoke:
+                self.assertEqual(updater.perform_update(app, input_fn=lambda _prompt: "y"), updater.EXIT_UPDATED)
+            smoke.assert_called_once_with(app)
+            self.assertEqual((app / "VERSION").read_text(encoding="utf-8"), "1.2.0")
+            self.assertIsNone(updater._read_pending_update(app))
+
+    def test_gpu_smoke_failure_retries_the_same_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = make_install(root / "install")
+            source = make_source(root / "source")
+            (source / "requirements.txt").write_text("new-dependency\n", encoding="utf-8")
+            python = app / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            write_runtime_marker(app)
+            release = make_release()
+            successful_process = type("Result", (), {"returncode": 0})()
+            with patch("updater.fetch_latest_release", return_value=release), \
+                    patch("updater.download_archive"), \
+                    patch("updater.extract_archive", return_value=source), \
+                    patch("updater.subprocess.run", return_value=successful_process), \
+                    patch("updater.run_gpu_smoke", side_effect=updater.UpdateError(updater.tr("gpu_check_failed"))):
+                with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("gpu_check_failed"))):
+                    updater.perform_update(app, input_fn=lambda _prompt: "y")
+            self.assertEqual((app / "VERSION").read_text(encoding="utf-8"), "1.2.0")
+            self.assertEqual(updater._read_pending_update(app), ((1, 2, 0), True))
+
+            with patch("updater.fetch_latest_release", return_value=release), \
+                    patch("updater.download_archive"), \
+                    patch("updater.extract_archive", return_value=source), \
+                    patch("updater.run_gpu_smoke") as smoke:
+                self.assertEqual(updater.perform_update(app, input_fn=lambda _prompt: "y"), updater.EXIT_UPDATED)
+            smoke.assert_called_once_with(app)
+            self.assertIsNone(updater._read_pending_update(app))
+
     def test_maintenance_lock_rejects_another_process(self):
         with tempfile.TemporaryDirectory() as directory:
             app = Path(directory)

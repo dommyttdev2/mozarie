@@ -111,7 +111,7 @@ For GPU processing, select a GPU in **Settings > Detection**. CPU assists unsupp
 
 ## Updates
 
-Use **Check for updates** in Settings or run `update.bat`. Close Mozarie before applying an update. Your settings, models, and working images remain in place.
+Use **Check for updates** in Settings or run `update.bat`. Close Mozarie before applying an update. Your settings, models, and working images remain in place. If an update fails after dependencies change, run `update.bat` again to resume the same release.
 
 ## Troubleshooting
 

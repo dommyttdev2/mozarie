@@ -17,6 +17,7 @@
 | SD-144 | 保存先選択後も未保存の一般設定入力を保持し、Windows絶対パスだけを保存先として受け付ける | `tests/test_import_picker_e2e.cjs`、`tests/test_settings_runtime.cjs` | OSの保存先ダイアログ、実UNCパス、選択取消時の表示 |
 | SV-073 | 保存応答が一つの版とtokenを返す | `tests.test_http_live_endpoints.LiveHttpEndpointTests.test_live_browser_save_render_streams_a_stable_image_response` | 遅延応答中の別タブ更新・削除、実ブラウザーのダウンロードと一時ファイル解放 |
 | SV-076 | 未作成の展開先で更新ZIPを展開できる | `tests.test_updater_extract_regression.UpdaterExtractRegressionTests.test_extract_archive_allows_a_missing_destination_directory` | 実リリースZIP、実ドライブの空き容量不足と更新前バックアップ |
+| SV-088 | 更新ZIPが旧updaterの必須ファイルを含み、依存関係・本体・ランタイム確認の途中失敗を同版で再試行できる | `tests.test_updater.UpdaterTests.test_git_archive_includes_every_file_required_by_the_installed_updater`、`tests.test_updater.UpdaterTests.test_dependency_update_apply_failure_keeps_a_retryable_pending_update`、`tests.test_updater.UpdaterTests.test_gpu_smoke_failure_retries_the_same_version` | 実Release ZIP、実GPUと実setup.bat |
 | SV-077 | source snapshot失敗時にコピーを残し削除・確定を開始しない | `tests/test_save_source_snapshot_contract.cjs` | File System Access APIでの実ファイル、画面の`source_restore_failed`案内 |
 | ED-128 | 候補編集操作が候補ビューのロック中に無効になる | `tests/test_import_picker_e2e.cjs` | 読み込み中・保存中・処理中の実画面表示と、完了後の操作再開 |
 | DI-237 | receiptとcleanup状態を永続化し、再試行で回収する | `tests.test_save_recovery.SaveRecoveryTests.test_workspace_receipt_is_durable`、`tests.test_save_recovery.SaveRecoveryTests.test_startup_compacts_only_cancelled_rows`、`tests.test_server.MozarieTests.test_browser_render_retries_after_journal_stage_failure_without_publishing_pending_token` | 応答喪失、タブ終了、再起動後の画面復帰とCMD記録 |
