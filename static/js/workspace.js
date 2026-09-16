@@ -499,7 +499,19 @@ async function flushWorkspaceDraft(imageId) {
     const chain = state.workspaceDraftChains.get(imageId);
     await (chain || Promise.resolve());
     const failure = state.workspaceMutationErrors.get(imageId);
-    if (failure) { state.workspaceMutationErrors.delete(imageId); throw failure; }
+    if (failure) {
+      const draft = state.drafts.get(imageId);
+      // A rejected debounced write leaves its bitmap and dirty layers in the
+      // draft. Requeue that retained edit instead of consuming the error and
+      // allowing the caller to move away with no durable retry.
+      if (draft?.dirtyLayers?.length) {
+        state.workspaceMutationErrors.delete(imageId);
+        await queueWorkspaceDraft(imageId, true);
+        continue;
+      }
+      state.workspaceMutationErrors.delete(imageId);
+      throw failure;
+    }
     if (!state.workspaceDraftTimers.has(imageId) && state.workspaceDraftChains.get(imageId) === chain) return;
   }
 }
@@ -520,6 +532,12 @@ async function flushAllWorkspaceMutations() {
     const failedImageId = [...state.workspaceMutationErrors.keys()][0];
     if (failedImageId) {
       const storedFailure = state.workspaceMutationErrors.get(failedImageId);
+      const draft = state.drafts.get(failedImageId);
+      if (draft?.dirtyLayers?.length) {
+        state.workspaceMutationErrors.delete(failedImageId);
+        await queueWorkspaceDraft(failedImageId, true);
+        continue;
+      }
       state.workspaceMutationErrors.delete(failedImageId);
       throw storedFailure;
     }

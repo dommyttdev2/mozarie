@@ -135,14 +135,34 @@ vm.runInNewContext("globalThis.workspaceTest={queueWorkspaceDraft,flushDraftSave
   assert.deepEqual(calls.at(-1), ["/api/workspace/manual/one", "POST"], "a delayed draft is persisted after its debounce");
 
   calls.length = 0;
+  state.workspaceDraftChains.clear(); state.workspaceDraftTimers.clear(); state.workspaceMutationErrors.clear();
+  state.drafts.set("one", { add: "", dirtyLayers: ["add"], dirtyRois: { add: [] }, hasEffectiveMask: false });
   rejectFirst = true;
   await context.workspaceTest.queueWorkspaceDraft("one");
-  assert.equal(calls.at(-1)[0], "/api/workspace/manual/one", "a delayed failure still attempts the manual write");
+  assert.equal(calls.at(-1)[0], "/api/workspace/manual/one/begin", "a delayed failure still begins the retained manual-layer write");
   assert.equal(JSON.stringify(statuses.at(-1)), JSON.stringify(["status.workspaceUnsaved", {}, "warning"]), "a delayed hand-drawn save failure visibly marks the retained edit as unsaved");
   assert.equal(state.workspaceUnsavedImageId, "one", "the unsaved warning belongs to the failed image");
-  await context.workspaceTest.queueWorkspaceDraft("one", true);
-  assert.equal(state.workspaceUnsavedImageId, undefined, "a successful retry clears the failed image marker");
-  assert.equal(clearedStatuses > 0, true, "a successful retry removes the stale unsaved warning");
+  await context.workspaceTest.flushWorkspaceDraft("one");
+  assert.deepEqual(calls.map(([url]) => url), [
+    "/api/workspace/manual/one/begin",
+    "/api/workspace/manual/one/begin",
+    "/api/workspace/manual/one/commit",
+  ], "an image flush retries retained dirty layers instead of consuming the failure and moving on");
+  assert.deepEqual(Array.from(state.drafts.get("one").dirtyLayers), [], "only the successful retry clears the retained dirty layers");
+  assert.equal(state.workspaceUnsavedImageId, undefined, "a successful flush retry clears the failed image marker");
+  assert.equal(clearedStatuses > 0, true, "a successful flush retry removes the stale unsaved warning");
+
+  calls.length = 0;
+  state.drafts.set("one", { add: "", dirtyLayers: ["add"], dirtyRois: { add: [] }, hasEffectiveMask: false });
+  rejectFirst = true;
+  await context.workspaceTest.queueWorkspaceDraft("one");
+  rejectFirst = true;
+  await assert.rejects(context.workspaceTest.flushWorkspaceDraft("one"), /write failed/, "a failed immediate retry keeps the image flush blocked");
+  assert.deepEqual(Array.from(state.drafts.get("one").dirtyLayers), ["add"], "a failed retry retains the layer for a later attempt");
+  rejectFirst = true;
+  await assert.rejects(context.workspaceTest.flushAllWorkspaceMutations(), /write failed/, "a failed navigation flush remains blocked instead of discarding the retained edit");
+  await context.workspaceTest.flushAllWorkspaceMutations();
+  assert.deepEqual(Array.from(state.drafts.get("one").dirtyLayers), [], "the next successful navigation flush retries and persists the retained layer");
 
   calls.length = 0;
   state.workspaceDraftTimers.set("one", setTimeout(() => {}, 5000));
