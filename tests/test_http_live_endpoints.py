@@ -19,7 +19,7 @@ import warnings
 from unittest.mock import patch
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 import mozarie.http as http_module
 import mozarie.state as state_module
@@ -226,6 +226,55 @@ class LiveHttpEndpointTests(unittest.TestCase):
         self.assertTrue(response["imported"])
         self.assertEqual(response["catalogId"], self.state.catalog_id)
         self.assertEqual(response["catalogGeneration"], self.state.catalog_generation)
+
+    def test_live_binary_import_accepts_large_png_text_from_browser_staging(self) -> None:
+        session_id = "cc1cfba8-f5d9-4cd5-a64c-5a3ce14ad015"
+        status, _headers, body = self.request(
+            "POST", "/api/import/start", {"sessionId": session_id}, authorized=True,
+        )
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+
+        metadata = PngImagePlugin.PngInfo()
+        metadata.add_text("workflow", "x" * 1_200_000, zip=True)
+        encoded = io.BytesIO()
+        Image.new("RGB", (13, 9), "white").save(encoded, format="PNG", pnginfo=metadata)
+        image_bytes = encoded.getvalue()
+        status, _headers, body = self.raw_request(
+            "POST", "/api/import/file", image_bytes, {
+                "Origin": self.origin,
+                "X-Mozarie-Token": self.state.session_token,
+                "Content-Type": "application/octet-stream",
+                "X-Mozarie-Name": "large-workflow.png",
+                "X-Mozarie-Relative-Path": "large-workflow.png",
+                "X-Mozarie-Client-Key": "large-workflow-live-import",
+                "X-Mozarie-Source-Kind": "browser-files",
+                "X-Mozarie-Source-Id": "cc1cfba8-f5d9-4cd5-a64c-5a3ce14ad016",
+                "X-Mozarie-Import-Intent": "add",
+                "X-Mozarie-Import-Session": session_id,
+                "X-Mozarie-File-Mtime": "0",
+                "X-Mozarie-File-Size": str(len(image_bytes)),
+            },
+        )
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        imported = json.loads(body)["imported"]
+        self.assertEqual(len(imported), 1)
+        image_id = imported[0]["imageId"]
+        self.assertEqual(self.state.images[image_id].path.read_bytes(), image_bytes)
+        self.assertIn(b"zTXt", image_bytes)
+
+        status, _headers, body = self.request("GET", "/api/images")
+        self.assertEqual(status, 200)
+        self.assertEqual([item["relativePath"] for item in json.loads(body)["images"]], ["large-workflow.png"])
+        status, headers, body = self.request("GET", f"/api/image/{image_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertEqual(body, image_bytes)
+
+        status, headers, body = self.request("GET", f"/api/thumbnail/{image_id}")
+        self.assertEqual(status, 200)
+        self.assertIn(headers["Content-Type"], {"image/jpeg", "image/png"})
+        with Image.open(io.BytesIO(body)) as image:
+            self.assertEqual(image.size, (13, 9))
 
     def test_live_manual_layer_transfer_persists_and_recovers_after_cancel_or_commit_failure(self) -> None:
         """Run the browser's begin/layer/commit protocol through a real server."""

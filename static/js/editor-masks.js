@@ -637,9 +637,28 @@ async function batchCandidateOperation(spec) {
   if (operation === "delete") {
     clearRoleCandidateDisplayMode(role);
     const ids = changed.map((item) => item.id);
-    setCandidateDisplayMode(ids, "off");
+    const manualRoles = [];
+    if (role === "apply" && state.manualMaskPresent) {
+      addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
+      state.manualMaskPresent = false; state.manualEnabled = true;
+      manualRoles.push("apply"); markDraftDirty("add");
+    }
+    if (role === "exclude") {
+      if (state.manualExclusionPresent) {
+        exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+        state.manualExclusionPresent = false; state.manualExclusionEnabled = true;
+        manualRoles.push("exclude"); markDraftDirty("exclusion");
+      }
+      if (state.manualExclusionErasePresent) {
+        exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
+        state.manualExclusionErasePresent = false; state.manualExclusionEraseEnabled = true;
+        manualRoles.push("excludeErase"); markDraftDirty("exclusionErase");
+      }
+    }
+    setCandidateDisplayMode([...ids, ...manualRoles.map((manualRole) => `manual:${manualRole}`)], "off");
     ids.forEach((id) => state.removedCandidateIds.add(id));
-    markMaskDirty(); setEditorUnreviewed(); if (ids.length) recordHistoryOperation({ kind: "removeCandidates", ids }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
+    if (!ids.length && !manualRoles.length) { renderCandidates(); return; }
+    markMaskDirty(); setEditorUnreviewed(); recordHistoryOperation({ kind: "clearCandidateRole", ids, manualRoles }); syncCurrentCandidateRecord(); refreshCurrentReviewAndMask(); requestMosaicPreview(); saveDraft(); renderCandidates(); render(); renderCatalogViews();
     return;
   }
   state.candidateBatchPending.add(imageId);
@@ -1028,6 +1047,14 @@ function cancelManualStroke() {
 
 function replayManualStroke(stroke, addContext = addCtx, exclusionContext = exclusionCtx, exclusionEraseContext = exclusionEraseCtx) {
   if (stroke.kind === "transform") return;
+  if (stroke.kind === "clearCandidateRole") {
+    stroke.ids.forEach((id) => state.removedCandidateIds.add(id));
+    for (const role of stroke.manualRoles) {
+      const target = role === "apply" ? addContext : (role === "exclude" ? exclusionContext : exclusionEraseContext);
+      target.clearRect(0, 0, target.canvas.width, target.canvas.height);
+    }
+    return;
+  }
   if (stroke.kind === "removeCandidates") { stroke.ids.forEach((id) => state.removedCandidateIds.add(id)); return; }
   if (stroke.kind === "restoreCandidates") { stroke.ids.forEach((id) => state.removedCandidateIds.delete(id)); return; }
   if (stroke.kind === "addCandidates") { stroke.ids.forEach((id) => state.removedCandidateIds.delete(id)); return; }

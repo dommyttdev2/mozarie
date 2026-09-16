@@ -2354,6 +2354,57 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual([(candidate.label_token, candidate.source) for candidate in state.candidates[image_id]], [("penis", "target")])
             self.assertFalse(old_path.exists())
 
+    def test_detection_resynchronizes_a_durable_candidate_revision_before_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            state.workspace_store.commit_candidate_state(image_id, 1, [], False, replace=True)
+            self.assertEqual(state._candidate_revision(image_id), 0)
+            pending_path = state.cache_dir / image_id / ".mozarie-pending-fresh.png"
+
+            def fresh_detection(*_args, **_kwargs):
+                pending_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(self._mask(16, 16)).save(pending_path)
+                return [Candidate("fresh", "penis", .9, pending_path, source="target")]
+
+            with patch.object(state, "_require_supported_gpu"), \
+                    patch.object(state, "_ensure_models", return_value=DetectionModels(target=object())), \
+                    patch.object(state, "_detect_image", side_effect=fresh_detection):
+                state.start_detection([image_id])
+                state.worker_thread.join(3)
+
+            self.assertFalse(state.worker_thread.is_alive())
+            self.assertEqual(state.job.state, "complete")
+            self.assertEqual(state._candidate_revision(image_id), 2)
+            self.assertEqual(state.workspace_store.candidate_revisions([image_id]), {image_id: 2})
+
+    def test_detection_reports_a_late_durable_revision_conflict_as_catalog_changed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            state.job = core_module.Job(started_at=time.time(), kind="detect", state="running", total=1, image_ids=(image_id,))
+            pending_path = state.cache_dir / image_id / ".mozarie-pending-fresh.png"
+
+            def fresh_detection(*_args, **_kwargs):
+                pending_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(self._mask(16, 16)).save(pending_path)
+                return [Candidate("fresh", "penis", .9, pending_path, source="target")]
+
+            with patch.object(state, "_ensure_models", return_value=DetectionModels(target=object())), \
+                    patch.object(state, "_detect_image", side_effect=fresh_detection), \
+                    patch.object(state.workspace_store, "prepare_detection_states", side_effect=ValueError("workspace candidate revision changed")):
+                state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE)
+
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.job.error_code, "catalog_changed")
+            self.assertFalse(pending_path.exists())
+
     def test_detect_persistence_failure_removes_final_new_masks(self):
         """A failed candidate transaction must not leave a visible orphan mask."""
         with tempfile.TemporaryDirectory() as directory:

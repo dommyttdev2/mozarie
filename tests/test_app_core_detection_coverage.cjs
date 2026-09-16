@@ -477,6 +477,10 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   assert.equal(batchButton.disabled, true, "false manual-layer presence disables the empty exclusion batch control");
   assert.equal(displayButton.disabled, true, "false manual-layer presence disables the empty exclusion display control");
   assert.equal(effectiveButton.disabled, true, "false manual-layer presence disables the empty exclusion effective-mask control");
+  Object.defineProperty(coreState, "candidates", { configurable: true, get: () => [{ id: "removed", role: "exclude", enabled: true }] });
+  coreState.removedCandidateIds = new Set(["removed"]);
+  test.updateCandidateBatchButtons(true, false, absentManualLayers);
+  assert.equal(batchButton.disabled, true, "a role containing only removed candidates keeps its batch control disabled");
 
   const dialog = element("#errorDialog");
   const originalQuery = document.querySelector;

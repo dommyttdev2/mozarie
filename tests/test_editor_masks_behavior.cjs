@@ -542,12 +542,40 @@ assert.equal(state.manualExclusionEraseEnabled, true);
 
   resetCandidateState();
   context.confirmationRequired = (key) => key === "candidateRoleDelete";
+  test.resetHistoryToCurrentManualMask();
   test.setCandidateDisplayMode(["exclude"], "normal");
   await test.batchCandidateOperation("exclude:delete");
   assert.equal(state.removedCandidateIds.has("exclude"), true, "a confirmed role deletion is local and undoable");
+  assert.deepEqual(
+    [state.manualExclusionPresent, state.manualExclusionErasePresent, exclusionCtx.pixels, exclusionEraseCtx.pixels],
+    [false, false, false, false],
+    "exclude role deletion clears its detected, manual exclusion, and exclusion-erase rows together",
+  );
+  assert.equal(state.history.at(-1).kind, "clearCandidateRole", "one role deletion creates one undo operation");
   assert.deepEqual([...state.blinkCandidateIds], [], "role deletion clears display selections for its removed candidates");
   assert.deepEqual([...state.blinkModes], [], "role deletion clears display modes for its removed candidates");
   assert.equal(state.blinkTimer, null, "role deletion stops a now-empty display timer");
+  test.rebuildManualMaskFromHistory(0);
+  assert.deepEqual(
+    [state.removedCandidateIds.has("exclude"), state.manualExclusionPresent, state.manualExclusionErasePresent],
+    [false, true, true],
+    "undo restores every exclusion row removed by the batch action",
+  );
+  test.rebuildManualMaskFromHistory(1);
+  assert.deepEqual(
+    [state.removedCandidateIds.has("exclude"), state.manualExclusionPresent, state.manualExclusionErasePresent],
+    [true, false, false],
+    "redo removes every exclusion row again",
+  );
+
+  resetCandidateState();
+  test.resetHistoryToCurrentManualMask();
+  await test.batchCandidateOperation("apply:delete");
+  assert.deepEqual(
+    [state.removedCandidateIds.has("apply"), state.manualMaskPresent, addCtx.pixels],
+    [true, false, false],
+    "apply role deletion clears both the detected candidate and manual mosaic",
+  );
   resetCandidateState();
   context.api = async () => { throw new Error("batch unavailable"); };
   await test.batchCandidateOperation("apply:enable");
