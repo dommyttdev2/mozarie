@@ -2354,6 +2354,79 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual([(candidate.label_token, candidate.source) for candidate in state.candidates[image_id]], [("penis", "target")])
             self.assertFalse(old_path.exists())
 
+    def test_detection_resynchronizes_a_durable_candidate_revision_before_start(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            state.workspace_store.commit_candidate_state(image_id, 1, [], False, replace=True)
+            self.assertEqual(state._candidate_revision(image_id), 0)
+            pending_path = state.cache_dir / image_id / ".mozarie-pending-fresh.png"
+
+            def fresh_detection(*_args, **_kwargs):
+                pending_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(self._mask(16, 16)).save(pending_path)
+                return [Candidate("fresh", "penis", .9, pending_path, source="target")]
+
+            with patch.object(state, "_require_supported_gpu"), \
+                    patch.object(state, "_ensure_models", return_value=DetectionModels(target=object())), \
+                    patch.object(state, "_detect_image", side_effect=fresh_detection):
+                state.start_detection([image_id])
+                state.worker_thread.join(3)
+
+            self.assertFalse(state.worker_thread.is_alive())
+            self.assertEqual(state.job.state, "complete")
+            self.assertEqual(state._candidate_revision(image_id), 2)
+            self.assertEqual(state.workspace_store.candidate_revisions([image_id]), {image_id: 2})
+
+    def test_detection_reports_a_late_durable_revision_conflict_as_catalog_changed(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            state.job = core_module.Job(started_at=time.time(), kind="detect", state="running", total=1, image_ids=(image_id,))
+            pending_path = state.cache_dir / image_id / ".mozarie-pending-fresh.png"
+
+            def fresh_detection(*_args, **_kwargs):
+                pending_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(self._mask(16, 16)).save(pending_path)
+                return [Candidate("fresh", "penis", .9, pending_path, source="target")]
+
+            with patch.object(state, "_ensure_models", return_value=DetectionModels(target=object())), \
+                    patch.object(state, "_detect_image", side_effect=fresh_detection), \
+                    patch.object(state.workspace_store, "prepare_detection_states", side_effect=ValueError("workspace candidate revision changed")):
+                state._detect_worker([record], DEFAULT_DETECTION_CONFIDENCE)
+
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(state.job.error_code, "catalog_changed")
+            self.assertFalse(pending_path.exists())
+
+    def test_detection_resync_failure_keeps_the_existing_candidate_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "existing.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            existing = Candidate("existing", "penis", .8, mask_path)
+            state.candidates[image_id] = [existing]
+            state.workspace_store.commit_candidate_state(image_id, 1, [], False, replace=True)
+
+            with patch.object(state, "_require_supported_gpu"), \
+                    patch.object(state.workspace_store, "hydrate_candidates_bulk", side_effect=ValueError("broken durable candidate")):
+                with self.assertRaisesRegex(ValueError, "broken durable candidate"):
+                    state.start_detection([image_id])
+
+            self.assertEqual(state._candidate_revision(image_id), 0)
+            self.assertEqual(state.candidates[image_id], [existing])
+            self.assertTrue(mask_path.is_file())
+
     def test_detect_persistence_failure_removes_final_new_masks(self):
         """A failed candidate transaction must not leave a visible orphan mask."""
         with tempfile.TemporaryDirectory() as directory:
@@ -4965,12 +5038,13 @@ class MozarieTests(unittest.TestCase):
             state = self.new_state()
             record = state.image_for_id(state.set_root(directory)[0]["id"])
             state.settings["models"]["provider"] = "cpu"
-            with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], 7)), patch.object(state, "_start_job") as start:
+            catalog_generation = state.catalog_generation
+            with patch.object(state, "_records_for_ids_with_catalog", return_value=([record], catalog_generation)), patch.object(state, "_start_job") as start:
                 state.start_detection([record.image_id], 0.65)
             self.assertEqual(start.call_args.args[0], "detect")
             self.assertEqual(start.call_args.args[3:5], (0.65, 2))
             self.assertEqual(start.call_args.args[5], {"penis", "pussy"})
-            self.assertEqual(start.call_args.kwargs["expected_catalog_generation"], 7)
+            self.assertEqual(start.call_args.kwargs["expected_catalog_generation"], catalog_generation)
             for mode in ("standard", "high_precision"):
                 state.settings["detection"]["mode"] = mode
                 seen_modes: list[str] = []
@@ -8449,7 +8523,7 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
         state = self.new_state()
         state.settings["detection"]["targets"] = ["penis"]
         with patch.object(state, "_require_supported_gpu"), \
-                patch.object(state, "_records_for_ids_with_catalog", return_value=([], 2)), \
+                patch.object(state, "_records_for_ids_with_catalog", return_value=([], state.catalog_generation)), \
                 patch.object(state, "_start_job") as start:
             state.start_detection([], .6, 3)
         self.assertEqual(start.call_args.args[-2], {"penis"})

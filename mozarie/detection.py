@@ -144,8 +144,16 @@ class DetectionMixin:
         with self.inference_lock:
             self._require_supported_gpu()
             records, catalog_generation = self._records_for_ids_with_catalog(image_ids)
-            for record in records:
-                self._assert_image_editable(record.image_id)
+            locks = [(record.image_id, self.image_io_lock(record.image_id)) for record in records]
+            with ExitStack() as stack:
+                for _image_id, image_lock in sorted(locks):
+                    stack.enter_context(image_lock)
+                with self.lock:
+                    if self.catalog_generation != catalog_generation or any(self.images.get(record.image_id) is not record for record in records):
+                        raise ClientError("画像一覧が更新されました。もう一度実行してください。", "catalog_changed")
+                    self._synchronize_workspace_candidate_revisions(records)
+                    for record in records:
+                        self._assert_image_editable(record.image_id)
             targets = _read_target_classes(target_classes or set(self.settings["detection"]["targets"]))
             # Every successfully published result belongs to one undo group.
             # Candidates remain staged until every target is ready, then the
@@ -433,9 +441,14 @@ class DetectionMixin:
                                 or any(self.images.get(record.image_id) is not record for record in records)
                                 or any(self._candidate_revision(record.image_id) != expected_revisions[record.image_id] for record in records)):
                             raise ClientError("フォルダを再読み込みしたため、検出結果を破棄しました。", "catalog_changed")
-                        pending = self.workspace_store.prepare_detection_states(
-                            states, history_group=getattr(self, "_detection_history_group", None),
-                        )
+                        try:
+                            pending = self.workspace_store.prepare_detection_states(
+                                states, history_group=getattr(self, "_detection_history_group", None),
+                            )
+                        except ValueError as exc:
+                            if str(exc) == "workspace candidate revision changed":
+                                raise ClientError("候補が更新されたため、検出結果を破棄しました。もう一度実行してください。", "catalog_changed") from exc
+                            raise
                         # SQLite and the process cache become visible under the
                         # same catalogue lock. A catalog transition cannot
                         # interleave this commit and the in-memory publish.

@@ -113,6 +113,40 @@ class CatalogMixin:
             self.candidates[image_id] = candidates
             self.candidate_revisions[image_id] = revision
 
+    def _synchronize_workspace_candidate_revisions(self, records: list[ImageRecord]) -> None:
+        """Repair a stale process snapshot from the durable workspace before a job starts.
+
+        The caller holds the affected image locks and ``self.lock``. Normal
+        mutations publish SQLite and memory together, so this path is used only
+        after an interrupted publication or when reopening older workspace
+        state.
+        """
+        if not self.workspace_id or not records:
+            return
+        image_ids = [record.image_id for record in records]
+        durable = self.workspace_store.candidate_revisions(image_ids)
+        stale_ids = [
+            image_id for image_id in image_ids
+            if image_id in durable and self._candidate_revision(image_id) != durable[image_id]
+        ]
+        if not stale_ids:
+            return
+        hydrated = self.workspace_store.hydrate_candidates_bulk(
+            stale_ids, self.cache_dir, self._candidate_from_workspace,
+        )
+        # Validate every durable row before discarding the still-usable live
+        # cache. A broken workspace row must not damage the current view.
+        for image_id in stale_ids:
+            shutil.rmtree(self.cache_dir / image_id, ignore_errors=True)
+        for image_id in stale_ids:
+            revision, candidates = hydrated[image_id]
+            self.candidates[image_id] = candidates
+            self.candidate_revisions[image_id] = revision
+        LOGGER.warning(
+            "候補状態を保存領域から再同期: 対象=%d件",
+            len(stale_ids),
+        )
+
     def _commit_candidate_snapshot(self, image_id: str, candidates: list[Candidate], *, replace: bool, history_group: str | None = None) -> int:
         """Durably commit a candidate revision, then publish it while the caller holds ``self.lock``."""
         self._assert_request_catalog_expectation()

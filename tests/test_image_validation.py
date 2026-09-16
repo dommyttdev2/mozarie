@@ -114,3 +114,12 @@ class InputImageValidationTests(unittest.TestCase):
             path = Path(directory) / "metadata.png"
             Image.new("RGB", (11, 7), "white").save(path, pnginfo=metadata)
             self.assertEqual(inspect_import_image(path, ".png"), (11, 7))
+
+    def test_browser_staged_png_uses_the_logical_suffix_for_large_text_metadata(self):
+        """A browser upload keeps its PNG format after staging under a .tmp name."""
+        metadata = PngImagePlugin.PngInfo()
+        metadata.add_text("workflow", "x" * 1_200_000, zip=True)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "browser.upload.tmp"
+            Image.new("RGB", (11, 7), "white").save(path, format="PNG", pnginfo=metadata)
+            self.assertEqual(inspect_import_image(path, ".png"), (11, 7))

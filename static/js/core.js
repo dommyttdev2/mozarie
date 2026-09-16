@@ -864,16 +864,16 @@ function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state
     }
   } else for (const button of document.querySelectorAll("[data-candidate-padding-batch]")) {
     const role = button.dataset.candidatePaddingBatch;
-    button.disabled = !hasImage || !state.candidates.some((candidate) => candidate.role === role);
+    button.disabled = !hasImage || !state.candidates.some((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id));
   }
   const manualPresence = presence || manualLayerPresence();
   if (!mutationLocked) for (const button of document.querySelectorAll("[data-candidate-batch]")) {
     const [role, operation] = button.dataset.candidateBatch.split(":");
     const hasManual = role === "apply" ? state.manualMaskPresent : manualPresence.hasManualExclude || manualPresence.hasManualExclusionErase;
-    const hasRoleCandidate = hasImage && (state.candidates.some((candidate) => candidate.role === role) || hasManual);
+    const hasRoleCandidate = hasImage && (state.candidates.some((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id)) || hasManual);
     button.disabled = !hasRoleCandidate;
     if (operation === "toggle") {
-      const enabled = state.candidates.filter((candidate) => candidate.role === role).map((candidate) => candidate.enabled);
+      const enabled = state.candidates.filter((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.enabled);
       if (role === "apply" ? state.manualMaskPresent : manualPresence.hasManualExclude) enabled.push(role === "apply" ? state.manualEnabled : state.manualExclusionEnabled);
       if (role === "exclude" && manualPresence.hasManualExclusionErase) enabled.push(state.manualExclusionEraseEnabled);
       const active = enabled.length > 0 && enabled.every(Boolean);

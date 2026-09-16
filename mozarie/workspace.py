@@ -1814,6 +1814,21 @@ class WorkspaceStore:
                     candidates.setdefault(image_id, []).append(candidate_factory(self._candidate_row(row), cache_dir / image_id / f"{row['candidate_id']}.png"))
         return {image_id: (revision, candidates.get(image_id, [])) for image_id, revision in images.items()}
 
+    def candidate_revisions(self, image_ids: list[str]) -> dict[str, int]:
+        """Read the durable candidate revision without loading candidate BLOBs."""
+        if not image_ids:
+            return {}
+        result: dict[str, int] = {}
+        with self._connect() as db:
+            for chunk in _chunks(db, image_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                for row in db.execute(
+                    f"SELECT image_id,candidate_revision FROM images WHERE image_id IN ({placeholders})",
+                    chunk,
+                ):
+                    result[str(row["image_id"])] = int(row["candidate_revision"])
+        return result
+
     def valid_candidate_ids(self, image_id: str) -> set[str]:
         with self._connect() as db:
             rows = db.execute("""SELECT candidate_id FROM candidates

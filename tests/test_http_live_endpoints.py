@@ -19,11 +19,12 @@ import warnings
 from unittest.mock import patch
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 import mozarie.http as http_module
 import mozarie.state as state_module
-from mozarie.core import ClientError
+from mozarie.core import Candidate, ClientError, Job
+from mozarie.runtime_types import DetectionModels
 from mozarie.http import MosaicHandler
 from mozarie.state import StudioState
 
@@ -227,6 +228,55 @@ class LiveHttpEndpointTests(unittest.TestCase):
         self.assertEqual(response["catalogId"], self.state.catalog_id)
         self.assertEqual(response["catalogGeneration"], self.state.catalog_generation)
 
+    def test_live_binary_import_accepts_large_png_text_from_browser_staging(self) -> None:
+        session_id = "cc1cfba8-f5d9-4cd5-a64c-5a3ce14ad015"
+        status, _headers, body = self.request(
+            "POST", "/api/import/start", {"sessionId": session_id}, authorized=True,
+        )
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+
+        metadata = PngImagePlugin.PngInfo()
+        metadata.add_text("workflow", "x" * 1_200_000, zip=True)
+        encoded = io.BytesIO()
+        Image.new("RGB", (13, 9), "white").save(encoded, format="PNG", pnginfo=metadata)
+        image_bytes = encoded.getvalue()
+        status, _headers, body = self.raw_request(
+            "POST", "/api/import/file", image_bytes, {
+                "Origin": self.origin,
+                "X-Mozarie-Token": self.state.session_token,
+                "Content-Type": "application/octet-stream",
+                "X-Mozarie-Name": "large-workflow.png",
+                "X-Mozarie-Relative-Path": "large-workflow.png",
+                "X-Mozarie-Client-Key": "large-workflow-live-import",
+                "X-Mozarie-Source-Kind": "browser-files",
+                "X-Mozarie-Source-Id": "cc1cfba8-f5d9-4cd5-a64c-5a3ce14ad016",
+                "X-Mozarie-Import-Intent": "add",
+                "X-Mozarie-Import-Session": session_id,
+                "X-Mozarie-File-Mtime": "0",
+                "X-Mozarie-File-Size": str(len(image_bytes)),
+            },
+        )
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        imported = json.loads(body)["imported"]
+        self.assertEqual(len(imported), 1)
+        image_id = imported[0]["imageId"]
+        self.assertEqual(self.state.images[image_id].path.read_bytes(), image_bytes)
+        self.assertIn(b"zTXt", image_bytes)
+
+        status, _headers, body = self.request("GET", "/api/images")
+        self.assertEqual(status, 200)
+        self.assertEqual([item["relativePath"] for item in json.loads(body)["images"]], ["large-workflow.png"])
+        status, headers, body = self.request("GET", f"/api/image/{image_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "image/png")
+        self.assertEqual(body, image_bytes)
+
+        status, headers, body = self.request("GET", f"/api/thumbnail/{image_id}")
+        self.assertEqual(status, 200)
+        self.assertIn(headers["Content-Type"], {"image/jpeg", "image/png"})
+        with Image.open(io.BytesIO(body)) as image:
+            self.assertEqual(image.size, (13, 9))
+
     def test_live_manual_layer_transfer_persists_and_recovers_after_cancel_or_commit_failure(self) -> None:
         """Run the browser's begin/layer/commit protocol through a real server."""
         status, _headers, body = self.request("POST", "/api/projects", {"name": "Manual transfer"}, authorized=True)
@@ -417,6 +467,111 @@ class LiveHttpEndpointTests(unittest.TestCase):
         self.assertTrue(headers.get("X-Mozarie-Save-Token"))
         with Image.open(io.BytesIO(body)) as rendered:
             self.assertEqual((rendered.mode, rendered.size), ("RGB", (12, 8)))
+
+    def test_live_detect_edit_and_copy_save_preserves_png_metadata(self) -> None:
+        metadata = PngImagePlugin.PngInfo()
+        metadata.add_text("workflow", "w" * 1_200_000, zip=True)
+        source = Image.new("RGB", (12, 8), "white")
+        for y in range(8):
+            for x in range(12):
+                source.putpixel((x, y), (x * 20, y * 25, (x + y) * 10))
+        source.save(self.source_dir / "source.png", pnginfo=metadata)
+        output_dir = Path(self._temporary_directory.name) / "saved"
+        output_dir.mkdir()
+        self.state.settings["saving"]["default_output_directory"] = str(output_dir.resolve())
+
+        status, _headers, body = self.request("POST", "/api/projects", {"name": "Detect edit save"}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        project_id = json.loads(body)["project"]["id"]
+        status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        image_id = json.loads(body)["images"][0]["id"]
+        record = self.state.image_for_id(image_id)
+        self.state.job = Job(started_at=time.time(), kind="detect", state="running", total=1, image_ids=(image_id,))
+        pending_path = self.state.cache_dir / image_id / ".mozarie-pending-detected.png"
+
+        def detect(*_args, **_kwargs):
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pixels = Image.new("L", (12, 8), 0)
+            for y in range(2, 7):
+                for x in range(3, 10):
+                    pixels.putpixel((x, y), 255)
+            pixels.save(pending_path)
+            return [Candidate("detected", "penis", .9, pending_path)]
+
+        with patch.object(self.state, "_ensure_models", return_value=DetectionModels(target=object())), \
+                patch.object(self.state, "_detect_image", side_effect=detect):
+            self.state._detect_worker([record], .5, 1)
+        self.assertEqual(self.state.job.state, "complete")
+        revision = self.state._candidate_revision(image_id)
+        self.assertEqual(revision, 1)
+
+        manual = io.BytesIO()
+        manual_mask = Image.new("L", (12, 8), 0)
+        manual_mask.putpixel((1, 1), 255)
+        manual_mask.save(manual, format="PNG")
+        manual_session = "00000000-0000-4000-8000-000000000022"
+        status, _headers, body = self.request("POST", f"/api/workspace/manual/{image_id}/begin", {
+            "sessionId": manual_session, "dirtyLayers": ["add"],
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        status, _headers, body = self.raw_request(
+            "POST", f"/api/workspace/manual/{image_id}/layer/{manual_session}/add", manual.getvalue(),
+            {"Origin": self.origin, "X-Mozarie-Token": self.state.session_token, "Content-Type": "application/octet-stream"},
+        )
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        status, _headers, body = self.request("POST", f"/api/workspace/manual/{image_id}/commit", {
+            "sessionId": manual_session, "emptyLayers": [], "manualEnabled": True,
+            "manualExclusionEnabled": True, "manualExclusionEraseEnabled": True,
+            "manualExclusionForced": True, "removedCandidateIds": [],
+            "candidateRevision": revision, "hasEffectiveMask": True,
+            "dirtyRois": {"add": {"left": 0, "top": 0, "right": 3, "bottom": 3}},
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        self.assertTrue(self.state.manual_workspace(image_id)["add"].startswith("data:image/png;base64,"))
+
+        client_token = "00000000-0000-4000-8000-000000000021"
+        save_options = {
+            "imageId": image_id, "candidateRevision": revision, "clientSaveToken": client_token,
+            "copyToDefault": True, "suffix": "_saved", "format": "original", "keepMetadata": True,
+        }
+        status, _headers, body = self.request("POST", "/api/save/reserve", save_options, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        output_path = Path(json.loads(body)["outputPath"])
+        status, headers, body = self.request("POST", "/api/save/render", {
+            **save_options, "divisor": 4, "draft": None,
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        self.assertEqual(body, b"")
+        save_token = headers["X-Mozarie-Save-Token"]
+        status, _headers, body = self.request("POST", "/api/save/commit", {
+            "imageId": image_id, "candidateRevision": revision,
+            "saveToken": save_token, "sourceAction": "keep",
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        self.assertTrue(json.loads(body)["cleared"])
+        self.assertTrue(output_path.is_file())
+        with patch.object(PngImagePlugin, "MAX_TEXT_CHUNK", 2_000_000), Image.open(output_path) as saved:
+            self.assertEqual(saved.info["workflow"], "w" * 1_200_000)
+            self.assertNotEqual(saved.getpixel((5, 4)), source.getpixel((5, 4)), "the detected candidate changes its covered pixel")
+            self.assertNotEqual(saved.getpixel((1, 1)), source.getpixel((1, 1)), "the uploaded manual mask changes its manual-only pixel")
+            self.assertEqual(saved.getpixel((11, 0)), source.getpixel((11, 0)), "pixels outside both masks remain unchanged")
+        status, _headers, body = self.request("POST", "/api/save/ack", {"saveToken": save_token}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        self.assertTrue(json.loads(body)["acknowledged"])
+        self.assertEqual((self.source_dir / "source.png").exists(), True)
+
+        reopened = StudioState(self.state.cache_dir, self.state.session_base_dir)
+        try:
+            reopened.open_project(project_id)
+            reopened_candidates = reopened.candidates.get(image_id, [])
+            self.assertEqual([candidate.candidate_id for candidate in reopened_candidates], ["detected"])
+            self.assertEqual(reopened._candidate_revision(image_id), revision)
+            reopened_manual = reopened.manual_workspace(image_id)
+            self.assertIsNotNone(reopened_manual)
+            self.assertTrue(reopened_manual["add"].startswith("data:image/png;base64,"))
+        finally:
+            reopened.shutdown()
 
     def test_flag_write_keeps_catalogue_state_consistent_across_a_sqlite_wait(self) -> None:
         _status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)

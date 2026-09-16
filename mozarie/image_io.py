@@ -289,11 +289,11 @@ def _png_has_text_chunks(source: BinaryIO) -> bool:
 
 
 @contextmanager
-def open_image_without_png_text(path: Path, raw: bytes | None = None):
+def open_image_without_png_text(path: Path, raw: bytes | None = None, *, expected_suffix: str | None = None):
     """Open PNG pixels without handing optional text chunks to Pillow."""
     temporary_path: Path | None = None
     try:
-        if path.suffix.lower() == ".png":
+        if (expected_suffix or path.suffix).lower() == ".png":
             with (io.BytesIO(raw) if raw is not None else path.open("rb")) as source:
                 strip_text = _png_has_text_chunks(source)
                 if strip_text:
@@ -313,12 +313,12 @@ def open_image_without_png_text(path: Path, raw: bytes | None = None):
 def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
     """Validate an input image completely before publishing it to the catalogue."""
     try:
-        with open_image_without_png_text(path) as image:
+        with open_image_without_png_text(path, expected_suffix=expected_suffix) as image:
             _assert_image_suffix_matches_format(expected_suffix, image.format)
             size = oriented_image_size(image)
-        with open_image_without_png_text(path) as image:
+        with open_image_without_png_text(path, expected_suffix=expected_suffix) as image:
             image.verify()
-        with open_image_without_png_text(path) as image:
+        with open_image_without_png_text(path, expected_suffix=expected_suffix) as image:
             _assert_image_suffix_matches_format(expected_suffix, image.format)
             image.load()
             if oriented_image_size(image) != size:

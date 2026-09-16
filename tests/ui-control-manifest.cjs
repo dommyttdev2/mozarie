@@ -2,11 +2,11 @@
 // Dynamic template controls deliberately use data-* selectors and are exercised
 // by the candidate, gallery, overview, model, and context-menu E2E cases.
 const ids = `
-projectButton projectClose projectNew projectName projectOpenList projectSourceAdd projectSourceRelink projectResume projectComplete projectCloseWorkspace projectListClose projectNameInput projectNameCancel sourceMismatchClear sourceMismatchCancel sameSourceOpen sameSourceSeparate sameSourceCancel projectDeleteCancel projectDeleteConfirm nativeRelinkPath nativeRelinkCancel nativeRelinkConfirm pickFolder detectAllButton saveAllButton folderPath loadFolderButton pickImages pickFolderFiles settingsButton updateToast batchMoreButton clearAllMasksButton clearCatalogButton galleryFilterButton overviewButton collapseGalleryButton
+projectButton projectClose projectNew projectName projectOpenList projectSourceAdd projectSourceRelink projectResume projectComplete projectCloseWorkspace projectListClose projectNameInput projectNameCancel projectNameConfirm sourceMismatchClear sourceMismatchCancel sourceMismatchConfirm sameSourceOpen sameSourceSeparate sameSourceCancel projectDeleteCancel projectDeleteConfirm nativeRelinkPath nativeRelinkCancel nativeRelinkConfirm pickFolder detectAllButton saveAllButton folderPath loadFolderButton pickImages pickFolderFiles settingsButton updateToast batchMoreButton clearAllMasksButton clearCatalogButton galleryFilterButton overviewButton collapseGalleryButton
 brushTool bucketTool mosaicEraserTool eraserTool excludeBucketTool excludeEraserTool boundaryTool rectangleTool polygonTool boundaryBrushTool singleViewButton compareViewButton fitButton flipHorizontalButton flipVerticalButton undoButton redoButton mosaicPreviewButton brushSize mosaicHelpButton divisor bucketTolerance bucketToleranceDecrease bucketToleranceIncrease bucketToleranceClose
 previousImageButton nextImageButton removeAndNextButton hideAndNextButton reviewAndNextButton boundaryDetectButton boundaryCancelButton collapseInspectorButton detectCurrentButton saveButton downloadCurrentMosaicMask downloadCurrentExcludeMask clearCurrentMasksButton removeCurrentImageButton detectTargetPenis detectTargetPussy confidence
 candidatePaddingDecrease candidatePaddingInput candidatePaddingIncrease candidatePaddingReset candidatePaddingConfirm
-closeOverviewButton batchModeButton overviewFilterButton overviewQuery overviewFolder selectionActionsButton selectionClearButton toggleReviewMenuItem copyImagePathMenuItem removeImageMenuItem confirmNeverShow confirmAccept errorDialogClose
+closeOverviewButton batchModeButton overviewFilterButton overviewQuery overviewFolder selectionActionsButton selectionClearButton toggleReviewMenuItem copyImagePathMenuItem removeImageMenuItem confirmNeverShow confirmCancel confirmAccept errorDialogClose
 sourceDeleteResume
 detectParallelism dialogTargetPenis dialogTargetPussy detectConfidenceRange detectConfidenceNumber detectCandidatePadding detectExcludeCandidatePadding detectFluidColorFillEnabled detectFluidColorFillTolerance detectCancelButton detectStartButton
 settingsCloseButton settingsTabGeneral settingsTabModels settingsTabDisplay settingsTabShortcuts settingsTabConfirm settingsTabInfo settingsLanguage settingsPort settingsDefaultOutputDirectory settingsChooseOutputDirectory settingsImportParallelism settingsSaveParallelism settingsOpenBrowser settingsProvider settingsGpuDevice settingsTargetModel settingsNtd11Toggle settingsNtd11Model settingsSensitiveToggle settingsSensitiveModel settingsPrecisionToggle settingsSamType settingsSamModel settingsHandToggle settingsHandModel settingsHandSegmentationToggle settingsHandSegmentationModel settingsFluidToggle settingsApplyColor settingsExcludeColor settingsOpacity settingsMosaicPreview settingsExcludeForcedDefault settingsShortcutsEnabled confirmClearMasks confirmClearCatalog confirmRemoveImage confirmCandidateDelete confirmCandidateRoleDelete confirmOverwriteSource confirmDeleteSourceAfterCopy checkUpdateButton settingsResetButton settingsSaveButton
@@ -63,8 +63,10 @@ const exemptReasons = {
   projectSort: "covered by the dedicated project UI runtime suite",
   projectNameInput: "covered by the dedicated project UI runtime suite",
   projectNameCancel: "covered by the dedicated project UI runtime suite",
+  projectNameConfirm: "covered by the dedicated project UI runtime suite",
   sourceMismatchClear: "covered by the dedicated project UI runtime suite",
   sourceMismatchCancel: "covered by the dedicated project UI runtime suite",
+  sourceMismatchConfirm: "covered by the dedicated project UI runtime suite",
   sameSourceOpen: "covered by the dedicated project UI runtime suite",
   sameSourceSeparate: "covered by the dedicated project UI runtime suite",
   sameSourceCancel: "covered by the dedicated project UI runtime suite",
@@ -78,6 +80,7 @@ const exemptReasons = {
   candidatePaddingReset: "covered by the real-browser candidate padding scenario",
   candidatePaddingConfirm: "covered by the real-browser candidate padding scenario",
   bucketToleranceClose: "covered by the dedicated real-browser fill-tolerance scenario",
+  confirmCancel: "covered by confirmation cancellation scenarios in the browser interaction suite",
 };
 
 function interactionFor(id) {
@@ -146,6 +149,28 @@ const dynamicControls = [
   ].map(([selector, action, resultKind, scenario, fixture, assertionId, expected]) => ({ selector, action, resultKind, scenario, fixture, assertionId, predicateId: assertionId, expected })),
 ];
 
+// Static controls without ids are separate operation variants. Keep every
+// concrete value here so a newly added checkbox or button cannot be hidden
+// behind one broad data-* selector in the interaction ledger.
+const anonymousStaticControls = [
+  ...["name", "created", "updated"].map((value) => `[data-project-sort="${value}"]`),
+  ...["masked", "unmasked", "reviewed", "unreviewed", "hidden"].map((value) => `[data-gallery-filter="${value}"]`),
+  ...["apply:toggle", "apply:delete", "exclude:toggle", "exclude:delete"].map((value) => `[data-candidate-batch="${value}"]`),
+  ...["apply", "exclude"].flatMap((value) => [
+    `[data-candidate-display-toggle="${value}"]`,
+    `[data-candidate-effective-toggle="${value}"]`,
+    `[data-candidate-padding-batch="${value}"]`,
+  ]),
+  ...["masked", "unmasked", "reviewed", "unreviewed", "hidden"].map((value) => `[data-overview-filter="${value}"]`),
+  ...["remove", "hide", "show", "clear", "detect", "reviewed", "unreviewed"].map((value) => `[data-selection-action="${value}"]`),
+  ".gallery-item",
+  ".overview-item",
+  ...["all", "target", "ntd11", "sensitive", "sam", "hand_detection", "hand_segmentation"].map((value) => `[data-model-download="${value}"]`),
+  ...["target", "ntd11", "sensitive", "precision", "hand", "handSegmentation", "fluid"].map((value) => `[data-model-help="${value}"]`),
+  ...["target_segmentation", "ntd11", "sensitive", "sam_checkpoint", "hand_detection", "hand_segmentation"].map((value) => `[data-model-picker="${value}"]`),
+  ...["vit_b", "vit_l", "vit_h"].map((value) => `input[name="settingsSamVariant"][value="${value}"]`),
+];
+
 // Dynamic controls cannot be discovered from the static id sweep.  These
 // markers tie each manifest contract to the DOM template or generator that
 // creates it, so a removed operation fails this compact contract check.
@@ -172,6 +197,7 @@ const scenarioContracts = Object.fromEntries([...new Set([...controls, ...dynami
 
 module.exports = {
   controls,
+  anonymousStaticControls,
   dynamicControls,
   dynamicSurfaceContracts,
   scenarioContracts,
