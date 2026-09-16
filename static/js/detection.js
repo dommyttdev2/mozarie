@@ -121,7 +121,7 @@ function beginDetectionStart(imageIds) {
   state.detectionStarting = true;
   state.detectionTargetIds = [...imageIds];
   state.detectCancelRequested = false;
-  state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, current: "", imageIds: [...imageIds], completedImageIds: [] };
+  state.job = { kind: "detect", state: "running", total: imageIds.length, completed: 0, processed: 0, current: "", imageIds: [...imageIds], completedImageIds: [] };
   showProcessing(state.job);
   updateProgress(state.job);
 }

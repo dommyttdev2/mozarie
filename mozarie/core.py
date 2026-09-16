@@ -264,10 +264,17 @@ class Job:
     state: str = "idle"
     total: int = 0
     completed: int = 0
+    # Detection keeps candidate results staged until one atomic publication.
+    # ``completed`` and ``completed_image_ids`` therefore mean published,
+    # while ``processed`` tells the UI how much inference has actually run.
+    processed: int = 0
     current: str = ""
     error: str = ""
     error_code: str = ""
     cancel_requested: bool = False
+    # Detection has one atomic candidate publication. Once it starts, its
+    # result cannot be cancelled without leaving durable candidates behind.
+    publication_started: bool = False
     params: dict[str, Any] = field(default_factory=dict)
     started_at: float | None = None
     ended_at: float | None = None
@@ -289,6 +296,7 @@ class Job:
             "state": self.state,
             "total": self.total,
             "completed": self.completed,
+            "processed": self.processed,
             "current": self.current,
             "errorCode": self.error_code,
             "params": public_error_params(self.error_code, self.params),

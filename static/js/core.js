@@ -277,15 +277,16 @@ function formatDuration(seconds) {
 }
 
 function progressText(job) {
-  const count = t("status.progressCount", { completed: job.completed || 0, total: job.total || 0 });
-  if (job.kind !== "detect" || job.state !== "running" || !job.completed || job.completed >= job.total) return count;
+  const progress = job.kind === "detect" ? (job.processed ?? job.completed ?? 0) : (job.completed || 0);
+  const count = t("status.progressCount", { completed: progress, total: job.total || 0 });
+  if (job.kind !== "detect" || job.state !== "running" || !progress || progress >= job.total) return count;
   const key = `${job.kind}:${job.startedAt || ""}`;
   const eta = state.detectionEta;
-  if (!eta || eta.key !== key || Number(job.completed) > eta.completed) {
+  if (!eta || eta.key !== key || Number(progress) > eta.completed) {
     state.detectionEta = {
       key,
-      completed: Number(job.completed),
-      remaining: (Number(job.activeElapsed) / Number(job.completed)) * (Number(job.total) - Number(job.completed)),
+      completed: Number(progress),
+      remaining: (Number(job.activeElapsed) / Number(progress)) * (Number(job.total) - Number(progress)),
     };
   }
   return `${count} · ${t("status.eta", { duration: formatDuration(state.detectionEta.remaining) })}`;
@@ -298,6 +299,9 @@ function processingCurrentPath(job) {
   const targetIds = new Set(imageIds);
   if (!targetIds.size) return job.current || "";
   if (![...targetIds].some((imageId) => !completedIds.has(imageId))) return "";
+  // Parallel workers do not finish in request order. Without an active path,
+  // do not guess a filename from the staged count.
+  if (job.processed != null) return job.current || "";
   const nextImage = state.images.find((image) => targetIds.has(image.id) && !completedIds.has(image.id));
   return nextImage ? (nextImage.relativePath || "") : (job.current || "");
 }
@@ -309,7 +313,8 @@ function showProcessing(processing) {
   $("#processingTitle").textContent = processingTitle(current.kind);
   $("#processingCurrent").textContent = processingCurrentPath(current);
   $("#processingProgress").max = Math.max(1, Number(current.total) || 1);
-  $("#processingProgress").value = Math.min($("#processingProgress").max, Number(current.completed) || 0);
+  const progress = current.kind === "detect" ? (current.processed ?? current.completed) : current.completed;
+  $("#processingProgress").value = Math.min($("#processingProgress").max, Number(progress) || 0);
   $("#processingProgressText").textContent = progressText(current);
   const cancelling = Boolean(current.cancelRequested || state.detectCancelRequested || state.importSession?.cancelled);
   $("#processingPauseButton").textContent = t(current.state === "paused" ? "apply.resume" : "apply.pause");

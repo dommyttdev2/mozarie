@@ -1122,11 +1122,35 @@ async function refreshProjectHistory(imageId = state.currentId) {
   } catch (error) { showUserError(error); }
 }
 
+function hasPendingProjectHistorySave(imageId = state.currentId) {
+  return imageId === state.currentId && (
+    state.draftDirty === true
+    || state.draftSaveChains?.has(imageId)
+    || state.workspaceDraftTimers?.has(imageId)
+    || state.workspaceDraftChains?.has(imageId)
+  );
+}
+
+function canRestoreProjectHistory(direction, imageId = state.currentId) {
+  if (!hasDurableHistory() || !imageId) return false;
+  const history = state.projectHistory.get(imageId);
+  if (direction === "undo" && hasPendingProjectHistorySave(imageId)) return true;
+  return direction === "undo" ? history?.canUndo === true : history?.canRedo === true;
+}
+
 async function restoreProjectHistory(direction) {
   if (catalogStagingEditsActive()) return;
   const imageId = state.currentId;
   const generation = state.imageGeneration;
   if (!hasDurableHistory() || !currentRecord() || !imageId || state.projectReadOnly || state.projectHistoryBusy || isBusy() || state.importing || isGestureActive() || currentImageActionPending()) return;
+  // A cached false state is authoritative for an idle image. A just-finished
+  // manual edit is the sole exception: flush it first so Ctrl+Z immediately
+  // after the stroke remains undoable even before the status poll returns.
+  if (!canRestoreProjectHistory(direction, imageId)) return;
+  const viewMode = state.viewMode;
+  const selectedImageIds = new Set(state.selectedImageIds);
+  const selectionAnchorId = state.selectionAnchorId;
+  const batchMode = state.batchMode;
   state.projectHistoryBusy = true; updateHistoryButtons();
   try {
     await queueImageMutation(imageId, async () => {
@@ -1146,8 +1170,20 @@ async function restoreProjectHistory(direction) {
       const capturedProjectId = state.project?.id || null; const capturedCatalogGeneration = state.serverCatalogGeneration;
       const snapshot = await api("/api/images");
       const replaced = reconcileCatalogSnapshot(snapshot, capturedProjectId, capturedCatalogGeneration);
-      state.images = snapshot.images || state.images; loadReviewedPaths(); applyProjectSnapshot(snapshot); if (typeof renderCatalogViews === "function") renderCatalogViews();
-      if (!replaced && changed.has(imageId) && state.currentId === imageId && isCurrentGeneration(generation) && !currentImageActionPending()) await selectImage(imageId, true, { saveCurrentDraft: false });
+      state.images = snapshot.images || state.images; loadReviewedPaths(); applyProjectSnapshot(snapshot);
+      // A localized history delta must not turn an overview into the editor
+      // or discard the user's batch selection. A true catalog replacement is
+      // allowed to choose a new selection because its old IDs are no longer
+      // guaranteed to exist.
+      if (!replaced) {
+        state.viewMode = viewMode;
+        state.batchMode = batchMode;
+        const available = new Set(state.images.map((image) => image.id));
+        state.selectedImageIds = new Set([...selectedImageIds].filter((id) => available.has(id)));
+        state.selectionAnchorId = available.has(selectionAnchorId) ? selectionAnchorId : null;
+      }
+      if (typeof renderCatalogViews === "function") renderCatalogViews();
+      if (!replaced && changed.has(imageId) && state.currentId === imageId && isCurrentGeneration(generation) && !currentImageActionPending()) await selectImage(imageId, true, { saveCurrentDraft: false, preserveView: true });
       else if (state.currentId === imageId && isCurrentGeneration(generation) && !currentImageActionPending()) updateHistoryButtons();
     }, { lockCandidateControls: true });
   } catch (error) { showUserError(error); }

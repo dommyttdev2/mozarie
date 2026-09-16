@@ -48,7 +48,7 @@ function clearEditor() {
   renderCandidates(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons(); render(); updateBrushCursor();
 }
 
-async function selectImage(imageId, force = false, { saveCurrentDraft = true } = {}) {
+async function selectImage(imageId, force = false, { saveCurrentDraft = true, preserveView = false } = {}) {
   if (state.projectOperationPending || isGestureActive()) return;
   if ((isBusy() || state.importing || state.candidateBatchPending.size) && !force) return;
   if (state.currentId === imageId && !force && state.pendingImageId !== imageId) return;
@@ -65,6 +65,7 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
   }
   state.pendingImageKey = imageCacheKey(record);
   state.pendingCandidateKey = candidateCacheKey(imageId, Number(record.candidateRevision || 0));
+  const preservedView = preserveView && state.currentId === imageId && state.currentImage ? { ...state.view } : null;
   const imageCached = state.imageCache.has(imageCacheKey(record));
   const candidatesCached = state.candidateBundleCache.has(candidateCacheKey(imageId, Number(record.candidateRevision || 0)));
   if (!imageCached || !candidatesCached) { clearTimeout(state.loadingDelay); state.loadingDelay = null; }
@@ -115,7 +116,8 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
         releaseCandidateBitmapBundle({ candidateImages: previousCandidateImages });
       }
       syncResourceOwnership();
-      canvasSizeForImage(record); await restoreDraft(imageId, generation, draft, draftImages); prepareOriginalImage(); requestMosaicPreview(); fitImage();
+      canvasSizeForImage(record); await restoreDraft(imageId, generation, draft, draftImages); prepareOriginalImage(); requestMosaicPreview();
+      if (preservedView) state.view = preservedView; else fitImage();
       updateBlockSizeDisplay(); refreshMaskStatus();
       $("#emptyState").hidden = true;
       $("#currentFileName").textContent = record.relativePath;
@@ -571,6 +573,12 @@ async function restoreDraft(imageId, generation, draft = state.drafts.get(imageI
   // IDs that still exist, rather than restoring a deleted boundary candidate.
   const retainedRemovedIds = (draft?.removedCandidateIds || []).filter((id) => currentCandidateIds.has(id));
   state.removedCandidateIds = new Set(retainedRemovedIds);
+  // A force reload can keep the same backing store dimensions. Clear every
+  // live manual layer before restoring, otherwise absent pixels retain the
+  // previous image's mosaic/exclusion data.
+  addCtx.clearRect(0, 0, addCanvas.width, addCanvas.height);
+  exclusionCtx.clearRect(0, 0, exclusionCanvas.width, exclusionCanvas.height);
+  exclusionEraseCtx.clearRect(0, 0, exclusionEraseCanvas.width, exclusionEraseCanvas.height);
   if (!draft) { resetHistoryToCurrentManualMask(); updateCandidateStatus(); renderCandidates(); return true; }
   const [addImage, exclusionImage, exclusionEraseImage, historyAddImage, historyExclusionImage, historyExclusionEraseImage] = images;
     if (addImage) addCtx.drawImage(addImage, 0, 0);

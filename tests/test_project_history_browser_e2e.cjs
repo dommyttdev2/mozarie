@@ -61,18 +61,71 @@ test("project Ctrl+Z flushes the durable edit and keeps browser history canvases
     assert.equal(shortcutContext.viewMode, "edit", "project undo uses the editor shortcut in edit mode");
     assert.equal(shortcutContext.openDialogs, 0, "project undo shortcut is not hidden behind a dialog");
     await page.locator("#editorCanvas").focus();
+    await page.evaluate(() => {
+      state.settings.shortcuts.bindings.redo = "Ctrl+Y";
+      state.view = { scale: 1.7, x: 31, y: -19 };
+    });
     await page.keyboard.press("Control+Z");
     await page.waitForFunction(() => {
       const history = window.__projectHistoryFixture;
       return history.undo === 1 && history.imageSnapshots === 1 && state.project?.id === "fixture-project" && document.querySelector("#redoButton").disabled === false;
     });
-    await page.keyboard.press("Control+Shift+Z");
+    await page.keyboard.press("Control+Y");
     await page.waitForFunction(() => {
       const history = window.__projectHistoryFixture;
       return history.redo === 1 && history.imageSnapshots === 2 && state.project?.id === "fixture-project" && document.querySelector("#undoButton").disabled === false;
     });
     await page.evaluate(() => { state.projectReadOnly = true; updateHistoryButtons(); });
     assert.equal(await page.locator("#undoButton").isDisabled(), true, "completed projects disable database undo in the browser");
+    assert.deepEqual(await page.evaluate(() => ({ currentId: state.currentId, viewMode: state.viewMode, view: state.view })), {
+      currentId: "sample", viewMode: "edit", view: { scale: 1.7, x: 31, y: -19 },
+    }, "durable undo and redo keep the selected image, editor mode, and zoom/pan");
+  } finally {
+    await context?.close();
+    await browser.close();
+    fixture.server.closeAllConnections();
+    await closeServer(fixture.server);
+  }
+});
+
+test("empty project history shortcuts do not fetch, lock, or change the current editor", { timeout: 60000 }, async () => {
+  const fixture = await startFixtureServer();
+  const browser = await chromium.launch();
+  let context; let page;
+  try {
+    context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    page = await context.newPage();
+    await page.goto(fixture.url, { waitUntil: "domcontentloaded" });
+    await page.locator('.gallery-item[data-id="sample"]').click();
+    await page.waitForFunction(() => state.currentId === "sample" && state.currentImage);
+    await page.evaluate(() => {
+      const nativeFetch = window.fetch;
+      const calls = { history: 0, snapshots: 0 };
+      window.__emptyProjectHistoryFixture = calls;
+      window.fetch = async (input, init = {}) => {
+        const url = String(input?.url || input);
+        if (url.includes("/api/project/history/")) calls.history += 1;
+        if (url.includes("/api/images")) calls.snapshots += 1;
+        return nativeFetch(input, init);
+      };
+      state.project = { id: "fixture-project", status: "working" };
+      state.projectReadOnly = false;
+      state.historyDurable = true;
+      state.projectHistory = new Map([["sample", { canUndo: false, canRedo: false }]]);
+      state.viewMode = "edit";
+      state.settings.shortcuts.bindings.redo = "Ctrl+Y";
+    });
+    await page.locator("#editorCanvas").focus();
+    await page.keyboard.press("Control+Z");
+    await page.keyboard.press("Control+Y");
+    const result = await page.evaluate(() => ({
+      ...window.__emptyProjectHistoryFixture,
+      currentId: state.currentId,
+      viewMode: state.viewMode,
+      historyBusy: state.projectHistoryBusy,
+      busy: isBusy(),
+    }));
+    assert.deepEqual(result, { history: 0, snapshots: 0, currentId: "sample", viewMode: "edit", historyBusy: false, busy: false });
   } finally {
     await context?.close();
     await browser.close();

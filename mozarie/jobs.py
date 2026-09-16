@@ -121,11 +121,15 @@ class JobsMixin:
             self.job.paused_seconds += max(0.0, time.time() - self.job.paused_at)
             self.job.paused_at = None
 
+    def _job_control_progress(self) -> int:
+        """Return the progress that determines whether this job can pause."""
+        return self.job.processed if self.job.kind == "detect" else self.job.completed
+
     def request_pause(self) -> dict[str, Any]:
         with self.lock:
             self._assert_request_catalog_expectation()
             if (self.job.kind not in {"apply", "detect"} or self.job.state != "running"
-                    or self.job.completed >= self.job.total):
+                    or self._job_control_progress() >= self.job.total):
                 raise ClientError("一時停止できる処理はありません。", "operation_in_progress")
             assert self.job_control is not None
             control = self.job_control
@@ -134,7 +138,8 @@ class JobsMixin:
         with control.claim_lock:
             with self.lock:
                 self._assert_request_catalog_expectation()
-                if self.job_control is not control or self.job.state != "running":
+                if (self.job_control is not control or self.job.state != "running"
+                        or self._job_control_progress() >= self.job.total):
                     raise ClientError("一時停止できる処理はありません。", "operation_in_progress")
                 control.pause_requested.set()
                 self.job.state = "paused" if self.job.active_count == 0 else "pausing"
@@ -164,7 +169,8 @@ class JobsMixin:
     def request_cancel(self) -> dict[str, Any]:
         with self.lock:
             self._assert_request_catalog_expectation()
-            if self.job.kind not in {"apply", "detect"} or self.job.state not in {"running", "pausing", "paused"}:
+            if (self.job.kind not in {"apply", "detect"} or self.job.state not in {"running", "pausing", "paused"}
+                    or (self.job.kind == "detect" and self.job.publication_started)):
                 raise ClientError("キャンセルできる処理はありません。", "operation_in_progress")
             assert self.job_control is not None
             control = self.job_control
@@ -173,7 +179,8 @@ class JobsMixin:
         with control.claim_lock:
             with self.lock:
                 self._assert_request_catalog_expectation()
-                if self.job_control is not control or self.job.state not in {"running", "pausing", "paused"}:
+                if (self.job_control is not control or self.job.state not in {"running", "pausing", "paused"}
+                        or (self.job.kind == "detect" and self.job.publication_started)):
                     raise ClientError("キャンセルできる処理はありません。", "operation_in_progress")
                 control.cancel_requested.set()
                 control.pause_requested.clear()
@@ -315,6 +322,7 @@ class JobsMixin:
                 self._resume_job_clock()
                 self.job.state = "cancelled"
                 self.job.cancel_requested = False
+                self.job.publication_started = False
                 self.job.ended_at = time.time()
                 self.job.current = ""
                 self.job.active_count = 0
@@ -393,6 +401,17 @@ class JobsMixin:
                 self.job.completed = len(self.job.completed_image_ids)
                 self._publish_job_snapshot_unchecked()
 
+    def _mark_job_processed(
+        self,
+        job_generation: int | None = None,
+        catalog_generation: int | None = None,
+    ) -> None:
+        """Expose completed inference without publishing staged detection data."""
+        with self.lock:
+            if self._job_is_current(job_generation, catalog_generation):
+                self.job.processed = min(self.job.total, self.job.processed + 1)
+                self._publish_job_snapshot_unchecked()
+
     def _set_detection_model_preparation(
         self,
         active: bool,
@@ -451,7 +470,7 @@ class JobsMixin:
             self.job.active_count -= 1
             if (control.pause_requested.is_set() and not control.cancel_requested.is_set()
                     and not control.failed.is_set() and self.job.active_count == 0):
-                if self.job.completed >= self.job.total:
+                if self._job_control_progress() >= self.job.total:
                     control.pause_requested.clear()
                     self._publish_job_snapshot_unchecked()
                     return self.job.active_count
@@ -528,8 +547,10 @@ class JobsMixin:
             self._resume_job_clock()
             self.job.state = "complete"
             self.job.cancel_requested = False
+            self.job.publication_started = False
             self.job.ended_at = time.time()
             self.job.completed = self.job.total
+            self.job.processed = self.job.total
             self.job.current = ""
             self.job.active_count = 0
             kind = self.job.kind
@@ -567,6 +588,7 @@ class JobsMixin:
             self._resume_job_clock()
             self.job.state = "error"
             self.job.cancel_requested = False
+            self.job.publication_started = False
             self.job.ended_at = time.time()
             self.job.error = str(exc)
             self.job.error_code = exc.error_code
