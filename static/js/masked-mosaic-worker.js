@@ -15,6 +15,18 @@ function releaseScratch() {
   maskCanvas = null; maskContext = null; outputCanvas = null; outputContext = null;
 }
 
+function scratchCanvases(width, height) {
+  if (!maskCanvas || maskCanvas.width !== width || maskCanvas.height !== height) {
+    if (maskCanvas) maskCanvas.width = maskCanvas.height = 1;
+    maskCanvas = new OffscreenCanvas(width, height); maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
+  }
+  if (!outputCanvas || outputCanvas.width !== width || outputCanvas.height !== height) {
+    if (outputCanvas) outputCanvas.width = outputCanvas.height = 1;
+    outputCanvas = new OffscreenCanvas(width, height); outputContext = outputCanvas.getContext("2d");
+  }
+  if (!maskContext || !outputContext) throw new Error("2d context unavailable");
+}
+
 function releaseSource() {
   source?.close?.();
   source = null; sourceId = "";
@@ -27,12 +39,7 @@ function fail(generation, failedSourceId = sourceId) { self.postMessage({ type: 
 function render({ mask, width, height, blockSize, generation }) {
   try {
     if (!sourcePixels || !mask || sourceWidth !== width || sourceHeight !== height) throw new Error("invalid render state");
-    // Scratch canvases are released after every response, so there is no
-    // reusable allocation to resize here.  Allocate the frame-local pair
-    // directly; this keeps the worker's memory plateau explicit.
-    maskCanvas = new OffscreenCanvas(width, height); maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
-    outputCanvas = new OffscreenCanvas(width, height); outputContext = outputCanvas.getContext("2d");
-    if (!maskContext || !outputContext) throw new Error("2d context unavailable");
+    scratchCanvases(width, height);
     const pixels = sourcePixels;
     maskContext.clearRect(0, 0, width, height); maskContext.drawImage(mask, 0, 0);
     const alphaPixels = maskContext.getImageData(0, 0, width, height).data;
@@ -67,15 +74,13 @@ function render({ mask, width, height, blockSize, generation }) {
     const frame = outputCanvas.transferToImageBitmap();
     try { self.postMessage({ type: "frame", sourceId, generation, output: frame }, [frame]); }
     catch { frame.close?.(); fail(generation); }
-  } catch { fail(generation); } finally { mask?.close?.(); releaseScratch(); }
+  } catch { fail(generation); } finally { mask?.close?.(); }
 }
 
 function renderPatch({ mask, left, top, width, height, blockSize, generation }) {
   try {
     if (!sourcePixels || !mask || left < 0 || top < 0 || left + width > sourceWidth || top + height > sourceHeight) throw new Error("invalid patch render state");
-    maskCanvas = new OffscreenCanvas(width, height); maskContext = maskCanvas.getContext("2d", { willReadFrequently: true });
-    outputCanvas = new OffscreenCanvas(width, height); outputContext = outputCanvas.getContext("2d");
-    if (!maskContext || !outputContext) throw new Error("2d context unavailable");
+    scratchCanvases(width, height);
     maskContext.clearRect(0, 0, width, height); maskContext.drawImage(mask, 0, 0);
     const alphaPixels = maskContext.getImageData(0, 0, width, height).data;
     const output = new Uint8ClampedArray(width * height * 4);
@@ -104,7 +109,7 @@ function renderPatch({ mask, left, top, width, height, blockSize, generation }) 
     const frame = outputCanvas.transferToImageBitmap();
     try { self.postMessage({ type: "frame", sourceId, generation, patch: true, left, top, width, height, output: frame }, [frame]); }
     catch { frame.close?.(); fail(generation); }
-  } catch { fail(generation); } finally { mask?.close?.(); releaseScratch(); }
+  } catch { fail(generation); } finally { mask?.close?.(); }
 }
 
 self.onmessage = ({ data }) => {

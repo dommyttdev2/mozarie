@@ -19,7 +19,7 @@ function canvasSizeForImage(image) {
 }
 
 function ensureHistoryCanvases() {
-  if (!state.currentImage || state.project?.id) { releaseHistoryCanvases(); return false; }
+  if (!state.currentImage || hasDurableHistory()) { releaseHistoryCanvases(); return false; }
   for (const target of [historyAddCanvas, historyExclusionCanvas, historyExclusionEraseCanvas]) {
     if (target.width !== state.currentImage.width || target.height !== state.currentImage.height) { target.width = state.currentImage.width; target.height = state.currentImage.height; }
   }
@@ -108,19 +108,20 @@ async function selectImage(imageId, force = false, { saveCurrentDraft = true } =
       state.currentImage = image;
       state.candidates = candidateBundle.candidates;
       state.candidateImages = candidateBundle.candidateImages;
+      syncResourceOwnership();
       if (previousImage && previousImage !== image && ![...state.imageCache.items].some(([, entry]) => entry.value === previousImage)) closeBitmap(previousImage);
       if (previousCandidateImages !== state.candidateImages
         && ![...state.candidateBundleCache.items].some(([, entry]) => entry.value?.candidateImages === previousCandidateImages)) {
         releaseCandidateBitmapBundle({ candidateImages: previousCandidateImages });
       }
-      state.imageCache.trim(); state.candidateBundleCache.trim();
+      syncResourceOwnership();
       canvasSizeForImage(record); await restoreDraft(imageId, generation, draft, draftImages); prepareOriginalImage(); requestMosaicPreview(); fitImage();
       updateBlockSizeDisplay(); refreshMaskStatus();
       $("#emptyState").hidden = true;
       $("#currentFileName").textContent = record.relativePath;
       updateCandidateStatus();
       renderCandidates(); updateGalleryCurrent(); updateNavigationControls(); updateActionButtons(); render(); clearStatus();
-      if (state.project?.id) void refreshProjectHistory(imageId);
+      if (hasDurableHistory()) void refreshProjectHistory(imageId);
       prefetchNeighbors(record);
     } finally {
       releaseDraftImages(draftImages);
@@ -202,28 +203,25 @@ function candidateCacheKey(imageId, revision) { return `${imageId}:${revision}`;
 
 async function cachedImage(record) {
   const key = imageCacheKey(record);
+  syncResourceOwnership([key]);
   const epoch = state.catalogEpoch; const version = imageAssetVersion(record);
   const cached = state.imageCache.get(key);
   if (cached) return cached;
   const pending = state.imageInflight.get(key);
   if (pending) return pending;
-  const controller = new AbortController(); state.catalogLoadControllers.add(controller);
+  const controller = new AbortController(); state.catalogLoadControllers.add(controller); state.imageLoadControllers.set(key, controller);
   let request;
   request = fetchBitmap(imageUrl(record), controller.signal).then((image) => {
     if (controller.signal.aborted || !catalogRecordMatches(record, epoch, { version })) { image.close?.(); throw new DOMException("stale catalog", "AbortError"); }
-    return state.imageCache.set(key, image, decodedImageWeight(image));
+    return state.imageCache.set(key, image);
   }).finally(() => { if (state.imageInflight.get(key) === request) state.imageInflight.delete(key); });
-  request.finally(() => state.catalogLoadControllers.delete(controller)).catch(() => {});
+  request.finally(() => { state.catalogLoadControllers.delete(controller); if (state.imageLoadControllers.get(key) === controller) state.imageLoadControllers.delete(key); }).catch(() => {});
   state.imageInflight.set(key, request);
   return request;
 }
 
 function prefetchNeighbors(record) {
-  const index = state.images.findIndex((item) => item.id === record.id);
-  for (const neighbor of [state.images[index - 1], state.images[index + 1]]) {
-    if (!neighbor) continue;
-    schedulePrefetch(neighbor, 1);
-  }
+  for (const neighbor of galleryNavigationNeighbors(record.id)) schedulePrefetch(neighbor);
 }
 
 function releaseImageCaches(imageId = null) {
@@ -238,6 +236,8 @@ function releaseImageCaches(imageId = null) {
   }
   for (const key of state.imageInflight.keys()) if (matches(key)) state.imageInflight.delete(key);
   for (const key of state.candidateInflight.keys()) if (matches(key)) state.candidateInflight.delete(key);
+  for (const [key, controller] of state.imageLoadControllers) if (matches(key)) { controller.abort(); state.imageLoadControllers.delete(key); }
+  for (const [key, controller] of state.candidateLoadControllers) if (matches(key)) { controller.abort(); state.candidateLoadControllers.delete(key); }
 }
 
 function releaseStaleImageVersions(imageId, imageKey, candidateKey) {
@@ -248,6 +248,7 @@ function releaseStaleImageVersions(imageId, imageKey, candidateKey) {
 function releaseCandidateBundles(imageId) {
   for (const [key] of state.candidateBundleCache.items) if (key.startsWith(`${imageId}:`)) state.candidateBundleCache.delete(key);
   for (const key of state.candidateInflight.keys()) if (key.startsWith(`${imageId}:`)) state.candidateInflight.delete(key);
+  for (const [key, controller] of state.candidateLoadControllers) if (key.startsWith(`${imageId}:`)) { controller.abort(); state.candidateLoadControllers.delete(key); }
   if (state.currentId === imageId) state.candidateImages = new Map();
 }
 
@@ -277,7 +278,7 @@ function retainCurrentCandidateBundle(imageId, revision) {
   reusable.candidates = state.candidates;
   reusable.candidateImages = state.candidateImages;
   reusable.candidateRevision = record.candidateRevision;
-  state.candidateBundleCache.set(candidateCacheKey(imageId, record.candidateRevision), reusable, [...reusable.candidateImages.values()].reduce((total, image) => total + decodedImageWeight(image), 0));
+  state.candidateBundleCache.set(candidateCacheKey(imageId, record.candidateRevision), reusable);
 }
 
 async function loadCandidateBundle(imageId, generation, reconciled = false) {
@@ -286,11 +287,12 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
   const version = imageAssetVersion(record);
   const knownRevision = Number(record?.candidateRevision || 0);
   const knownKey = candidateCacheKey(imageId, knownRevision);
+  syncResourceOwnership([], [knownKey]);
   const pending = state.candidateInflight.get(knownKey);
   if (pending) return pending;
   let request;
   request = (async () => {
-    const controller = new AbortController(); state.catalogLoadControllers.add(controller);
+    const controller = new AbortController(); state.catalogLoadControllers.add(controller); state.candidateLoadControllers.set(knownKey, controller);
     let candidateImages;
     try {
       const candidateData = await api(`/api/candidates/${encodeURIComponent(imageId)}`, { signal: controller.signal });
@@ -305,7 +307,7 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
       if (cached) { record.candidateRevision = revision; return cached; }
       candidateImages = new Map();
       const pendingCandidates = [...candidateData.candidates];
-      const workers = Array.from({ length: Math.min(4, pendingCandidates.length) }, async () => {
+      const workers = Array.from({ length: pendingCandidates.length }, async () => {
         while (pendingCandidates.length) {
           const candidate = pendingCandidates.shift();
           try { candidateImages.set(candidate.id, await fetchBitmap(maskUrl(imageId, candidate.id, revision), controller.signal)); }
@@ -318,9 +320,9 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
       if (controller.signal.aborted || !catalogRecordMatches(record, epoch, { version })) throw new DOMException("stale catalog", "AbortError");
       record.candidateRevision = revision;
       const bundle = { candidates: candidateData.candidates, candidateImages, candidateRevision: revision };
-      const weight = [...candidateImages.values()].reduce((total, image) => total + decodedImageWeight(image), 0);
       candidateImages = null;
-      return state.candidateBundleCache.set(cacheKey, bundle, weight);
+      state.resourceCandidateKeys.add(cacheKey);
+      return state.candidateBundleCache.set(cacheKey, bundle);
     } catch (error) {
       if (candidateImages) releaseCandidateBitmapBundle({ candidateImages });
       if (error.status === 404 && !reconciled && isCurrentGeneration(generation)) {
@@ -328,10 +330,13 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
         return loadCandidateBundle(imageId, generation, true);
       }
       throw error;
-    } finally { state.catalogLoadControllers.delete(controller); }
+    } finally {
+      state.catalogLoadControllers.delete(controller);
+      if (state.candidateLoadControllers.get(knownKey) === controller) state.candidateLoadControllers.delete(knownKey);
+    }
   })().finally(() => {
     if (state.candidateInflight.get(knownKey) === request) state.candidateInflight.delete(knownKey);
-    state.imageCache.trim(); state.candidateBundleCache.trim();
+    syncResourceOwnership();
   });
   state.candidateInflight.set(knownKey, request);
   return request;
@@ -343,6 +348,20 @@ async function reconcileCurrentCandidates(imageId, generation) {
     if (state.currentId !== imageId || !isCurrentGeneration(generation)) return false;
     state.candidates = bundle.candidates;
     state.candidateImages = bundle.candidateImages;
+    invalidateMaskComposition();
+    const presence = manualLayerPresence();
+    const visibleIds = new Set(bundle.candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id));
+    if (state.manualMaskPresent) visibleIds.add("manual:apply");
+    if (presence.hasManualExclude) visibleIds.add("manual:exclude");
+    if (presence.hasManualExclusionErase) visibleIds.add("manual:excludeErase");
+    for (const id of [...state.blinkCandidateIds]) if (!visibleIds.has(id)) {
+      state.blinkCandidateIds.delete(id); state.blinkModes.delete(id);
+    }
+    for (const role of ["apply", "exclude"]) {
+      const ids = bundle.candidates.filter((candidate) => candidate.role === role && !state.removedCandidateIds.has(candidate.id)).map((candidate) => candidate.id);
+      inheritRoleCandidateDisplayMode(role, ids);
+    }
+    syncCandidateBlinkTimer();
     const record = state.images.find((image) => image.id === imageId);
     if (record) {
       const visible = bundle.candidates.filter((candidate) => !state.removedCandidateIds.has(candidate.id));
@@ -351,13 +370,12 @@ async function reconcileCurrentCandidates(imageId, generation) {
       record.candidateRevision = bundle.candidateRevision;
     }
     invalidateCandidateBundles(imageId);
-    markMaskDirty();
     refreshMaskStatus(true); updateCandidateStatus(); requestMosaicPreview(); renderCandidates(); render();
     return true;
   } finally {
     if (state.currentId === imageId && isCurrentGeneration(generation) && state.pendingImageId !== imageId) {
       state.pendingCandidateKey = null;
-      state.imageCache.trim(); state.candidateBundleCache.trim();
+      syncResourceOwnership();
     }
   }
 }
@@ -426,7 +444,7 @@ function releaseDraftImages(images) {
 
 async function decodeDraftImages(draft) {
   if (!draft) return [null, null, null, null, null, null];
-  const historyBase = state.project?.id ? {} : draft.historyBase || {};
+  const historyBase = hasDurableHistory() ? {} : draft.historyBase || {};
   const results = await Promise.allSettled([draft.add, draft.exclusion, draft.exclusionErase, historyBase.add, historyBase.exclusion, historyBase.exclusionErase]
     .map((source) => source ? loadImage(source) : null));
   const failure = results.find((result) => result.status === "rejected");
@@ -437,22 +455,23 @@ async function decodeDraftImages(draft) {
   return results.map((result) => result.value);
 }
 
-async function saveDraft() {
+async function saveDraft(historyIndexOverride = null) {
   if (!state.currentId || !state.currentImage || !state.draftDirty) return;
   const imageId = state.currentId;
   const dirtyLayers = new Set(state.draftLayerDirty);
   const dirtyRois = Object.fromEntries([...(state.draftDirtyRois || [])]);
-  const keepLocalHistory = !state.project?.id;
+  const keepLocalHistory = !hasDurableHistory();
   if (!keepLocalHistory) releaseHistoryCanvases();
   const historyBaseDirty = keepLocalHistory && state.historyBaseDirty;
   const snapshot = {
     manualEnabled: state.manualEnabled, manualExclusionEnabled: state.manualExclusionEnabled, manualExclusionEraseEnabled: state.manualExclusionEraseEnabled,
     manualMaskPresent: state.manualMaskPresent, manualExclusionForced: state.manualExclusionForced,
     candidateRevision: Number(currentRecord()?.candidateRevision || 0), removedCandidateIds: [...state.removedCandidateIds],
-    history: keepLocalHistory ? state.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined })) : [],
-    historyIndex: keepLocalHistory ? state.historyIndex : 0,
+    history: keepLocalHistory ? state.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined, editorState: stroke.editorState ? structuredClone(stroke.editorState) : undefined })) : [],
+    historyIndex: keepLocalHistory ? (historyIndexOverride ?? state.historyIndex) : 0,
     historyRemovedCandidateIds: keepLocalHistory ? [...(state.historyRemovedCandidateIds || [])] : [],
     historyCandidateIds: keepLocalHistory ? [...(state.historyCandidateIds || [])] : [],
+    historyEditorState: keepLocalHistory && state.historyEditorState ? structuredClone(state.historyEditorState) : null,
     hasEffectiveMask: hasEffectiveMask(), defaultManualExclusionForced: state.settings?.detection?.exclude_forced_default !== false,
   };
   state.draftDirty = false;
@@ -521,6 +540,7 @@ async function saveDraft() {
           exclusionErase: encodedHistoryBase.exclusionErase ?? retained.historyBase?.exclusionErase ?? "",
           removedCandidateIds: snapshot.historyRemovedCandidateIds,
           candidateIds: snapshot.historyCandidateIds,
+          editorState: snapshot.historyEditorState,
         },
       } : {}),
       dirtyLayers: [...pendingLayers], dirtyRois: pendingRois,
@@ -559,20 +579,21 @@ async function restoreDraft(imageId, generation, draft = state.drafts.get(imageI
     state.manualMaskPresent = draft.manualMaskPresent ?? Boolean(addImage);
     state.manualExclusionPresent = Boolean(exclusionImage);
     state.manualExclusionErasePresent = Boolean(exclusionEraseImage);
-    if (!state.project?.id && Array.isArray(draft.history) && draft.historyBase && ensureHistoryCanvases()) {
+    if (!hasDurableHistory() && Array.isArray(draft.history) && draft.historyBase && ensureHistoryCanvases()) {
       historyAddCanvas.getContext("2d").clearRect(0, 0, historyAddCanvas.width, historyAddCanvas.height);
       historyExclusionCanvas.getContext("2d").clearRect(0, 0, historyExclusionCanvas.width, historyExclusionCanvas.height);
       historyExclusionEraseCanvas.getContext("2d").clearRect(0, 0, historyExclusionEraseCanvas.width, historyExclusionEraseCanvas.height);
       if (historyAddImage) historyAddCanvas.getContext("2d").drawImage(historyAddImage, 0, 0);
       if (historyExclusionImage) historyExclusionCanvas.getContext("2d").drawImage(historyExclusionImage, 0, 0);
       if (historyExclusionEraseImage) historyExclusionEraseCanvas.getContext("2d").drawImage(historyExclusionEraseImage, 0, 0);
-      const originalHistory = draft.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined }));
+      const originalHistory = draft.history.map((stroke) => ({ ...stroke, points: stroke.points?.map((point) => ({ ...point })), spans: stroke.spans ? [...stroke.spans] : undefined, editorState: stroke.editorState ? structuredClone(stroke.editorState) : undefined }));
       const candidateOperation = (stroke) => ["removeCandidates", "restoreCandidates", "addCandidates"].includes(stroke.kind);
       state.history = candidateRevisionMatches ? originalHistory : originalHistory.filter((stroke) => !candidateOperation(stroke));
       state.historyRemovedCandidateIds = new Set(candidateRevisionMatches
         ? (draft.historyBase.removedCandidateIds || []).filter((id) => currentCandidateIds.has(id))
         : retainedRemovedIds);
       state.historyCandidateIds = new Set(candidateRevisionMatches ? (draft.historyBase.candidateIds || state.candidates.map((candidate) => candidate.id)) : state.candidates.map((candidate) => candidate.id));
+      state.historyEditorState = candidateRevisionMatches && draft.historyBase.editorState ? structuredClone(draft.historyBase.editorState) : historyEditorState();
       const oldIndex = Math.max(0, Math.min(originalHistory.length, Number(draft.historyIndex) || 0));
       state.historyIndex = candidateRevisionMatches ? Math.min(state.history.length, oldIndex) : originalHistory.slice(0, oldIndex).filter((stroke) => !candidateOperation(stroke)).length;
       rebuildManualMaskFromHistory(); updateHistoryButtons();
@@ -710,6 +731,7 @@ function releaseMosaicPreview() {
   state.mosaicWorkerBusy = false;
   state.mosaicPending = null;
   state.mosaicPreviewRoi = null;
+  state.mosaicPreviewFull = false;
   state.mosaicInFlightSourceId = "";
   state.mosaicInFlightGeneration = 0;
   state.mosaicSourceImage = null;
@@ -817,11 +839,12 @@ function mergeMosaicPreviewRoi(current, next) {
   };
 }
 
-function takeMosaicPreviewRoi() {
-  if (!state.activeStroke) { state.mosaicPreviewRoi = null; return null; }
+function takeMosaicPreviewRequest() {
+  const full = state.mosaicPreviewFull === true;
   const roi = state.mosaicPreviewRoi;
   state.mosaicPreviewRoi = null;
-  return roi;
+  state.mosaicPreviewFull = false;
+  return { full, roi: full ? null : roi };
 }
 
 async function rebuildMosaicPreview() {
@@ -835,8 +858,8 @@ async function rebuildMosaicPreview() {
   // represented by the latest dirty rectangle below, so one current render is
   // sufficient.
   state.mosaicPending = false;
-  const roi = takeMosaicPreviewRoi();
-  if (!roi) flushMaskComposition();
+  const { full, roi } = takeMosaicPreviewRequest();
+  if (full) flushMaskComposition();
   const generation = ++state.mosaicPreviewGeneration;
   state.mosaicInFlightSourceId = sourceId;
   state.mosaicInFlightGeneration = generation;
@@ -859,7 +882,8 @@ async function rebuildMosaicPreview() {
 
 function requestMosaicPreview(roi = null) {
   if (!state.mosaicPreviewEnabled || !state.currentImage) return;
-  state.mosaicPreviewRoi = mergeMosaicPreviewRoi(state.mosaicPreviewRoi, roi);
+  if (roi) state.mosaicPreviewRoi = mergeMosaicPreviewRoi(state.mosaicPreviewRoi, roi);
+  else { state.mosaicPreviewFull = true; state.mosaicPreviewRoi = null; }
   if (state.mosaicWorkerBusy) { state.mosaicPending = true; return; }
   if (state.mosaicPreviewRequested) return;
   state.mosaicPreviewRequested = true;
@@ -880,18 +904,24 @@ function withMaskRoi(context, roi, draw) {
   try { draw(); } finally { context.restore(); }
 }
 
+function drawMaskRoi(target, source, roi) {
+  if (!roi) { target.drawImage(source, 0, 0); return; }
+  const width = roi.right - roi.left; const height = roi.bottom - roi.top;
+  target.drawImage(source, roi.left, roi.top, width, height, roi.left, roi.top, width, height);
+}
+
 function composeEnabledExclusionMask(forcedOnly = false, omittedCandidateId = "", roi = null) {
   withMaskRoi(effectiveExclusionCtx, roi, () => {
     const target = roi || { left: 0, top: 0, right: effectiveExclusionCanvas.width, bottom: effectiveExclusionCanvas.height };
     effectiveExclusionCtx.clearRect(target.left, target.top, target.right - target.left, target.bottom - target.top);
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
-    if (candidate.id !== omittedCandidateId && candidate.enabled && candidate.role === "exclude" && (!forcedOnly || candidate.forced)) effectiveExclusionCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+    if (candidate.id !== omittedCandidateId && candidate.enabled && candidate.role === "exclude" && (!forcedOnly || candidate.forced)) drawMaskRoi(effectiveExclusionCtx, state.candidateImages.get(candidate.id), roi);
   }
-  if (state.manualExclusionEnabled && (!forcedOnly || state.manualExclusionForced)) effectiveExclusionCtx.drawImage(exclusionCanvas, 0, 0);
+  if (state.manualExclusionEnabled && (!forcedOnly || state.manualExclusionForced)) drawMaskRoi(effectiveExclusionCtx, exclusionCanvas, roi);
   if (state.manualExclusionEraseEnabled) {
     effectiveExclusionCtx.save(); effectiveExclusionCtx.globalCompositeOperation = "destination-out";
-    effectiveExclusionCtx.drawImage(exclusionEraseCanvas, 0, 0); effectiveExclusionCtx.restore();
+    drawMaskRoi(effectiveExclusionCtx, exclusionEraseCanvas, roi); effectiveExclusionCtx.restore();
   }
   });
   return effectiveExclusionCanvas;
@@ -910,15 +940,15 @@ function composeCurrentMask(roi = null) {
   combinedCtx.clearRect(target.left, target.top, target.right - target.left, target.bottom - target.top);
   for (const candidate of state.candidates) {
     if (state.removedCandidateIds.has(candidate.id)) continue;
-    if (candidate.enabled && candidate.role !== "exclude") combinedCtx.drawImage(state.candidateImages.get(candidate.id), 0, 0);
+    if (candidate.enabled && candidate.role !== "exclude") drawMaskRoi(combinedCtx, state.candidateImages.get(candidate.id), roi);
   }
   combinedCtx.globalCompositeOperation = "destination-out";
-  combinedCtx.drawImage(effectiveExclusionCanvas, 0, 0);
+  drawMaskRoi(combinedCtx, effectiveExclusionCanvas, roi);
   combinedCtx.globalCompositeOperation = "source-over";
-  if (state.manualEnabled) combinedCtx.drawImage(addCanvas, 0, 0);
+  if (state.manualEnabled) drawMaskRoi(combinedCtx, addCanvas, roi);
   combinedCtx.globalCompositeOperation = "destination-out";
   if (hasNonForcedExclusion) composeEnabledExclusionMask(true, "", roi);
-  combinedCtx.drawImage(effectiveExclusionCanvas, 0, 0);
+  drawMaskRoi(combinedCtx, effectiveExclusionCanvas, roi);
   combinedCtx.globalCompositeOperation = "source-over";
   });
   // Restore the regular union for display when a temporary forced union was
@@ -940,7 +970,8 @@ function markDraftDirtyRoi(layer, roi) {
     right: Math.max(previous.right, roi.right), bottom: Math.max(previous.bottom, roi.bottom),
   } : roi);
 }
-function markMaskDirty() { state.maskDirty = true; markDraftDirty(); }
+function invalidateMaskComposition() { state.maskDirty = true; }
+function markMaskDirty() { invalidateMaskComposition(); markDraftDirty(); }
 function flushMaskComposition() { if (state.maskDirty && !state.activeStroke) composeCurrentMask(); }
 
 function hasEffectiveMask() {
@@ -1036,6 +1067,7 @@ function polygonRoi(points) {
 function boundaryDraftBounds(draft) { return draft?.roi || polygonRoi(draft?.points || []); }
 
 function addBoundaryDraft(draft) {
+  if (manualCanvasInputLocked()) return null;
   const item = { id: boundaryDraftId(), ...draft };
   state.boundaryDrafts.push(item);
   state.boundaryActiveId = item.id;
@@ -1076,6 +1108,7 @@ function appendBoundaryBrushPoint(point) {
 }
 
 function beginBoundaryBrushStroke(point) {
+  if (manualCanvasInputLocked()) return;
   state.boundaryBrushStroke = { type: "brush", points: [point], radius: Math.max(1, Number($("#brushSize").value)), roi: null };
   state.boundaryBrushStroke.roi = strokeRoi(state.boundaryBrushStroke.points, state.boundaryBrushStroke.radius);
 }

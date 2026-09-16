@@ -28,11 +28,11 @@ function queueWorkspaceFlags(imageId, payload) {
 
 const DIRECTORY_DB = "mozarie-directory-catalogs";
 const PROJECT_SOURCE_CLEANUP_KEY = "project-source-cleanup";
-function projectSourceId() { return globalThis.crypto?.randomUUID?.() || `source-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+function projectSourceId() { return crypto.randomUUID(); }
 async function directoryCatalogStore() {
   if (!window.indexedDB) return null;
   return new Promise((resolve) => {
-    const request = indexedDB.open(DIRECTORY_DB, 3);
+    const request = indexedDB.open(DIRECTORY_DB, 4);
     request.onupgradeneeded = () => {
       const names = request.result.objectStoreNames;
       if (!names?.contains?.("directories")) request.result.createObjectStore("directories", { keyPath: "catalogId" });
@@ -40,10 +40,39 @@ async function directoryCatalogStore() {
         ? request.transaction.objectStore("projectSources")
         : request.result.createObjectStore("projectSources", { keyPath: "key" });
       if (!sources.indexNames.contains("projectId")) sources.createIndex("projectId", "projectId", { unique: false });
+      if (!names?.contains?.("sourceDeletes")) request.result.createObjectStore("sourceDeletes", { keyPath: "deleteToken" });
     };
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => resolve(null);
   });
+}
+
+async function rememberPendingSourceDelete(payload) {
+  const db = await directoryCatalogStore(); if (!db) throw codedError("source_delete_recovery_unavailable");
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction("sourceDeletes", "readwrite");
+      transaction.objectStore("sourceDeletes").put({ ...payload, savedAt: Date.now() });
+      transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); transaction.onabort = () => reject(transaction.error);
+    });
+  } catch { throw codedError("source_delete_recovery_unavailable"); }
+  finally { db.close(); }
+}
+
+async function forgetPendingSourceDelete(deleteToken) {
+  const db = await directoryCatalogStore(); if (!db || !deleteToken) return;
+  try {
+    await new Promise((resolve, reject) => {
+      const transaction = db.transaction("sourceDeletes", "readwrite"); transaction.objectStore("sourceDeletes").delete(deleteToken);
+      transaction.oncomplete = () => resolve(); transaction.onerror = () => reject(transaction.error); transaction.onabort = () => reject(transaction.error);
+    });
+  } finally { db.close(); }
+}
+
+async function pendingSourceDeletes() {
+  const db = await directoryCatalogStore(); if (!db) return [];
+  try { return await new Promise((resolve) => { const request = db.transaction("sourceDeletes").objectStore("sourceDeletes").getAll(); request.onsuccess = () => resolve(request.result || []); request.onerror = () => resolve([]); }); }
+  finally { db.close(); }
 }
 
 function projectSourceRows(db, projectId) {
@@ -357,6 +386,42 @@ function workspaceDraftPayload(draft) {
   return payload;
 }
 
+async function uploadManualLayer(imageId, sessionId, layer, dataUrl) {
+  const blob = await fetch(dataUrl).then((response) => response.blob());
+  const response = await fetch(`/api/workspace/manual/${encodeURIComponent(imageId)}/layer/${encodeURIComponent(sessionId)}/${layer}`, {
+    method: "POST",
+    headers: catalogRequestHeaders({ "Content-Type": "application/octet-stream" }),
+    body: blob,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw responseError(response, data);
+  applyCatalogGeneration(data);
+}
+
+async function saveWorkspaceDraft(imageId, draft) {
+  if (!draft) return api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, { method: "DELETE" });
+  const payload = workspaceDraftPayload(draft);
+  const dirtyLayers = Array.isArray(payload.dirtyLayers) ? payload.dirtyLayers : [];
+  if (!dirtyLayers.length) return api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, { method: "POST", body: JSON.stringify(payload) });
+  const sessionId = crypto.randomUUID();
+  await api(`/api/workspace/manual/${encodeURIComponent(imageId)}/begin`, { method: "POST", body: JSON.stringify({ sessionId, dirtyLayers }) });
+  try {
+    const emptyLayers = [];
+    for (const layer of dirtyLayers) {
+      const value = draft[layer] || "";
+      if (!value) { emptyLayers.push(layer); continue; }
+      await uploadManualLayer(imageId, sessionId, layer, value);
+    }
+    delete payload.add; delete payload.exclusion; delete payload.exclusionErase;
+    payload.emptyLayers = emptyLayers;
+    payload.sessionId = sessionId;
+    return await api(`/api/workspace/manual/${encodeURIComponent(imageId)}/commit`, { method: "POST", body: JSON.stringify(payload) });
+  } catch (error) {
+    await api(`/api/workspace/manual/${encodeURIComponent(imageId)}/cancel`, { method: "POST", body: JSON.stringify({ sessionId }) }).catch(() => {});
+    throw error;
+  }
+}
+
 function queueWorkspaceDraft(imageId, immediate = false) {
   if (!imageId || !state.images.some((image) => image.id === imageId)) return Promise.resolve();
   const previousTimer = state.workspaceDraftTimers.get(imageId);
@@ -364,11 +429,7 @@ function queueWorkspaceDraft(imageId, immediate = false) {
   const write = () => {
     state.workspaceDraftTimers.delete(imageId);
     const draft = state.drafts.get(imageId);
-    const payload = workspaceDraftPayload(draft);
-    const request = draft
-      ? { method: "POST", body: JSON.stringify(payload) }
-      : { method: "DELETE" };
-    const persisted = queueWorkspaceMutation(imageId, () => api(`/api/workspace/manual/${encodeURIComponent(imageId)}`, request));
+    const persisted = queueWorkspaceMutation(imageId, () => saveWorkspaceDraft(imageId, draft));
     return persisted.then((result) => {
       if (draft && state.drafts.get(imageId) === draft) {
         draft.dirtyLayers = [];
@@ -378,12 +439,12 @@ function queueWorkspaceDraft(imageId, immediate = false) {
         const image = state.images.find((entry) => entry.id === imageId);
         if (image) image.hasEffectiveMask = draft?.hasEffectiveMask === true;
       }
-      if (state.project?.id && state.currentId === imageId) void refreshProjectHistory(imageId);
+      if (hasDurableHistory() && state.currentId === imageId) void refreshProjectHistory(imageId);
       // A project has a durable copy and can reload an inactive draft on
       // demand.  Projectless sessions have no equivalent recovery path, so
       // they deliberately keep the in-memory bitmap.
       if (
-        state.project?.id && state.currentId !== imageId
+        hasDurableHistory() && state.currentId !== imageId
         && state.drafts.get(imageId) === draft
         && !state.workspaceDraftTimers.has(imageId)
         && !state.draftSaveChains.has(imageId)

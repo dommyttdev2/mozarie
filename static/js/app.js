@@ -157,7 +157,7 @@ async function toggleImageFlip(axis) {
     if (!updated || updated.id !== imageId) throw codedError("response_invalid");
     const index = state.images.findIndex((image) => image.id === imageId);
     if (index >= 0) Object.assign(state.images[index], updated);
-    if (state.project?.id) {
+    if (hasDurableHistory()) {
       state.projectHistory.set(imageId, { canUndo: result.canUndo === true, canRedo: result.canRedo === true });
     } else {
       recordHistoryOperation({ kind: "transform", flipH: axis === "horizontal", flipV: axis === "vertical" });
@@ -472,6 +472,7 @@ async function openProject(project, resume = false) {
         $("#projectDialog").close(); focusElement($("#projectButton"));
       }
       await showSourceMismatches();
+      if (typeof resumePendingSourceDeletes === "function") await resumePendingSourceDeletes();
     }, { allowNested: true });
   } catch (error) { showUserError(error); }
   finally { endProjectOperation(); }
@@ -700,7 +701,8 @@ function bindEvents() {
     const name = $("#projectNameInput").value.trim(); const mode = projectNameMode;
     const projectlessSave = mode === "name" && !state.project?.id;
     if (mode === "new" || projectlessSave) { await flushAllImageMutations(); await flushAllWorkspaceMutations(); }
-    const projectId = projectlessSave ? crypto.randomUUID().replaceAll("-", "") : "";
+    const projectId = projectlessSave ? state.workspaceId : "";
+    if (projectlessSave && !projectId) throw codedError("project_not_found");
     if (projectlessSave) await rememberProjectlessPromotionSources(projectId);
     let data;
     try {
@@ -711,9 +713,7 @@ function bindEvents() {
       if (projectlessSave && Number.isInteger(error?.status) && error.status >= 400 && error.status < 500) await forgetProjectSources(projectId);
       throw error;
     }
-    if (projectlessSave && data.project?.id !== projectId) {
-      await forgetProjectSources(projectId);
-    }
+    if (projectlessSave && data.project?.id !== projectId) throw codedError("response_invalid");
     state.project = data.project; state.projectReadOnly = false;
     if (projectlessSave) state.projectlessDirectorySources.clear();
     $("#projectNameDialog").close(); if (mode === "new") { resetCatalog([], ""); state.missingNativeSources = []; } renderProjectCurrent();
@@ -858,6 +858,8 @@ function bindEvents() {
   $("#downloadCurrentExcludeMask").addEventListener("click", () => { const image = currentRecord(); if (!currentImageActionPending() && isProcessableImage(image)) void downloadProjectArtifact(`/api/project/mask/${encodeURIComponent(image.id)}/exclude`, "exclude-mask.png", image.id, state.imageGeneration); });
   $("#bucketTolerance").addEventListener("input", (event) => setFillColorTolerance(event.currentTarget.value));
   $("#bucketTolerance").addEventListener("change", () => { void saveFillColorTolerance(); });
+  $("#bucketToleranceDecrease").addEventListener("click", () => { setFillColorTolerance(Number($("#bucketTolerance").value) - 1); void saveFillColorTolerance(); });
+  $("#bucketToleranceIncrease").addEventListener("click", () => { setFillColorTolerance(Number($("#bucketTolerance").value) + 1); void saveFillColorTolerance(); });
   $("#bucketToleranceClose").addEventListener("click", () => closeFillToleranceControl({ focus: true }));
   $("#bucketToleranceControl").addEventListener("toggle", (event) => {
     if (event.newState === "open") return;
@@ -956,6 +958,7 @@ function bindEvents() {
   document.querySelectorAll("[data-gallery-filter]").forEach((input) => input.addEventListener("change", () => {
     if (isBusy() || state.importing) return;
     state.galleryFilter = new Set([...document.querySelectorAll("[data-gallery-filter]:checked")].map((item) => item.dataset.galleryFilter));
+    syncResourceOwnership();
     renderGallery();
   }));
   $("#overviewButton").addEventListener("click", () => { if (!isBusy() && !state.importing) setViewMode("overview"); });
@@ -1020,6 +1023,8 @@ function bindEvents() {
   $("#confidence").addEventListener("input", () => { if (!isBusy() && !state.importing) setDetectionConfidence($("#confidence").value); });
   $("#detectConfidenceRange").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceRange").value));
   $("#detectConfidenceNumber").addEventListener("input", () => setDetectionConfidence($("#detectConfidenceNumber").value));
+  $("#detectFluidColorFillEnabled").addEventListener("change", syncDetectionFluidColorFill);
+  $("#detectFluidColorFillTolerance").addEventListener("input", validateDetectionFluidColorFill);
   document.querySelectorAll(".target-chip input").forEach((input) => input.addEventListener("change", () => {
     syncDetectionTargetSwitch(input);
     if (input.id.startsWith("dialog")) validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"));
@@ -1029,7 +1034,7 @@ function bindEvents() {
   $("#detectCancelButton").addEventListener("click", () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; $("#detectTargetValidation").hidden = true; });
   $("#detectDialog").addEventListener("cancel", (event) => { event.preventDefault(); $("#detectDialog").close(); state.pendingDetectionTargetIds = []; $("#detectTargetValidation").hidden = true; });
   lightDismiss($("#detectDialog"), () => { $("#detectDialog").close(); state.pendingDetectionTargetIds = []; });
-  $("#undoButton").addEventListener("click", () => { if (state.project?.id) void restoreProjectHistory("undo"); else restoreSnapshot(state.historyIndex - 1); }); $("#redoButton").addEventListener("click", () => { if (state.project?.id) void restoreProjectHistory("redo"); else restoreSnapshot(state.historyIndex + 1); });
+  $("#undoButton").addEventListener("click", () => { if (hasDurableHistory()) void restoreProjectHistory("undo"); else restoreSnapshot(state.historyIndex - 1); }); $("#redoButton").addEventListener("click", () => { if (hasDurableHistory()) void restoreProjectHistory("redo"); else restoreSnapshot(state.historyIndex + 1); });
   const grid = $(".studio-grid");
   const paneStorage = { gallery: "mozarie.galleryWidth", inspector: "mozarie.inspectorWidth" };
   const paneDefaultsForWidth = (width) => width >= 1600 ? { gallery: 260, inspector: 320 } : width >= 1280 ? { gallery: 216, inspector: 292 } : { gallery: 190, inspector: 270 };
@@ -1192,9 +1197,10 @@ function bindEvents() {
     const image = state.images.find((item) => item.id === state.contextMenuImageId);
     if (image) {
       const scroll = state.contextMenuScroll;
-      await queueImageMutation(image.id, () => saveWorkspaceFlagNow(image, "reviewed", !isReviewed(image), () => {
+      const changed = await queueImageMutation(image.id, () => saveWorkspaceFlagNow(image, "reviewed", !isReviewed(image), () => {
         if (state.images.some((item) => item.id === image.id)) refreshReviewViews(scroll);
       }), { lockCandidateControls: true });
+      if (changed && !state.project?.id && image.id === state.currentId) recordHistoryOperation({ kind: "workspaceFlag" });
     }
   })();
     closeCatalogContextMenu();
@@ -1221,11 +1227,14 @@ function bindEvents() {
       canvas.setPointerCapture(event.pointerId); state.panning = true; state.pointer = { x: event.clientX, y: event.clientY }; canvas.style.cursor = "grabbing"; updateBrushCursor(); return;
     }
     if (event.button !== 0) return;
+    if (manualCanvasInputLocked()) return;
     if (state.projectReadOnly || currentRecord()?.sourceDimensionsChanged) return;
     if (catalogStagingEditsActive() && ["boundary", "polygon", "boundary_brush"].includes(state.tool)) return;
+    const rawPoint = pointFromEvent(event);
+    if (rawPoint.x < 0 || rawPoint.x >= state.currentImage.width || rawPoint.y < 0 || rawPoint.y >= state.currentImage.height) return;
     canvas.setPointerCapture(event.pointerId);
     state.gestureDisplaySide = compareEventSide(event);
-    const rawPoint = pointFromEvent(event); const point = clampPoint(rawPoint);
+    const point = clampPoint(rawPoint);
     state.drawing = true; state.pointer = point; state.hover = rawPoint; state.hoverDisplaySide = state.gestureDisplaySide;
     if (["boundary", "polygon", "boundary_brush"].includes(state.tool)) state.boundaryDisplaySide = state.gestureDisplaySide;
     if (state.tool === "boundary") { state.boundaryStart = point; state.boundaryStartClient = { x: event.clientX, y: event.clientY }; state.boundaryPoint = point; state.boundaryDragging = false; render(); return; }
@@ -1251,14 +1260,14 @@ function bindEvents() {
     }
     if (state.tool === "boundary_brush") { beginBoundaryBrushStroke(point); render(); return; }
     if (["bucket", "exclude_bucket"].includes(state.tool)) { state.drawing = false; fillAt(point); return; }
-    beginManualStroke(rawPoint); render();
+    beginManualStroke(point); render();
   });
-  const processPointerMove = (event) => {
+  const processPointerMove = (event, rect) => {
     if (isBusy() || state.importing) return;
     if (state.panning) {
       state.view.x += event.clientX - state.pointer.x; state.view.y += event.clientY - state.pointer.y; state.pointer = { x: event.clientX, y: event.clientY }; return;
     }
-    state.hover = pointFromEvent(event);
+    state.hover = pointFromEvent(event, rect);
     state.hoverDisplaySide = state.gestureDisplaySide ?? compareEventSide(event);
     if (state.drawing && (event.buttons & 1)) {
       const point = clampPoint(state.hover);
@@ -1276,12 +1285,13 @@ function bindEvents() {
         }
       } else if (state.tool === "boundary_brush") {
         appendBoundaryBrushPoint(point);
-      } else { appendManualStrokePoint(state.hover); state.pointer = state.hover; }
+      } else { appendManualStrokePoint(point); state.pointer = point; }
     }
   };
   canvas.addEventListener("pointermove", (event) => {
     const events = event.getCoalescedEvents?.() || [event];
-    for (const pointEvent of events) processPointerMove(pointEvent);
+    const rect = canvas.getBoundingClientRect();
+    for (const pointEvent of events) processPointerMove(pointEvent, rect);
     updateBrushCursor();
     if (state.panning || state.drawing) render();
   });
@@ -1337,7 +1347,7 @@ function bindEvents() {
     }
     const rect = canvas.getBoundingClientRect(); const offset = compareEventOffset(event, rect); const mouseX = event.clientX - rect.left - offset; const mouseY = event.clientY - rect.top;
     const sourceX = (mouseX - state.view.x) / state.view.scale; const sourceY = (mouseY - state.view.y) / state.view.scale;
-    state.view.scale = Math.min(12, Math.max(0.03, state.view.scale * (event.deltaY < 0 ? 1.12 : 1 / 1.12)));
+    state.view.scale = Math.max(0.03, state.view.scale * (event.deltaY < 0 ? 1.12 : 1 / 1.12));
     state.view.x = mouseX - sourceX * state.view.scale; state.view.y = mouseY - sourceY * state.view.scale; render(); updateBrushCursor();
   }, { passive: false });
   window.addEventListener("keydown", (event) => {
@@ -1393,7 +1403,6 @@ async function initialise() {
     return;
   }
   await loadTranslations(); restoreCompareSplit(); bindEvents();
-  state.outputDirectoryHandle = await rememberedOutputDirectoryHandle();
   renderOutputDirectory();
   setNavigationShortcutsEnabled(state.settings?.general?.shortcuts_enabled ?? true);
   new ResizeObserver(resizeRenderCanvas).observe(stage); scheduleJobPoll(true);
@@ -1402,17 +1411,21 @@ async function initialise() {
     if (document.visibilityState === "visible") void syncCatalogOnReturn();
   });
   window.addEventListener("pageshow", (event) => { if (event.persisted) void syncCatalogOnReturn(); });
+  $("#sourceDeleteResume").addEventListener("click", () => { void resumePendingSourceDeletesFromUser().catch(showUserError); });
   updateBrushSize($("#brushSize").value); resizeRenderCanvas(); updateHistoryButtons(); updateNavigationControls(); updateActionButtons();
   try {
     const data = catalogResponse(await api("/api/images"));
     $("#folderPath").value = data.root || "";
     resetCatalog(data.images || [], data.root || "");
     applyProjectSnapshot(data);
+    if (typeof reconcilePendingBrowserSaves === "function") await reconcilePendingBrowserSaves();
     state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(data.sources) : [];
     if (typeof restoreBrowserProjectSourcesForCurrentCatalog === "function") void restoreBrowserProjectSourcesForCurrentCatalog().catch(() => {});
+    if (typeof resumePendingSourceDeletes === "function") void resumePendingSourceDeletes().catch(() => {});
     if (data.images.length) {
       setStatusKey("status.imagesLoaded", { count: state.images.length });
     }
+    if (typeof flushPendingBrowserSaveAcks === "function") void flushPendingBrowserSaveAcks();
   } catch (error) { showUserError(error); }
   void api("/api/projects?sort=updated_desc")
     .then((data) => retryProjectSourceCleanup(new Set((data.projects || []).map((project) => project.id))))

@@ -31,8 +31,22 @@ class SettingsStore:
 
     def load(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
-        settings = defaults if not self.local_path.is_file() else _merge(defaults, _migrate_legacy_shortcuts(json.loads(self.local_path.read_text(encoding="utf-8"))))
-        return validate_settings(self._set_builtin_output_directory(settings))
+        migrated = False
+        if self.local_path.is_file():
+            override = _migrate_legacy_shortcuts(json.loads(self.local_path.read_text(encoding="utf-8")))
+            _migrate_candidate_padding(override)
+            migrated = _migrate_legacy_relative_paths(override)
+            settings = _merge(defaults, override)
+        else:
+            settings = defaults
+        _migrate_candidate_padding(settings)
+        settings = validate_settings(self._set_builtin_output_directory(settings))
+        # Local settings written by versions before the absolute-path contract
+        # used the process working directory. Preserve that one-time meaning,
+        # then write the canonical paths atomically so all later reads agree.
+        if migrated:
+            self.save_validated(settings)
+        return settings
 
     def save(self, update: dict[str, Any]) -> dict[str, Any]:
         return self.save_validated(self.validate_update(update))
@@ -42,6 +56,7 @@ class SettingsStore:
 
     def default_settings(self) -> dict[str, Any]:
         defaults = json.loads(self.defaults_path.read_text(encoding="utf-8"))
+        _migrate_candidate_padding(defaults)
         return validate_settings(self._set_builtin_output_directory(defaults))
 
     def _set_builtin_output_directory(self, settings: dict[str, Any]) -> dict[str, Any]:
@@ -110,6 +125,16 @@ def _expect_color(value: Any, name: str) -> str:
     return value.lower()
 
 
+def _migrate_candidate_padding(settings: dict[str, Any]) -> None:
+    """Split the former shared candidate padding without losing local settings."""
+    detection = settings.get("detection")
+    if not isinstance(detection, dict):
+        return
+    legacy = detection.get("default_candidate_padding_px", 0)
+    detection.setdefault("default_candidate_padding_px", legacy)
+    detection.setdefault("default_exclude_candidate_padding_px", legacy)
+
+
 def validate_settings(value: Any) -> dict[str, Any]:
     """Validate the small portable settings surface before persisting it."""
     settings = _expect_dict(value, "settings")
@@ -138,11 +163,19 @@ def validate_settings(value: Any) -> dict[str, Any]:
     fluid_exclusion_enabled = _expect_bool(
         detection.get("fluid_exclusion_enabled"), "detection.fluid_exclusion_enabled"
     )
+    fluid_color_fill_enabled = _expect_bool(
+        detection.get("fluid_color_fill_enabled", True), "detection.fluid_color_fill_enabled"
+    )
+    fluid_color_fill_tolerance = detection.get("fluid_color_fill_tolerance", 26)
+    if (isinstance(fluid_color_fill_tolerance, bool) or not isinstance(fluid_color_fill_tolerance, int)
+            or not 0 <= fluid_color_fill_tolerance <= 255):
+        raise SettingsError("detection.fluid_color_fill_tolerance must be an integer between 0 and 255")
     exclude_forced_default = _expect_bool(detection.get("exclude_forced_default"), "detection.exclude_forced_default")
     default_candidate_padding_px = detection.get("default_candidate_padding_px", 0)
-    if (isinstance(default_candidate_padding_px, bool) or not isinstance(default_candidate_padding_px, int)
-            or not 0 <= default_candidate_padding_px <= 16384):
-        raise SettingsError("detection.default_candidate_padding_px must be an integer between 0 and 16384")
+    default_exclude_candidate_padding_px = detection.get("default_exclude_candidate_padding_px", default_candidate_padding_px)
+    for key, candidate_padding in (("default_candidate_padding_px", default_candidate_padding_px), ("default_exclude_candidate_padding_px", default_exclude_candidate_padding_px)):
+        if isinstance(candidate_padding, bool) or not isinstance(candidate_padding, int) or candidate_padding < 0:
+            raise SettingsError(f"detection.{key} must be a non-negative integer")
     fill_color_tolerance = editing.get("fill_color_tolerance")
     if isinstance(fill_color_tolerance, bool) or not isinstance(fill_color_tolerance, int) or not 0 <= fill_color_tolerance <= 255:
         raise SettingsError("editing.fill_color_tolerance must be an integer between 0 and 255")
@@ -152,16 +185,12 @@ def validate_settings(value: Any) -> dict[str, Any]:
     paths = {}
     for key in ("target_segmentation", "ntd11", "sensitive", "hand_detection", "hand_segmentation"):
         path = models.get(key, "") if key == "hand_segmentation" else models.get(key)
-        if not isinstance(path, str):
-            raise SettingsError(f"models.{key} must be a string")
-        paths[key] = path.strip()
+        paths[key] = _validate_model_path(path, f"models.{key}")
     raw_sam_checkpoints = _expect_dict(models.get("sam_checkpoints", {}), "models.sam_checkpoints")
     sam_checkpoints = {}
     for key in ("vit_b", "vit_l", "vit_h"):
         path = raw_sam_checkpoints.get(key, "")
-        if not isinstance(path, str):
-            raise SettingsError(f"models.sam_checkpoints.{key} must be a string")
-        sam_checkpoints[key] = path.strip()
+        sam_checkpoints[key] = _validate_model_path(path, f"models.sam_checkpoints.{key}")
     enabled = {
         key: _expect_bool(models.get(key, False) if key == "hand_segmentation_enabled" else models.get(key), f"models.{key}")
         for key in ("ntd11_enabled", "sensitive_enabled", "hand_detection_enabled", "hand_segmentation_enabled")
@@ -181,7 +210,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "sam_checkpoints": sam_checkpoints,
             "sam_model_type": sam_model_type,
             "provider": provider,
-            "gpu_device": int(_expect_number(models.get("gpu_device", 0), "models.gpu_device", 0, 64)),
+            "gpu_device": int(_expect_number(models.get("gpu_device", 0), "models.gpu_device", 0, float("inf"))),
         },
         "display": {
             "apply_color": _expect_color(display.get("apply_color"), "display.apply_color"),
@@ -191,7 +220,7 @@ def validate_settings(value: Any) -> dict[str, Any]:
             "tool_position": tool_position,
         },
         "importing": {
-            "parallelism": int(_expect_number(importing.get("parallelism"), "importing.parallelism", 1, 10)),
+            "parallelism": int(_expect_number(importing.get("parallelism"), "importing.parallelism", 1, float("inf"))),
         },
         "editing": {
             "fill_color_tolerance": fill_color_tolerance,
@@ -199,14 +228,17 @@ def validate_settings(value: Any) -> dict[str, Any]:
         "detection": {
             "mode": mode,
             "fluid_exclusion_enabled": fluid_exclusion_enabled,
+            "fluid_color_fill_enabled": fluid_color_fill_enabled,
+            "fluid_color_fill_tolerance": fluid_color_fill_tolerance,
             "exclude_forced_default": exclude_forced_default,
             "default_candidate_padding_px": default_candidate_padding_px,
+            "default_exclude_candidate_padding_px": default_exclude_candidate_padding_px,
             "threshold": _expect_number(detection.get("threshold"), "detection.threshold", 0.1, 1),
-            "parallelism": int(_expect_number(detection.get("parallelism"), "detection.parallelism", 1, 4)),
+            "parallelism": int(_expect_number(detection.get("parallelism"), "detection.parallelism", 1, float("inf"))),
             "targets": _validate_targets(detection.get("targets", ["penis", "pussy"])),
         },
         "saving": {
-            "parallelism": int(_expect_number(saving.get("parallelism", 2), "saving.parallelism", 1, 8)),
+            "parallelism": int(_expect_number(saving.get("parallelism", 2), "saving.parallelism", 1, float("inf"))),
             "default_output_directory": _validate_output_directory(
                 saving.get("default_output_directory") or str((Path(__file__).resolve().parent.parent / "output").resolve())
             ),
@@ -229,10 +261,57 @@ def _validate_output_directory(value: Any) -> str:
     raw = value.strip()
     if "\x00" in raw:
         raise SettingsError("saving.default_output_directory must not contain NUL")
-    path = Path(raw)
+    path = Path(raw).expanduser()
     if not path.is_absolute():
         raise SettingsError("saving.default_output_directory must be an absolute path")
-    return str(path)
+    return str(path.resolve())
+
+
+def _validate_model_path(value: Any, name: str) -> str:
+    """Keep persisted model locations unambiguous across restarts."""
+    if not isinstance(value, str):
+        raise SettingsError(f"{name} must be a string")
+    raw = value.strip()
+    if not raw:
+        return ""
+    if "\x00" in raw:
+        raise SettingsError(f"{name} must not contain NUL")
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        raise SettingsError(f"{name} must be an absolute path")
+    return str(path.resolve())
+
+
+def _migrate_legacy_relative_paths(settings: Any) -> bool:
+    """Convert only legacy local.json path values from the old cwd contract."""
+    if not isinstance(settings, dict):
+        return False
+    changed = False
+
+    def migrate(container: Any, key: str) -> None:
+        nonlocal changed
+        if not isinstance(container, dict) or key not in container or not isinstance(container[key], str):
+            return
+        raw = container[key].strip()
+        if not raw:
+            return
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            container[key] = str((Path.cwd() / path).resolve())
+            changed = True
+
+    models = settings.get("models")
+    if isinstance(models, dict):
+        for key in ("target_segmentation", "ntd11", "sensitive", "hand_detection", "hand_segmentation"):
+            migrate(models, key)
+        checkpoints = models.get("sam_checkpoints")
+        if isinstance(checkpoints, dict):
+            for key in ("vit_b", "vit_l", "vit_h"):
+                migrate(checkpoints, key)
+    saving = settings.get("saving")
+    if isinstance(saving, dict):
+        migrate(saving, "default_output_directory")
+    return changed
 
 
 def validate_output_directory_ready(value: str | Path) -> Path:

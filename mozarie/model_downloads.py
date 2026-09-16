@@ -14,6 +14,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from .core import LOGGER
+
 
 class ModelDownloadError(RuntimeError):
     pass
@@ -98,6 +100,7 @@ class ModelDownloadManager:
         self._lock = threading.RLock()
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
+        self._response: Any | None = None
         self._job: dict[str, Any] = {"state": "idle", "paths": {}, "errorCode": ""}
 
     def snapshot(self) -> dict[str, Any]:
@@ -115,6 +118,7 @@ class ModelDownloadManager:
             if self._job.get("state") in {"running", "cancelling"}:
                 raise ModelDownloadInProgress()
             self._cancel = threading.Event()
+            self._response = None
             self._job = {
                 "state": "running", "key": key, "total": len(keys), "completed": 0,
                 "current": keys[0], "received": 0, "expected": MODEL_DOWNLOADS[keys[0]].size, "phase": "checking",
@@ -122,25 +126,32 @@ class ModelDownloadManager:
             }
             self._thread = threading.Thread(target=self._run, args=(keys,), daemon=True, name="mozarie-model-download")
             self._thread.start()
+            LOGGER.info("モデルダウンロードを開始: 対象=%d件", len(keys))
             return self.snapshot()
 
     def cancel(self) -> dict[str, Any]:
         with self._lock:
             if self._job.get("state") == "running":
-                self._cancel.set()
+                self._cancel_active_transfer_unchecked()
                 self._job["state"] = "cancelling"
+                LOGGER.info("モデルダウンロードのキャンセルを受け付け")
             return self.snapshot()
 
-    def shutdown(self, timeout: float = 5) -> bool:
-        """Cancel an active transfer and wait briefly for its worker to leave."""
+    def shutdown(self) -> bool:
+        """Cancel an active transfer, close its response, and wait for its worker."""
         with self._lock:
             thread = self._thread
-            if self._job.get("state") == "running":
-                self._cancel.set()
+            if self._job.get("state") in {"running", "cancelling"}:
+                self._cancel_active_transfer_unchecked()
                 self._job["state"] = "cancelling"
         if thread is not None and thread.is_alive():
-            thread.join(timeout=timeout)
-        return thread is None or not thread.is_alive()
+            thread.join()
+        return True
+
+    def _cancel_active_transfer_unchecked(self) -> None:
+        self._cancel.set()
+        if self._response is not None:
+            self._response.close()
 
     def _set(self, **changes: Any) -> None:
         with self._lock:
@@ -173,6 +184,13 @@ class ModelDownloadManager:
             with self._lock:
                 self._job.update(result)
                 self._thread = None
+            state = str(result.get("state", "failed"))
+            if state == "complete":
+                LOGGER.info("モデルダウンロードが完了: 完了=%d件", len(paths))
+            elif state == "cancelled":
+                LOGGER.info("モデルダウンロードをキャンセル: 完了=%d件", len(paths))
+            else:
+                LOGGER.error("モデルダウンロードに失敗: error_code=%s 完了=%d件", result.get("errorCode", "internal_error"), len(paths))
 
     def _download(self, entry: ModelDownload) -> Path:
         destination = entry.destination(self.app_dir)
@@ -209,33 +227,43 @@ class ModelDownloadManager:
                 headers["Range"] = f"bytes={received}-"
             request = Request(entry.url, headers=headers)
             with opener.open(request, timeout=30) as response:
-                if not response.geturl().lower().startswith("https://"):
-                    raise ModelDownloadError("モデル配布先が安全な HTTPS 接続ではありません。")
-                status = getattr(response, "status", None) or getattr(response, "getcode", lambda: None)()
-                if received and status == 206:
-                    content_range = response.headers.get("Content-Range", "")
-                    if not re.fullmatch(rf"bytes {received}-\d+/{entry.size}", content_range):
-                        raise ModelDownloadError("ダウンロードを再開できませんでした。")
-                elif received:
-                    # A server that ignores Range has returned the entire model.
-                    received = 0
-                    digest = hashlib.sha256()
-                content_length = response.headers.get("Content-Length")
-                expected_length = entry.size - received
-                if content_length and int(content_length) != expected_length:
-                    raise ModelDownloadError("ダウンロードしたモデルのサイズが一致しません。")
-                mode = "ab" if received else "wb"
-                self._set(phase="downloading", received=received, expected=entry.size)
-                with temporary.open(mode) as handle:
-                    while chunk := response.read(1024 * 1024):
+                try:
+                    with self._lock:
+                        self._response = response
                         if self._cancel.is_set():
+                            response.close()
                             raise ModelDownloadCancelled()
-                        received += len(chunk)
-                        if received > entry.size:
-                            raise ModelDownloadError("ダウンロードしたモデルのサイズが一致しません。")
-                        digest.update(chunk)
-                        handle.write(chunk)
-                        self._set(received=received, expected=entry.size)
+                    if not response.geturl().lower().startswith("https://"):
+                        raise ModelDownloadError("モデル配布先が安全な HTTPS 接続ではありません。")
+                    status = getattr(response, "status", None) or getattr(response, "getcode", lambda: None)()
+                    if received and status == 206:
+                        content_range = response.headers.get("Content-Range", "")
+                        if not re.fullmatch(rf"bytes {received}-\d+/{entry.size}", content_range):
+                            raise ModelDownloadError("ダウンロードを再開できませんでした。")
+                    elif received:
+                        # A server that ignores Range has returned the entire model.
+                        received = 0
+                        digest = hashlib.sha256()
+                    content_length = response.headers.get("Content-Length")
+                    expected_length = entry.size - received
+                    if content_length and int(content_length) != expected_length:
+                        raise ModelDownloadError("ダウンロードしたモデルのサイズが一致しません。")
+                    mode = "ab" if received else "wb"
+                    self._set(phase="downloading", received=received, expected=entry.size)
+                    with temporary.open(mode) as handle:
+                        while chunk := response.read(1024 * 1024):
+                            if self._cancel.is_set():
+                                raise ModelDownloadCancelled()
+                            received += len(chunk)
+                            if received > entry.size:
+                                raise ModelDownloadError("ダウンロードしたモデルのサイズが一致しません。")
+                            digest.update(chunk)
+                            handle.write(chunk)
+                            self._set(received=received, expected=entry.size)
+                finally:
+                    with self._lock:
+                        if self._response is response:
+                            self._response = None
             if received != entry.size:
                 raise ModelDownloadError("ダウンロードしたモデルのサイズが一致しません。")
             self._set(phase="verifying", received=received, expected=entry.size)
@@ -248,6 +276,8 @@ class ModelDownloadManager:
             raise
         except (HTTPError, URLError, OSError):
             # Keep a partial file after an interrupted transfer as well.
+            if self._cancel.is_set():
+                raise ModelDownloadCancelled()
             raise
         except ModelDownloadError:
             # A malformed, oversized, or hash-mismatched response cannot be

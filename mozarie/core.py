@@ -83,10 +83,7 @@ DEFAULT_COLORS = {
 DEFAULT_DETECTION_CONFIDENCE = 0.50
 SECONDARY_MIN_CONFIDENCE = 0.50
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-MAX_BODY_BYTES = 80 * 1024 * 1024
 IO_CHUNK_BYTES = 1024 * 1024
-THUMBNAIL_WORKERS = 4
-SAVE_TOKEN_TTL_SECONDS = 10 * 60
 LOGGER = logging.getLogger(__name__)
 PUBLIC_ERROR_PARAMS: dict[str, frozenset[str]] = {
     "gpu_out_of_memory": frozenset({"parallelism"}),
@@ -209,6 +206,8 @@ class BrowserSaveToken:
     # are never represented here.
     output_path: Path | None = None
     output_fingerprint: tuple[int, int] | None = None
+    output_destination: Path | None = None
+    state: str = "pending"
     allow_copy_action: bool = False
     no_effect: bool = False
     output_format: str = "original"
@@ -224,7 +223,7 @@ class BrowserSaveToken:
 class BrowserSaveRender:
     """Rendered output and the opaque confirmation token for one browser save."""
 
-    output: bytes
+    output: bytes | None
     record: ImageRecord
     candidate_revision: int
     save_token: str
@@ -233,6 +232,8 @@ class BrowserSaveRender:
     output_format: str = "original"
     mime_type: str = "application/octet-stream"
     extension: str = ""
+    response_path: Path | None = None
+    response_path_is_temporary: bool = False
 
     def __iter__(self):
         yield self.output
@@ -252,7 +253,8 @@ class BrowserSaveReceipt:
     stale: bool
     deleted: bool
     catalog_generation: int
-    completed_at: float
+    source_delete_pending: bool = False
+    completed_at: float = 0.0
 
 
 @dataclass
@@ -851,14 +853,14 @@ def _read_mosaic_divisor(value: Any) -> int:
         divisor = int(value)
     except (TypeError, ValueError) as exc:
         raise ClientError("モザイク粗さが正しくありません。", "input_invalid") from exc
-    if not 1 <= divisor <= 10000:
-        raise ClientError("モザイク粗さの分母は1から10000の範囲で指定してください。", "input_invalid")
+    if divisor < 1:
+        raise ClientError("モザイク粗さの分母は1以上で指定してください。", "input_invalid")
     return divisor
 
 
 def _read_detection_parallelism(value: Any) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 4:
-        raise ClientError("並列数は1から4で指定してください。", "input_invalid")
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ClientError("並列数は1以上で指定してください。", "input_invalid")
     return value
 
 

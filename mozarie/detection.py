@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -13,7 +15,7 @@ from PIL import Image, ImageOps, PngImagePlugin
 from .core import (
     DEFAULT_COLORS, DEFAULT_DETECTION_CONFIDENCE, HAND_CONFIDENCE,
     DETECTED_TARGET_CLASSES, TARGET_CLASSES, Candidate, CandidateRole,
-    ClientError, HAND_MAX_REMOVAL_RATIO, ImageRecord, JobControl, accepted_hand_sam_mask,
+    ClientError, HAND_MAX_REMOVAL_RATIO, ImageRecord, JobControl, LOGGER, accepted_hand_sam_mask,
     accepted_specialist_hand_mask, arbitrate_segment_sources, clip_mask_to_roi,
     confidence_for_source, detection_tiles, mask_iou, materialize_tile_mask,
     merge_tile_segment, padded_hand_box, read_boundary_request,
@@ -23,7 +25,7 @@ from .core import (
     select_best_sam_mask, select_semantic_sam_mask,
     torch_module, _read_detection_parallelism, _read_target_classes,
 )
-from .fluid import white_fluid_mask
+from .fluid import expand_white_fluid_mask, white_fluid_mask
 from .image_io import canonical_image
 from .runtime import runtime_backend
 from .runtime_types import DetectionModels
@@ -98,6 +100,8 @@ class DetectionMixin:
         confidence: float = DEFAULT_DETECTION_CONFIDENCE,
         parallelism: int = 2,
         target_classes: set[str] | None = None,
+        *,
+        fluid_color_fill: tuple[bool, int] | None = None,
     ) -> None:
         # The gate makes initial job setup mutually exclusive with boundary
         # inference and model-cache replacement.
@@ -108,15 +112,35 @@ class DetectionMixin:
                 self._assert_image_editable(record.image_id)
             targets = _read_target_classes(target_classes or set(self.settings["detection"]["targets"]))
             # Every successfully published result belongs to one undo group.
-            # The worker still commits each image as it finishes, so detection
-            # progress and cancellation remain responsive.
+            # Candidates remain staged until every target is ready, then the
+            # group is published as one SQLite transaction.
             self._detection_history_group = self.workspace_store.begin_history_group()
-            # Capture the default here. Settings may be changed after the job
-            # starts, but one detection run must use one coherent value.
-            self._active_detection_default_padding = int(self.settings["detection"]["default_candidate_padding_px"])
-            args: tuple[Any, ...] = (confidence, _read_detection_parallelism(parallelism))
-            if targets != TARGET_CLASSES:
-                args = (*args, targets)
+            # Capture every per-run option before the worker starts.  A saved
+            # settings change must never alter only the latter images of one
+            # detection run.
+            detection = self.settings["detection"]
+            detection_options = {
+                "mode": str(detection["mode"]),
+                "fluid_exclusion_enabled": bool(detection["fluid_exclusion_enabled"]),
+                "fluid_color_fill": fluid_color_fill if fluid_color_fill is not None else (
+                    bool(detection["fluid_color_fill_enabled"]),
+                    int(detection["fluid_color_fill_tolerance"]),
+                ),
+                "default_padding": int(detection["default_candidate_padding_px"]),
+                "default_exclude_padding": int(detection["default_exclude_candidate_padding_px"]),
+            }
+            LOGGER.info(
+                "自動検出開始: 対象=%d件 精液候補の色拡張=%s 許容範囲=%d",
+                len(records),
+                "ON" if detection_options["fluid_color_fill"][0] else "OFF",
+                detection_options["fluid_color_fill"][1],
+            )
+            args: tuple[Any, ...] = (
+                confidence,
+                _read_detection_parallelism(parallelism),
+                targets,
+                detection_options,
+            )
             self._start_job("detect", records, self._detect_worker, *args, expected_catalog_generation=catalog_generation)
 
 
@@ -148,6 +172,8 @@ class DetectionMixin:
         if not raw_path:
             raise ClientError(f"{label}モデルが未設定です。設定のモデルタブでONNXファイルを指定してください。", "model_not_configured")
         path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            raise ClientError(f"{label}モデルには絶対パスを指定してください。", "model_file_invalid")
         if not path.is_file():
             raise ClientError(f"{label}モデルが見つかりません。設定で指定し直してください。", "model_file_missing")
         if path.suffix.lower() != ".onnx":
@@ -163,6 +189,8 @@ class DetectionMixin:
                 "sam_checkpoint_missing",
             )
         path = Path(raw_path).expanduser()
+        if not path.is_absolute():
+            raise ClientError("SAMモデルには絶対パスを指定してください。", "sam_checkpoint_invalid")
         if not path.is_file():
             raise ClientError("SAMモデルが見つかりません。設定で指定し直してください。", "model_file_missing")
         if path.suffix.lower() not in {".pth", ".pt", ".ckpt"}:
@@ -216,12 +244,15 @@ class DetectionMixin:
         confidence: float,
         parallelism: int = 2,
         target_classes: set[str] | None = None,
+        detection_options: dict[str, Any] | None = None,
         *,
         control: JobControl | None = None,
         job_generation: int | None = None,
         catalog_generation: int | None = None,
     ) -> None:
         models: DetectionModels | None = None
+        staged: dict[str, tuple[int, ImageRecord, list[Candidate]]] = {}
+        durable_published = False
         try:
             # Direct workers without a launch epoch snapshot it once before
             # any work; publication must
@@ -230,7 +261,19 @@ class DetectionMixin:
             if catalog_generation is None:
                 with self.lock:
                     catalog_generation = self.catalog_generation
-            mode = str(self.settings["detection"]["mode"])
+            if detection_options is None:
+                detection = self.settings["detection"]
+                detection_options = {
+                    "mode": str(detection["mode"]),
+                    "fluid_exclusion_enabled": bool(detection["fluid_exclusion_enabled"]),
+                    "fluid_color_fill": (
+                        bool(detection["fluid_color_fill_enabled"]),
+                        int(detection["fluid_color_fill_tolerance"]),
+                    ),
+                    "default_padding": int(detection["default_candidate_padding_px"]),
+                    "default_exclude_padding": int(detection["default_exclude_candidate_padding_px"]),
+                }
+            mode = str(detection_options["mode"])
             requested_parallelism = _read_detection_parallelism(parallelism)
             if runtime_backend(torch_module=torch_module()) == "directml":
                 requested_parallelism = 1
@@ -238,79 +281,46 @@ class DetectionMixin:
             self._set_job_parallelism(worker_count, job_generation, catalog_generation)
             self._wait_while_paused(control, job_generation, catalog_generation)
             if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
+                group_id = getattr(self, "_detection_history_group", None)
+                if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
                 self._cancel_job(job_generation, catalog_generation)
                 return
             if not self._job_is_current(job_generation, catalog_generation):
+                group_id = getattr(self, "_detection_history_group", None)
+                if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
                 return
             models = self._ensure_models()
+            stage_lock = threading.Lock()
 
             def claim_and_run(index: int, record: ImageRecord) -> None:
+                candidates: list[Candidate] = []
                 try:
                     self._set_job_current(record.relative_path, job_generation, catalog_generation)
-                    candidates = self._detect_image(models, record, confidence, mode, target_classes or TARGET_CLASSES)
+                    candidates = self._detect_image(
+                        models,
+                        record,
+                        confidence,
+                        mode,
+                        target_classes or TARGET_CLASSES,
+                        default_padding=int(detection_options["default_padding"]),
+                        default_exclude_padding=int(detection_options["default_exclude_padding"]),
+                        fluid_exclusion_enabled=bool(detection_options["fluid_exclusion_enabled"]),
+                        fluid_color_fill=detection_options["fluid_color_fill"],
+                    )
                     if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
-                        self._discard_candidates(candidates)
                         return
-                    try:
-                        image_lock = self.image_io_lock(record.image_id)
-                    except ClientError:
-                        self._discard_candidates(candidates)
-                        raise
-                    with image_lock:
-                        with self.lock:
-                            if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
-                                    or not self._job_is_current(job_generation, catalog_generation)
-                                    or self.images.get(record.image_id) is not record):
-                                self._discard_candidates(candidates)
-                                return
-                        try:
-                            self._assert_record_stat_matches(record)
-                        except ClientError:
-                            self._discard_candidates(candidates)
-                            raise
-                        with self.lock:
-                            if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
-                                    or not self._job_is_current(job_generation, catalog_generation)
-                                    or self.images.get(record.image_id) is not record):
-                                self._discard_candidates(candidates)
-                                return
-                            boundary_candidates = [candidate for candidate in self.candidates.get(record.image_id, []) if candidate.origin == "boundary"]
-                            stale_paths = [candidate.mask_path for candidate in self.candidates.get(record.image_id, []) if candidate.origin != "boundary"]
-                            expected_revision = self._candidate_revision(record.image_id)
-                        try:
-                            for candidate in candidates:
-                                final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
-                                if candidate.mask_path.name.startswith(".mozarie-pending-"):
-                                    os.replace(candidate.mask_path, final_path)
-                                    candidate.mask_path = final_path
-                        except Exception:
-                            self._discard_candidates(candidates)
-                            raise
-                        if control is not None and (control.cancel_requested.is_set() or control.failed.is_set()):
-                            self._discard_candidates(candidates)
+                    self._assert_record_stat_matches(record)
+                    with self.lock:
+                        if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                                or not self._job_is_current(job_generation, catalog_generation)
+                                or self.images.get(record.image_id) is not record):
                             return
-                        try:
-                            # PNG publication, effective-mask composition and
-                            # SQLite history are all deliberately outside the
-                            # global state lock.  The per-image lock above
-                            # keeps this epoch stable until the short publish.
-                            self._commit_candidate_snapshot_outside_state_lock(
-                                record.image_id, [*boundary_candidates, *candidates], replace=True,
-                                expected_revision=expected_revision, expected_catalog_generation=catalog_generation,
-                                history_group=getattr(self, "_detection_history_group", None),
-                            )
-                        except Exception:
-                            # The durable transaction did not publish this run:
-                            # remove every new final-path mask. The previous
-                            # candidate generation remains intact.
-                            self._discard_candidates(candidates)
-                            raise
-                        with self.lock:
-                            self._record_job_success(index, record.image_id, None, job_generation, catalog_generation)
-                        for path in stale_paths:
-                            path.unlink(missing_ok=True)
-                    self._set_job_current(record.relative_path, job_generation, catalog_generation)
+                        expected_revision = self._candidate_revision(record.image_id)
+                    with stage_lock:
+                        staged[record.image_id] = (index, record, candidates)
+                    candidates = []
                 finally:
+                    self._discard_candidates(candidates)
                     self.invalidate_sam_image(record.image_id)
 
             failures = self._run_fixed_workers(records, worker_count, claim_and_run, control, job_generation, catalog_generation)
@@ -322,19 +332,106 @@ class DetectionMixin:
                 group_id = getattr(self, "_detection_history_group", None)
                 if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
                 self._fail_job(failures[0][1], job_generation, catalog_generation)
+                for _index, _record, candidates in staged.values():
+                    self._discard_candidates(candidates)
                 return
             if control is not None and control.cancel_requested.is_set():
                 group_id = getattr(self, "_detection_history_group", None)
                 if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
                 self._cancel_job(job_generation, catalog_generation)
+                for _index, _record, candidates in staged.values():
+                    self._discard_candidates(candidates)
                 return
-            group_id = getattr(self, "_detection_history_group", None)
-            if group_id: self.workspace_store.finish_history_group(group_id)
+            if len(staged) != len(records):
+                raise ClientError("検出結果を公開できませんでした。", "catalog_changed")
+
+            locks = [(record.image_id, self.image_io_lock(record.image_id)) for record in records]
+            with ExitStack() as stack:
+                for _image_id, image_lock in sorted(locks):
+                    stack.enter_context(image_lock)
+                with self.lock:
+                    if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                            or not self._job_is_current(job_generation, catalog_generation)
+                            or any(self.images.get(record.image_id) is not record for record in records)):
+                        raise ClientError("フォルダを再読み込みしたため、検出結果を破棄しました。", "catalog_changed")
+                    expected_revisions = {record.image_id: self._candidate_revision(record.image_id) for record in records}
+                    previous = {
+                        record.image_id: [candidate for candidate in self.candidates.get(record.image_id, [])]
+                        for record in records
+                    }
+                combined: dict[str, list[Candidate]] = {
+                    record.image_id: [
+                        *[candidate for candidate in previous[record.image_id] if candidate.origin == "boundary"],
+                        *staged[record.image_id][2],
+                    ]
+                    for record in records
+                }
+                try:
+                    # Move each staged PNG before SQLite reads it.  Every
+                    # candidate remains in ``staged`` while moving, so one
+                    # failed move cleans both already-final files and pending
+                    # files from the same run.
+                    for record in records:
+                        for candidate in staged[record.image_id][2]:
+                            if candidate.mask_path.name.startswith(".mozarie-pending-"):
+                                final_path = self.cache_dir / record.image_id / f"{candidate.candidate_id}.png"
+                                os.replace(candidate.mask_path, final_path)
+                                candidate.mask_path = final_path
+                    # The source can change while model workers run.  Check it
+                    # again with every image lock held directly before the
+                    # durable state is prepared.
+                    for record in records:
+                        self._assert_record_stat_matches(record)
+                    states = [
+                        (record.image_id, expected_revisions[record.image_id], expected_revisions[record.image_id] + 1,
+                         combined[record.image_id], self._effective_mask_for_candidates(record.image_id, combined[record.image_id]))
+                        for record in records
+                    ]
+                    # All state-changing paths use catalogue lock -> workspace
+                    # transaction.  Acquiring the catalogue lock before the
+                    # prepared write avoids waiting on another edit that holds
+                    # that lock while it writes SQLite.
+                    with self.lock:
+                        if ((control is not None and (control.cancel_requested.is_set() or control.failed.is_set()))
+                                or not self._job_is_current(job_generation, catalog_generation)
+                                or any(self.images.get(record.image_id) is not record for record in records)
+                                or any(self._candidate_revision(record.image_id) != expected_revisions[record.image_id] for record in records)):
+                            raise ClientError("フォルダを再読み込みしたため、検出結果を破棄しました。", "catalog_changed")
+                        pending = self.workspace_store.prepare_detection_states(
+                            states, history_group=getattr(self, "_detection_history_group", None),
+                        )
+                        # SQLite and the process cache become visible under the
+                        # same catalogue lock. A catalog transition cannot
+                        # interleave this commit and the in-memory publish.
+                        pending.commit()
+                        durable_published = True
+                        for record in records:
+                            self.candidates[record.image_id] = combined[record.image_id]
+                            self.candidate_revisions[record.image_id] = expected_revisions[record.image_id] + 1
+                            record.reviewed = False
+                            self._record_job_success(staged[record.image_id][0], record.image_id, None, job_generation, catalog_generation)
+                except Exception:
+                    for _index, _record, candidates in staged.values():
+                        self._discard_candidates(candidates)
+                    raise
+                for record in records:
+                    for candidate in previous[record.image_id]:
+                        if candidate.origin != "boundary":
+                            try:
+                                candidate.mask_path.unlink(missing_ok=True)
+                            except OSError:
+                                # Old cache files are disposable.  Their
+                                # cleanup must not turn a published history
+                                # group into a failed operation.
+                                pass
             self._finish_job(job_generation, catalog_generation)
         except Exception as exc:  # A background job must not kill the HTTP server.
             models = None
             group_id = getattr(self, "_detection_history_group", None)
-            if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
+            if not durable_published:
+                if group_id: self.workspace_store.finish_history_group(group_id, failed=True)
+                for _index, _record, candidates in staged.values():
+                    self._discard_candidates(candidates)
             self._fail_job(exc, job_generation, catalog_generation)
         finally:
             # ``claim_and_run`` closes over this value. Drop it before the
@@ -455,7 +552,7 @@ class DetectionMixin:
         return self._attach_hand_evidence(segments, detected, hand_mask)
 
     @staticmethod
-    def _metadata_fluid_mask(
+    def _metadata_fluid_search(
         rgb: np.ndarray, final_masks: list[np.ndarray], hand_evidence: np.ndarray, faces: list[dict[str, Any]], scene_fluid_tags: frozenset[str],
     ) -> np.ndarray:
         shape = np.asarray(rgb).shape[:2]
@@ -503,13 +600,21 @@ class DetectionMixin:
                     center + width * .50,
                     bottom + height * 1.75,
                 )
-        return white_fluid_mask(rgb, search) if np.any(search) else np.zeros(shape, dtype=np.uint8)
+        return search
 
     def _finalize_exclusions(
         self, rgb: np.ndarray, segments: list[dict[str, Any]], scene_fluid_tags: frozenset[str] = frozenset(),
+        *,
+        alpha: np.ndarray | None = None,
+        fluid_exclusion_enabled: bool | None = None,
+        fluid_color_fill: tuple[bool, int] | None = None,
     ) -> list[dict[str, Any]]:
         """Create reviewable non-hand exclusions from the final APPLY mask."""
         shape = np.asarray(rgb).shape[:2]
+        if fluid_exclusion_enabled is None:
+            fluid_exclusion_enabled = bool(self.settings["detection"]["fluid_exclusion_enabled"])
+        expand_fluid = fluid_color_fill is not None and fluid_color_fill[0]
+        fluid_tolerance = fluid_color_fill[1] if expand_fluid else 0
         targets = [segment for segment in segments if segment.get("class_name") in DETECTED_TARGET_CLASSES]
         faces = [segment for segment in segments if segment.get("class_name") == "female_face"]
         if not targets and not scene_fluid_tags:
@@ -540,13 +645,20 @@ class DetectionMixin:
         safe_hand = np.where(unsafe_targets > 0, 0, safe_hand).astype(np.uint8) * 255
 
         fluid_union = np.zeros(shape, dtype=np.uint8)
-        if self.settings["detection"]["fluid_exclusion_enabled"]:
+        if fluid_exclusion_enabled:
             for final_mask in final_masks:
                 if np.any(final_mask):
-                    fluid_union = np.maximum(fluid_union, white_fluid_mask(rgb, final_mask))
+                    fluid_seed = white_fluid_mask(rgb, final_mask)
+                    fluid_mask = (
+                        expand_white_fluid_mask(rgb, fluid_seed, final_mask, fluid_tolerance, alpha=alpha)
+                        if expand_fluid else fluid_seed
+                    )
+                    fluid_union = np.maximum(fluid_union, fluid_mask)
+        metadata_search = self._metadata_fluid_search(rgb, final_masks, hand_evidence, faces, scene_fluid_tags)
+        metadata_seed = white_fluid_mask(rgb, metadata_search) if fluid_exclusion_enabled and np.any(metadata_search) else np.zeros(shape, dtype=np.uint8)
         metadata_fluid = (
-            self._metadata_fluid_mask(rgb, final_masks, hand_evidence, faces, scene_fluid_tags)
-            if self.settings["detection"]["fluid_exclusion_enabled"] else np.zeros(shape, dtype=np.uint8)
+            expand_white_fluid_mask(rgb, metadata_seed, metadata_search, fluid_tolerance, alpha=alpha)
+            if expand_fluid and np.any(metadata_seed) else metadata_seed
         )
         if not targets:
             if np.any(metadata_fluid):
@@ -570,7 +682,7 @@ class DetectionMixin:
     def _high_precision_segments(
         self, models: DetectionModels, record: ImageRecord, rgb: np.ndarray, segments: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """Keep only target regions confirmed by high-precision SAM."""
+        """Refine target regions without discarding detector evidence."""
         if not any(segment.get("class_name") in DETECTED_TARGET_CLASSES for segment in segments):
             return segments
         with self.sam_lock:
@@ -589,6 +701,8 @@ class DetectionMixin:
             hand_mask = np.asarray(segment.get("_confirmed_hand", np.zeros_like(source_mask)) > 0, dtype=np.uint8)
             coordinates = np.argwhere(source_mask > 0)
             if not len(coordinates):
+                # No detector pixels means there is no APPLY evidence to
+                # preserve or refine. Do not publish an empty PNG candidate.
                 continue
             top, left = coordinates.min(axis=0)
             bottom, right = coordinates.max(axis=0) + 1
@@ -598,6 +712,10 @@ class DetectionMixin:
                    min(width, int(right + padding)), min(height, int(bottom + padding)))
             prompt_points, labels = sam_refinement_prompts(source_mask, hand_mask)
             if not len(prompt_points):
+                segment["mask"] = source_mask
+                segment["_apply_mask"] = source_mask
+                segment["refinement"] = "sam_fallback"
+                refined_segments.append(segment)
                 continue
             consensus = len(segment.get("_consensus_sources", frozenset({str(segment["source"])}))) >= 2
 
@@ -625,6 +743,10 @@ class DetectionMixin:
             clipped_masks = np.asarray([clip_mask_to_roi(mask, roi) for mask in masks])
             selected, initial_relaxed = select_mask(clipped_masks, scores)
             if selected is None:
+                segment["mask"] = source_mask
+                segment["_apply_mask"] = source_mask
+                segment["refinement"] = "sam_fallback"
+                refined_segments.append(segment)
                 continue
             refined, selected_index = selected
             hand_overlap = int(np.count_nonzero((refined > 0) & (hand_mask > 0)))
@@ -660,6 +782,9 @@ class DetectionMixin:
         self, models: DetectionModels, record: ImageRecord, confidence: float, mode: str | None = None,
         target_classes: set[str] | None = None,
         default_padding: int | None = None,
+        default_exclude_padding: int | None = None,
+        fluid_exclusion_enabled: bool | None = None,
+        fluid_color_fill: tuple[bool, int] | None = None,
     ) -> list[Candidate]:
         # Decode is a short per-image phase. Do not hold the image
         # lock while detector/SAM inference runs.
@@ -668,12 +793,22 @@ class DetectionMixin:
                 int(self._active_detection_default_padding),
                 int(np.ceil(np.hypot(record.width - 1, record.height - 1))),
             )
+        if default_exclude_padding is None:
+            default_exclude_padding = int(self._active_detection_default_exclude_padding)
+        default_exclude_padding = min(
+            default_exclude_padding,
+            int(np.ceil(np.hypot(record.width - 1, record.height - 1))),
+        )
         with self.image_io_lock(record.image_id):
             self._assert_record_stat_matches(record)
             image, _source, info = canonical_image(record)
             scene_fluid_tags = _scene_fluid_tags(info)
             rgb = np.asarray(image.convert("RGB")).copy()
-        if not self.settings["detection"]["fluid_exclusion_enabled"]:
+            has_alpha = "A" in image.getbands() or (image.mode == "P" and "transparency" in image.info)
+            alpha = np.asarray(image.convert("RGBA"))[:, :, 3].copy() if has_alpha else None
+        if fluid_exclusion_enabled is None:
+            fluid_exclusion_enabled = bool(self.settings["detection"]["fluid_exclusion_enabled"])
+        if not fluid_exclusion_enabled:
             scene_fluid_tags = frozenset()
         segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES, scene_fluid_tags)
         detected, hand_mask, _ = self._hand_refinement_context(models, record, rgb, segments)
@@ -685,8 +820,14 @@ class DetectionMixin:
                 segments = self._high_precision_segments_with_predictor(rgb, segments, predictor)
         else:
             segments = self._attach_hand_evidence(segments, detected, hand_mask)
-        segments = (self._finalize_exclusions(rgb, segments, scene_fluid_tags)
-                    if scene_fluid_tags else self._finalize_exclusions(rgb, segments))
+        segments = self._finalize_exclusions(
+            rgb,
+            segments,
+            scene_fluid_tags,
+            alpha=alpha,
+            fluid_exclusion_enabled=fluid_exclusion_enabled,
+            fluid_color_fill=fluid_color_fill,
+        )
         candidates: list[Candidate] = []
         destination = self.cache_dir / record.image_id
         destination.mkdir(parents=True, exist_ok=True)
@@ -707,7 +848,7 @@ class DetectionMixin:
                     origin="auto",
                     role=CandidateRole.EXCLUDE,
                     forced=self.settings["detection"].get("exclude_forced_default", True),
-                    expand_px=default_padding,
+                    expand_px=default_exclude_padding,
                 ))
             for exclusion_kind, exclusion_mask in dict(segment.get("metadata_exclusions", {})).items():
                 exclusion_id = uuid.uuid4().hex
@@ -717,7 +858,7 @@ class DetectionMixin:
                     candidate_id=exclusion_id, label_token=exclusion_kind, confidence=None,
                     mask_path=exclusion_path, color="#4ac3df", source=f"{exclusion_kind}_exclusion",
                     origin="auto", role=CandidateRole.EXCLUDE, enabled=True, forced=False,
-                    expand_px=default_padding,
+                    expand_px=default_exclude_padding,
                 ))
             if segment["class_name"] not in DETECTED_TARGET_CLASSES:
                 continue
@@ -758,7 +899,7 @@ class DetectionMixin:
                     role=CandidateRole.EXCLUDE,
                     enabled=True,
                     forced=self.settings["detection"].get("exclude_forced_default", True),
-                    expand_px=default_padding,
+                    expand_px=default_exclude_padding,
                 ))
         return candidates
 
@@ -782,32 +923,44 @@ class DetectionMixin:
                 self._assert_request_catalog_expectation()
             self._assert_record_stat_matches(record)
         polygon_mask: np.ndarray | None = None
-        if "points" in payload:
-            roi, point, polygon_mask = read_polygon_boundary_request(payload, record.width, record.height)
-        else:
-            roi, point = read_boundary_request(payload, record.width, record.height)
+        try:
+            if "points" in payload:
+                roi, point, polygon_mask = read_polygon_boundary_request(payload, record.width, record.height)
+            else:
+                roi, point = read_boundary_request(payload, record.width, record.height)
+        except (MemoryError, OSError) as exc:
+            raise ClientError("境界候補の範囲を処理できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
         with self.image_io_lock(image_id):
             self._assert_record_stat_matches(record)
-            image, _source, _info = canonical_image(record)
-            rgb = np.asarray(image.convert("RGB")).copy()
+            try:
+                image, _source, _info = canonical_image(record)
+                rgb = np.asarray(image.convert("RGB")).copy()
+            except (MemoryError, OSError) as exc:
+                raise ClientError("境界候補用の画像を読み込めません。使用可能なメモリを確認してください。", "image_read_failed") from exc
         with self.inference_lock:
             with self.lock:
                 if self.job.state in {"running", "pausing"} or self._has_active_worker():
                     raise ClientError("既存の処理が完了してから境界を検出してください。", "operation_in_progress")
             with self.sam_lock:
-                predictor = self._sam_predictor_for(record, rgb)
-                masks, scores, _logits = predictor.predict(
-                    point_coords=np.asarray([point], dtype=np.float32),
-                    point_labels=np.asarray([1], dtype=np.int32),
-                    box=np.asarray(roi, dtype=np.float32),
-                    multimask_output=True,
-                )
-        mask, confidence = select_best_sam_mask(masks, scores)
-        clipped = clip_mask_to_roi(mask, roi)
-        if polygon_mask is not None:
-            clipped = np.where(polygon_mask > 0, clipped, 0).astype(np.uint8)
-        if not np.any(clipped):
-            raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。", "outline_not_found")
+                try:
+                    predictor = self._sam_predictor_for(record, rgb)
+                    masks, scores, _logits = predictor.predict(
+                        point_coords=np.asarray([point], dtype=np.float32),
+                        point_labels=np.asarray([1], dtype=np.int32),
+                        box=np.asarray(roi, dtype=np.float32),
+                        multimask_output=True,
+                    )
+                except (MemoryError, OSError) as exc:
+                    raise ClientError("境界候補を検出できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
+        try:
+            mask, confidence = select_best_sam_mask(masks, scores)
+            clipped = clip_mask_to_roi(mask, roi)
+            if polygon_mask is not None:
+                clipped = np.where(polygon_mask > 0, clipped, 0).astype(np.uint8)
+            if not np.any(clipped):
+                raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。", "outline_not_found")
+        except (MemoryError, OSError) as exc:
+            raise ClientError("境界候補のマスクを処理できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
 
         with self.lock:
             if self.images.get(image_id) is not record:
@@ -816,63 +969,78 @@ class DetectionMixin:
 
         # Keep the selected SAM shape as APPLY. Hand/fluid removal is represented
         # by an independently toggleable EXCLUDE candidate just as in auto detect.
-        boundary_segment = {
-            "class_name": "penis",
-            "confidence": confidence,
-            "mask": clipped.copy(),
-            "source": "boundary",
-        }
+        try:
+            boundary_segment = {
+                "class_name": "penis",
+                "confidence": confidence,
+                "mask": clipped.copy(),
+                "source": "boundary",
+            }
+        except (MemoryError, OSError) as exc:
+            raise ClientError("境界候補のマスクを処理できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
         with self.inference_lock:
             with self.lock:
                 if self.job.state in {"running", "pausing"} or self._has_active_worker():
                     raise ClientError("既存の処理が完了してから境界を検出してください。", "operation_in_progress")
-            hand_mask = np.zeros(rgb.shape[:2], dtype=np.uint8)
-            hand_boxes = self._hand_boxes_over_apply(
-                [box for box in (padded_hand_box(box, rgb.shape[:2]) for box in self._boundary_hand_boxes(rgb)) if box is not None],
-                [clipped],
-            )
-            if hand_boxes and self.settings["models"].get("hand_segmentation_enabled"):
-                with self.hand_segmentation_lock:
-                    specialist = self._hand_segmentation_predictor_for(record, rgb)
-                    for box in hand_boxes:
-                        masks, _scores, _ = specialist.predict(
-                            point_coords=None, point_labels=None, box=np.asarray(box, dtype=np.float32), multimask_output=False,
-                        )
-                        confirmed = accepted_specialist_hand_mask(masks, rgb.shape[:2], box)
-                        if confirmed is not None:
-                            hand_mask = np.maximum(hand_mask, confirmed)
-            if np.any(hand_mask):
-                boundary_segment["image_exclusions"] = {"hand": hand_mask}
-            boundary_segment = self._finalize_exclusions(rgb, [boundary_segment])[0]
-            candidate_id = uuid.uuid4().hex
-            default_padding = min(int(self.settings["detection"]["default_candidate_padding_px"]), int(np.ceil(np.hypot(record.width - 1, record.height - 1))))
-            created = [Candidate(
-                candidate_id=candidate_id,
-                label_token="boundary_polygon" if polygon_mask is not None else "boundary",
-                confidence=confidence,
-                mask_path=self.cache_dir / record.image_id / f"{candidate_id}.png",
-                color="#ffffff", source="boundary", origin="boundary", expand_px=default_padding,
-            )]
-            masks = [np.asarray(clipped, dtype=np.uint8)]
-            exclusions = {
-                **dict(boundary_segment.get("image_exclusions", {})),
-                **dict(boundary_segment.get("exclusions", {})),
-            }
-            for exclusion_kind, exclusion_mask in exclusions.items():
-                if not np.any(exclusion_mask):
-                    continue
-                exclusion_source = f"{exclusion_kind}_exclusion"
-                exclusion_id = uuid.uuid4().hex
-                created.append(Candidate(
-                    candidate_id=exclusion_id, label_token=exclusion_kind, confidence=None,
-                    mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png", color="#4ac3df",
-                    source=exclusion_source, origin="boundary", role=CandidateRole.EXCLUDE,
-                    enabled=True,
-                    forced=self.settings["detection"].get("exclude_forced_default", True),
-                    expand_px=default_padding,
-                ))
-                masks.append(np.asarray(exclusion_mask, dtype=np.uint8))
+            try:
+                hand_mask = np.zeros(rgb.shape[:2], dtype=np.uint8)
+                hand_boxes = self._hand_boxes_over_apply(
+                    [box for box in (padded_hand_box(box, rgb.shape[:2]) for box in self._boundary_hand_boxes(rgb)) if box is not None],
+                    [clipped],
+                )
+                if hand_boxes and self.settings["models"].get("hand_segmentation_enabled"):
+                    with self.hand_segmentation_lock:
+                        specialist = self._hand_segmentation_predictor_for(record, rgb)
+                        for box in hand_boxes:
+                            masks, _scores, _ = specialist.predict(
+                                point_coords=None, point_labels=None, box=np.asarray(box, dtype=np.float32), multimask_output=False,
+                            )
+                            confirmed = accepted_specialist_hand_mask(masks, rgb.shape[:2], box)
+                            if confirmed is not None:
+                                hand_mask = np.maximum(hand_mask, confirmed)
+                if np.any(hand_mask):
+                    boundary_segment["image_exclusions"] = {"hand": hand_mask}
+                boundary_segment = self._finalize_exclusions(rgb, [boundary_segment])[0]
+                candidate_id = uuid.uuid4().hex
+                default_padding = min(int(self.settings["detection"]["default_candidate_padding_px"]), int(np.ceil(np.hypot(record.width - 1, record.height - 1))))
+                default_exclude_padding = min(int(self.settings["detection"]["default_exclude_candidate_padding_px"]), int(np.ceil(np.hypot(record.width - 1, record.height - 1))))
+                created = [Candidate(
+                    candidate_id=candidate_id,
+                    label_token="boundary_polygon" if polygon_mask is not None else "boundary",
+                    confidence=confidence,
+                    mask_path=self.cache_dir / record.image_id / f"{candidate_id}.png",
+                    color="#ffffff", source="boundary", origin="boundary", expand_px=default_padding,
+                )]
+                masks = [np.asarray(clipped, dtype=np.uint8)]
+                exclusions = {
+                    **dict(boundary_segment.get("image_exclusions", {})),
+                    **dict(boundary_segment.get("exclusions", {})),
+                }
+                for exclusion_kind, exclusion_mask in exclusions.items():
+                    if not np.any(exclusion_mask):
+                        continue
+                    exclusion_source = f"{exclusion_kind}_exclusion"
+                    exclusion_id = uuid.uuid4().hex
+                    created.append(Candidate(
+                        candidate_id=exclusion_id, label_token=exclusion_kind, confidence=None,
+                        mask_path=self.cache_dir / record.image_id / f"{exclusion_id}.png", color="#4ac3df",
+                        source=exclusion_source, origin="boundary", role=CandidateRole.EXCLUDE,
+                        enabled=True,
+                        forced=self.settings["detection"].get("exclude_forced_default", True),
+                        expand_px=default_exclude_padding,
+                    ))
+                    masks.append(np.asarray(exclusion_mask, dtype=np.uint8))
+            except (MemoryError, OSError) as exc:
+                raise ClientError("境界候補の手・除外マスクを処理できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
             temporary_paths: list[Path] = []
+
+            def discard_pending_masks() -> None:
+                for path in [*temporary_paths, *(item.mask_path for item in created)]:
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError as cleanup_exc:
+                        LOGGER.warning("Could not remove failed boundary mask %s: %s", path, cleanup_exc)
+
             try:
                 for item, candidate_mask in zip(created, masks):
                     temporary = item.mask_path.with_name(f".mozarie-pending-{item.candidate_id}.tmp")
@@ -897,9 +1065,11 @@ class DetectionMixin:
                             )
                     if not catalog_current:
                         raise ClientError("フォルダを再読み込みしたため、境界の検出結果を破棄しました。", "catalog_changed")
+            except (MemoryError, OSError) as exc:
+                discard_pending_masks()
+                raise ClientError("境界候補のマスクを保存できません。使用可能なメモリを確認してください。", "image_read_failed") from exc
             except Exception:
-                for path in [*temporary_paths, *(item.mask_path for item in created)]:
-                    path.unlink(missing_ok=True)
+                discard_pending_masks()
                 raise
         return {
             "candidates": [item.as_api_dict() for item in created],

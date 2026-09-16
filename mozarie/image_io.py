@@ -1,4 +1,3 @@
-import warnings
 import base64
 import binascii
 import io
@@ -6,21 +5,60 @@ import math
 import os
 import shutil
 import tempfile
+import threading
 import uuid
 import zlib
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Callable
 
 import numpy as np
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from .core import (
-    APP_DIR, IO_CHUNK_BYTES, LOGGER, MAX_BODY_BYTES, PNG_SIGNATURE,
+    APP_DIR, IO_CHUNK_BYTES, LOGGER, PNG_SIGNATURE,
     ClientError, ImageRecord, oriented_image_size,
     safe_import_relative_path, torch_module, _read_save_suffix,
 )
 from .runtime import directml_devices, runtime_backend
+from .save_journal import SaveJournal
+
+
+_IMAGE_OPEN_LOCK = threading.RLock()
+_IMAGE_OPEN_DEPTH = 0
+_IMAGE_OPEN_PREVIOUS_LIMIT: int | None = None
+
+
+@contextmanager
+def open_image(source: Any):
+    """Open one supported image with Pillow's process-wide pixel guard disabled."""
+    global _IMAGE_OPEN_DEPTH, _IMAGE_OPEN_PREVIOUS_LIMIT
+    with _IMAGE_OPEN_LOCK:
+        if _IMAGE_OPEN_DEPTH == 0:
+            _IMAGE_OPEN_PREVIOUS_LIMIT = Image.MAX_IMAGE_PIXELS
+        Image.MAX_IMAGE_PIXELS = None
+        _IMAGE_OPEN_DEPTH += 1
+    try:
+        image = Image.open(source)
+    except BaseException:
+        with _IMAGE_OPEN_LOCK:
+            _IMAGE_OPEN_DEPTH -= 1
+            if _IMAGE_OPEN_DEPTH == 0:
+                Image.MAX_IMAGE_PIXELS = _IMAGE_OPEN_PREVIOUS_LIMIT
+                _IMAGE_OPEN_PREVIOUS_LIMIT = None
+        raise
+    try:
+        yield image
+    finally:
+        try:
+            image.close()
+        finally:
+            with _IMAGE_OPEN_LOCK:
+                _IMAGE_OPEN_DEPTH -= 1
+                if _IMAGE_OPEN_DEPTH == 0:
+                    Image.MAX_IMAGE_PIXELS = _IMAGE_OPEN_PREVIOUS_LIMIT
+                    _IMAGE_OPEN_PREVIOUS_LIMIT = None
 
 
 def _valid_color(value: str) -> bool:
@@ -68,8 +106,12 @@ def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
 
 
 def _normalized_exif_bytes(source: bytes) -> bytes:
-    with Image.open(io.BytesIO(source)) as source_image:
-        exif = source_image.getexif()
+    suffix = ".png" if source.startswith(PNG_SIGNATURE) else ".jpg"
+    try:
+        with open_image_without_png_text(Path(f"source{suffix}"), source) as source_image:
+            exif = source_image.getexif()
+    except (MemoryError, OSError) as exc:
+        raise ClientError("元画像を読み込めません。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
     exif[274] = 1
     return exif.tobytes()
 
@@ -156,8 +198,11 @@ def _is_jpeg_metadata_marker(marker: int) -> bool:
 
 
 def _jpeg_exif_orientation_one_segment(source: bytes) -> bytes:
-    with Image.open(io.BytesIO(source)) as source_image:
-        exif = source_image.getexif()
+    try:
+        with open_image(io.BytesIO(source)) as source_image:
+            exif = source_image.getexif()
+    except (MemoryError, OSError) as exc:
+        raise ClientError("元画像を読み込めません。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
     exif[274] = 1
     payload = exif.tobytes()
     return b"\xff\xe1" + (len(payload) + 2).to_bytes(2, "big") + payload
@@ -181,23 +226,102 @@ def _assert_image_suffix_matches_format(suffix: str, image_format: str | None) -
         raise ClientError("The image content does not match its file extension.", "image_format_unsupported")
 
 
+def _write_png_without_text(source: BinaryIO, destination: BinaryIO) -> None:
+    if source.read(len(PNG_SIGNATURE)) != PNG_SIGNATURE:
+        raise OSError("invalid PNG signature")
+    destination.write(PNG_SIGNATURE)
+    while True:
+        header = source.read(8)
+        if len(header) != 8:
+            raise OSError("truncated PNG chunk header")
+        length = int.from_bytes(header[:4], "big")
+        chunk_type = header[4:]
+        omit_text = chunk_type in {b"tEXt", b"zTXt", b"iTXt"}
+        if not omit_text:
+            destination.write(header)
+        crc = zlib.crc32(chunk_type)
+        remaining = length
+        while remaining:
+            block = source.read(min(IO_CHUNK_BYTES, remaining))
+            if not block:
+                raise OSError("truncated PNG chunk")
+            remaining -= len(block)
+            crc = zlib.crc32(block, crc)
+            if not omit_text:
+                destination.write(block)
+        expected_crc = source.read(4)
+        if len(expected_crc) != 4 or int.from_bytes(expected_crc, "big") != (crc & 0xFFFFFFFF):
+            raise OSError("invalid PNG chunk checksum")
+        if not omit_text:
+            destination.write(expected_crc)
+        if chunk_type == b"IEND":
+            if source.read(1):
+                raise OSError("trailing PNG data")
+            return
+
+
+def _png_has_text_chunks(source: BinaryIO) -> bool:
+    if source.read(len(PNG_SIGNATURE)) != PNG_SIGNATURE:
+        raise OSError("invalid PNG signature")
+    end = source.seek(0, os.SEEK_END)
+    source.seek(len(PNG_SIGNATURE))
+    has_text = False
+    while True:
+        header = source.read(8)
+        if len(header) != 8:
+            raise OSError("truncated PNG chunk header")
+        length = int.from_bytes(header[:4], "big")
+        chunk_type = header[4:]
+        if chunk_type == b"IEND" and length != 0:
+            raise OSError("invalid PNG end")
+        if length + 4 > end - source.tell():
+            raise OSError("truncated PNG chunk")
+        has_text = has_text or chunk_type in {b"tEXt", b"zTXt", b"iTXt"}
+        source.seek(length + 4, os.SEEK_CUR)
+        if chunk_type == b"IEND":
+            if source.tell() != end:
+                raise OSError("trailing PNG data")
+            return has_text
+
+
+@contextmanager
+def open_image_without_png_text(path: Path, raw: bytes | None = None):
+    """Open PNG pixels without handing optional text chunks to Pillow."""
+    temporary_path: Path | None = None
+    try:
+        if path.suffix.lower() == ".png":
+            with (io.BytesIO(raw) if raw is not None else path.open("rb")) as source:
+                strip_text = _png_has_text_chunks(source)
+                if strip_text:
+                    source.seek(0)
+                    with tempfile.NamedTemporaryFile(prefix="mozarie-png-", suffix=".png", delete=False) as temporary:
+                        temporary_path = Path(temporary.name)
+                        _write_png_without_text(source, temporary)
+                        temporary.flush()
+        image_source: Any = temporary_path if temporary_path is not None else (io.BytesIO(raw) if raw is not None else path)
+        with open_image(image_source) as image:
+            yield image
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+
+
 def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
     """Validate an input image without decoding its complete pixel payload."""
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(path) as image:
-                _assert_image_suffix_matches_format(expected_suffix, image.format)
-                size = oriented_image_size(image)
-            with Image.open(path) as image:
-                image.verify()
+        with open_image_without_png_text(path) as image:
+            _assert_image_suffix_matches_format(expected_suffix, image.format)
+            size = oriented_image_size(image)
+        with open_image_without_png_text(path) as image:
+            image.verify()
         if expected_suffix.lower() in {".jpg", ".jpeg"}:
             with path.open("rb") as source:
                 source.seek(-2, os.SEEK_END)
                 if source.read() != b"\xff\xd9":
                     raise OSError("truncated JPEG")
         return size
-    except (OSError, RuntimeError, UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+    except (MemoryError, OSError, RuntimeError, ValueError, SyntaxError, UnidentifiedImageError,
+            Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
         raise ClientError("追加画像を読み込めません。", "image_read_failed") from exc
 
 
@@ -362,10 +486,8 @@ def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:
         raw = base64.b64decode(data_url.split(",", 1)[1], validate=True)
     except (IndexError, binascii.Error) as exc:
         raise ClientError("編集マスクを読み込めません。", "input_invalid") from exc
-    if len(raw) > MAX_BODY_BYTES:
-        raise ClientError("編集マスクが大きすぎます。", "input_invalid")
     try:
-        with Image.open(io.BytesIO(raw)) as image:
+        with open_image(io.BytesIO(raw)) as image:
             if image.format != "PNG":
                 raise ClientError("The mask must be a PNG image.", "input_invalid")
             if image.size != (width, height):
@@ -375,6 +497,8 @@ def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:
             if image.mode in {"L", "1"}:
                 return np.asarray(image.convert("L"), dtype=np.uint8)
             raise ClientError("The mask must include an alpha channel or be grayscale.", "input_invalid")
+    except MemoryError as exc:
+        raise ClientError("編集マスクを読み込めません。使用可能なメモリを確認してください。", "input_invalid") from exc
     except (OSError, UnidentifiedImageError) as exc:
         raise ClientError("編集マスクは有効なPNGではありません。", "input_invalid") from exc
 
@@ -405,11 +529,12 @@ def unique_session_import_destination(path: Path, reserved: set[Path] | None = N
     reserved = reserved if reserved is not None else set()
     if not path.exists() and path not in reserved:
         return path
-    for number in range(2, 10000):
+    number = 2
+    while True:
         candidate = path.with_name(f"{path.stem}_{number}{path.suffix}")
         if not candidate.exists() and candidate not in reserved:
             return candidate
-    raise ClientError("同名ファイルが多すぎるため保存先を決められません。", "save_write_failed")
+        number += 1
 
 
 def _default_output_destination(record: ImageRecord, suffix: str = "_censored", reserved: set[Path] | None = None) -> Path:
@@ -438,6 +563,8 @@ def read_stable_source_bytes(record: ImageRecord, expected: tuple[int, int] | No
         raise ClientError("元画像が外部で変更されました。画像を再読み込みしてください。", "stale_asset")
     try:
         source = record.path.read_bytes()
+    except MemoryError as exc:
+        raise ClientError("元画像を読み込めません。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
     except OSError as exc:
         raise ClientError("元画像が外部で変更または削除されました。画像を再読み込みしてください。", "stale_asset") from exc
     _assert_source_stat_matches(record, fingerprint)
@@ -447,10 +574,13 @@ def read_stable_source_bytes(record: ImageRecord, expected: tuple[int, int] | No
 def canonical_image(record: ImageRecord, source: bytes | None = None) -> tuple[Image.Image, bytes, dict[str, Any]]:
     """Load source pixels into the stable, unflipped editing coordinate space."""
     raw = read_stable_source_bytes(record) if source is None else source
-    with Image.open(io.BytesIO(raw)) as image:
-        image.load()
-        normalized = ImageOps.exif_transpose(image)
-        info = dict(image.info)
+    try:
+        with open_image_without_png_text(record.path, raw) as image:
+            image.load()
+            normalized = ImageOps.exif_transpose(image)
+            info = dict(image.info)
+    except (MemoryError, OSError) as exc:
+        raise ClientError("元画像を読み込めません。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
     if "exif" in info:
         info["exif"] = _normalized_exif_bytes(raw)
     if record.source_flip_horizontal:
@@ -483,6 +613,13 @@ def output_format_matches_source(record: ImageRecord, output_format: str) -> boo
 
 def render_output(record: ImageRecord, mask: np.ndarray | None, block_size: int, output_format: str, keep_metadata: bool) -> tuple[bytes, str, str]:
     """Render canonical mosaic plus desired flip to the explicit output format."""
+    try:
+        return _render_output(record, mask, block_size, output_format, keep_metadata)
+    except (MemoryError, OSError) as exc:
+        raise ClientError("画像を保存用に変換できません。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
+
+
+def _render_output(record: ImageRecord, mask: np.ndarray | None, block_size: int, output_format: str, keep_metadata: bool) -> tuple[bytes, str, str]:
     suffix, image_format, mime = _output_spec(record, output_format)
     if output_format == "jpg" and keep_metadata:
         raise ClientError("JPG形式ではメタ情報を保持できません。", "input_invalid")
@@ -518,17 +655,20 @@ def render_with_mask(record: ImageRecord, mask: np.ndarray, block_size: int) -> 
     """Render one image without changing the source file or its catalogue state."""
     source = read_stable_source_bytes(record)
     suffix = record.path.suffix.lower()
-    with Image.open(io.BytesIO(source)) as source_image:
-        source_image.load()
-        normalize_orientation = source_image.getexif().get(274, 1) not in {None, 1}
-        normalized = ImageOps.exif_transpose(source_image)
-        modified = _apply_mosaic_to_image(normalized, mask, block_size)
-        if suffix == ".png":
-            return _png_with_original_chunks(source, modified, normalize_orientation=normalize_orientation)
-        if suffix in {".jpg", ".jpeg"}:
-            return _jpeg_with_original_metadata(source, modified, normalize_orientation=normalize_orientation)
-        if suffix == ".webp":
-            return _webp_with_original_metadata(source, modified, source_image.info, normalize_orientation=normalize_orientation)
+    try:
+        with open_image_without_png_text(record.path, source) as source_image:
+            source_image.load()
+            normalize_orientation = source_image.getexif().get(274, 1) not in {None, 1}
+            normalized = ImageOps.exif_transpose(source_image)
+            modified = _apply_mosaic_to_image(normalized, mask, block_size)
+            if suffix == ".png":
+                return _png_with_original_chunks(source, modified, normalize_orientation=normalize_orientation)
+            if suffix in {".jpg", ".jpeg"}:
+                return _jpeg_with_original_metadata(source, modified, normalize_orientation=normalize_orientation)
+            if suffix == ".webp":
+                return _webp_with_original_metadata(source, modified, source_image.info, normalize_orientation=normalize_orientation)
+    except (MemoryError, OSError) as exc:
+        raise ClientError("元画像を読み込めません。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
     raise ClientError("この画像形式は保存に対応していません。", "image_format_unsupported")
 
 
@@ -574,7 +714,12 @@ def _remove_incomplete_backup(backup_path: Path) -> None:
         LOGGER.warning("Incomplete save backup could not be removed: %s", backup_path)
 
 
-def _stage_record_replacement(record: ImageRecord, rendered_path: Path, expected_source_fingerprint: tuple[int, int]) -> SourceReplaceStage:
+def _stage_record_replacement(
+    record: ImageRecord,
+    rendered_path: Path,
+    expected_source_fingerprint: tuple[int, int],
+    backup_ready: Callable[[Path, tuple[int, int], str | None, str | None, tuple[int, int], str | None], None] | None = None,
+) -> SourceReplaceStage:
     """Replace a source while retaining a same-directory rollback copy."""
     original_record = replace(record)
     original_stat = record.path.stat()
@@ -589,10 +734,24 @@ def _stage_record_replacement(record: ImageRecord, rendered_path: Path, expected
             handle.flush()
             os.fsync(handle.fileno())
         _assert_source_stat_matches(record, expected_source_fingerprint)
+        if record.source_kind == "filesystem":
+            try:
+                os.utime(temporary_path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+            except OSError:
+                LOGGER.warning("Saved image timestamp could not be restored: %s", record.path)
         replaced = False
         try:
             shutil.copy2(record.path, backup_path)
             _assert_source_stat_matches(record, expected_source_fingerprint)
+            source_stat = record.path.stat()
+            backup_stat = backup_path.stat()
+            temporary_stat = temporary_path.stat()
+            if backup_ready is not None:
+                backup_ready(
+                    backup_path, (backup_stat.st_mtime_ns, backup_stat.st_size), SaveJournal.file_identity(backup_path, backup_stat),
+                    SaveJournal.file_identity(record.path, source_stat),
+                    (temporary_stat.st_mtime_ns, temporary_stat.st_size), SaveJournal.file_identity(temporary_path, temporary_stat),
+                )
             os.replace(temporary_path, record.path)
             replaced = True
         finally:
@@ -600,11 +759,6 @@ def _stage_record_replacement(record: ImageRecord, rendered_path: Path, expected
                 _remove_incomplete_backup(backup_path)
         temporary_path = None
         _sync_directory(record.path.parent)
-        if record.source_kind == "filesystem":
-            try:
-                os.utime(record.path, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
-            except OSError:
-                LOGGER.warning("Saved image timestamp could not be restored: %s", record.path)
         stat = record.path.stat()
         record.set_asset_fingerprint(stat.st_mtime_ns, stat.st_size)
         if record.source_kind == "filesystem":

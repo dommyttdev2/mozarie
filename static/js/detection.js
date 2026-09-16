@@ -1,6 +1,6 @@
 function detectionParallelism() {
   const value = Number($("#detectParallelism").value);
-  return Number.isFinite(value) ? Math.min(4, Math.max(1, Math.round(value))) : 2;
+  return Number.isFinite(value) ? Math.max(1, Math.round(value)) : 2;
 }
 function detectionTargets(prefix = "detectTarget") {
   return ["penis", "pussy"].filter((name) => $(`#${prefix}${name[0].toUpperCase()}${name.slice(1)}`).checked === true);
@@ -13,17 +13,39 @@ function setDetectionTargets(targets, prefix = "detectTarget") {
 }
 
 function persistedDetectionTargets() { return state.settings?.detection?.targets || []; }
-function detectionCandidatePadding() {
-  const text = String($("#detectCandidatePadding").value).trim();
+function detectionCandidatePadding(selector = "#detectCandidatePadding") {
+  const text = String($(selector).value).trim();
   const value = Number(text);
-  return /^\d+$/.test(text) && Number.isSafeInteger(value) && value <= 16384 ? value : null;
+  return /^\d+$/.test(text) && Number.isSafeInteger(value) ? value : null;
 }
 function validateDetectionCandidatePadding() {
-  const valid = detectionCandidatePadding() !== null;
+  const valid = detectionCandidatePadding() !== null && detectionCandidatePadding("#detectExcludeCandidatePadding") !== null;
   const message = $("#detectPaddingValidation");
   message.textContent = valid ? "" : t("detectDialog.candidatePaddingInvalid"); message.hidden = valid;
   $("#detectCandidatePadding").setAttribute("aria-invalid", String(!valid));
   return valid;
+}
+function detectionFluidColorFillTolerance() {
+  const text = String($("#detectFluidColorFillTolerance").value).trim();
+  const value = Number(text);
+  return /^\d+$/.test(text) && Number.isSafeInteger(value) && value <= 255 ? value : null;
+}
+function validateDetectionFluidColorFill() {
+  const active = state.settings?.detection?.fluid_exclusion_enabled !== false && $("#detectFluidColorFillEnabled").checked;
+  const valid = !active || detectionFluidColorFillTolerance() !== null;
+  const input = $("#detectFluidColorFillTolerance");
+  const message = $("#detectFluidColorFillValidation");
+  input.setAttribute("aria-invalid", String(!valid));
+  message.textContent = valid ? "" : t("detectDialog.fluidColorFillToleranceInvalid");
+  message.hidden = valid;
+  return valid;
+}
+function syncDetectionFluidColorFill() {
+  const enabled = state.settings?.detection?.fluid_exclusion_enabled !== false;
+  const checkbox = $("#detectFluidColorFillEnabled");
+  checkbox.disabled = !enabled;
+  $("#detectFluidColorFillTolerance").disabled = !enabled || !checkbox.checked;
+  validateDetectionFluidColorFill();
 }
 function syncDetectionActions() {
   const enabled = persistedDetectionTargets().length > 0 && !isBusy() && !state.importing && !catalogStagingEditsActive()
@@ -47,7 +69,7 @@ function validateDetectionTargets(targetClasses, target = null) {
 function normaliseImportParallelism(value) {
   if (String(value ?? "").trim() === "") return 3;
   const number = Number(value);
-  return Number.isFinite(number) ? Math.min(10, Math.max(1, Math.round(number))) : 3;
+  return Number.isFinite(number) ? Math.max(1, Math.round(number)) : 3;
 }
 
 function importParallelism() {
@@ -62,7 +84,11 @@ function openDetectionDialog(imageIds) {
   setDetectionConfidence(detectionConfidence());
   $("#detectParallelism").value = String(detectionParallelism());
   $("#detectCandidatePadding").value = String(state.settings?.detection?.default_candidate_padding_px || 0);
+  $("#detectExcludeCandidatePadding").value = String(state.settings?.detection?.default_exclude_candidate_padding_px || 0);
+  $("#detectFluidColorFillEnabled").checked = state.settings?.detection?.fluid_color_fill_enabled !== false;
+  $("#detectFluidColorFillTolerance").value = String(state.settings?.detection?.fluid_color_fill_tolerance ?? 26);
   $("#detectCandidatePadding").setAttribute("aria-invalid", "false"); $("#detectPaddingValidation").hidden = true;
+  syncDetectionFluidColorFill();
   $("#detectParallelism").disabled = false;
   setDetectionTargets(state.settings?.detection?.targets, "dialogTarget");
   validateDetectionTargets(detectionTargets("dialogTarget"), $("#detectTargetValidation"));
@@ -70,7 +96,7 @@ function openDetectionDialog(imageIds) {
   showModalFromInvoker($("#detectDialog"));
 }
 
-async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = persistedDetectionTargets()) {
+async function runDetection(imageIds, confidence = detectionConfidence(), parallelism = 1, targetClasses = persistedDetectionTargets(), fluidColorFill = null) {
   const ids = new Set(processableImages().map((image) => image.id));
   imageIds = [...new Set(imageIds)].filter((imageId) => ids.has(imageId));
   if (!imageIds.length || catalogStagingEditsActive() || (!state.detectionStarting && (isBusy() || state.importing))) return;
@@ -81,7 +107,9 @@ async function runDetection(imageIds, confidence = detectionConfidence(), parall
     await flushAllImageMutations();
     await saveDraft();
     await flushAllWorkspaceMutations();
-    await api("/api/detect", { method: "POST", body: JSON.stringify({ imageIds, confidence, parallelism: Math.min(4, Math.max(1, Math.round(parallelism))), targetClasses }) });
+    const payload = { imageIds, confidence, parallelism: Math.max(1, Math.round(parallelism)), targetClasses };
+    if (fluidColorFill) Object.assign(payload, fluidColorFill);
+    await api("/api/detect", { method: "POST", body: JSON.stringify(payload) });
     state.detectionTargetIds = [...imageIds];
     state.detectCancelRequested = false;
     updateProgress(state.job); setStatusKey("status.detectStarted", {}, "running");
@@ -116,14 +144,31 @@ async function startDetectionFromDialog(event) {
   const confidence = normaliseDetectionConfidence($("#detectConfidenceNumber").value);
   const parallelism = detectionParallelism();
   const targetClasses = detectionTargets("dialogTarget");
-  if (!validateDetectionTargets(targetClasses, $("#detectTargetValidation")) || !validateDetectionCandidatePadding()) return;
+  if (!validateDetectionTargets(targetClasses, $("#detectTargetValidation")) || !validateDetectionCandidatePadding() || !validateDetectionFluidColorFill()) return;
   const defaultCandidatePadding = detectionCandidatePadding();
+  const defaultExcludeCandidatePadding = detectionCandidatePadding("#detectExcludeCandidatePadding");
+  const fluidExclusionEnabled = state.settings?.detection?.fluid_exclusion_enabled !== false;
+  const fluidColorFillEnabled = fluidExclusionEnabled
+    ? $("#detectFluidColorFillEnabled").checked
+    : state.settings?.detection?.fluid_color_fill_enabled !== false;
+  const fluidColorFillTolerance = detectionFluidColorFillTolerance()
+    ?? state.settings?.detection?.fluid_color_fill_tolerance
+    ?? 26;
   $("#detectDialog").close();
   state.pendingDetectionTargetIds = [];
   beginDetectionStart(imageIds);
   if (state.settings) {
     const settings = structuredClone(state.settings);
-    settings.detection = { ...settings.detection, threshold: confidence, parallelism, targets: targetClasses, default_candidate_padding_px: defaultCandidatePadding };
+    settings.detection = {
+      ...settings.detection,
+      threshold: confidence,
+      parallelism,
+      targets: targetClasses,
+      default_candidate_padding_px: defaultCandidatePadding,
+      default_exclude_candidate_padding_px: defaultExcludeCandidatePadding,
+      fluid_color_fill_enabled: fluidColorFillEnabled,
+      fluid_color_fill_tolerance: fluidColorFillTolerance,
+    };
     try {
       const saved = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(settings) });
       state.settings = saved.settings;
@@ -131,7 +176,10 @@ async function startDetectionFromDialog(event) {
     }
     catch (error) { setSettingsForm(state.settings, state.settingsStatus); failDetectionStart(error); state.detectionStarting = false; updateActionButtons(); return; }
   }
-  await runDetection(imageIds, confidence, parallelism, targetClasses);
+  await runDetection(imageIds, confidence, parallelism, targetClasses, {
+    fluidColorFillEnabled,
+    fluidColorFillTolerance,
+  });
 }
 
 async function cancelDetection() {

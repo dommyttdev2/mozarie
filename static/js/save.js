@@ -82,7 +82,7 @@ function syncApplyMode() {
   $("#applySuffix").disabled = state.applyRunning;
   $("#applyTargetMode").disabled = state.applyRunning || state.saveStarting;
   $("#chooseOutputDirectoryButton").disabled = state.outputDirectoryPicking || state.applyRunning || state.saveStarting;
-  $("#applyOutputDirectoryStatus").value = state.outputDirectoryHandle?.name || t("apply.outputDirectoryUnset");
+  $("#applyOutputDirectoryStatus").value = state.settings?.saving?.default_output_directory || t("apply.outputDirectoryUnset");
   $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
   $("#applyOverwriteMode").disabled = !canOverwrite || state.applyRunning;
@@ -93,7 +93,7 @@ function syncApplyMode() {
     : (!canDelete ? t("apply.deleteUnavailable", { count: state.applyTargetIds.filter((imageId) => !sourceCanDelete(state.images.find((image) => image.id === imageId))).length }) : "");
   $("#applyTemporarySourceNote").textContent = restriction || capabilityNote || t("apply.handleSource");
   $("#applyTemporarySourceNote").hidden = !restriction && !capabilityNote;
-  $("#applyStartButton").disabled = Boolean(restriction) || state.applyRunning || state.saveStarting || state.applyTargetIds.length === 0 || (copying && !state.outputDirectoryHandle);
+  $("#applyStartButton").disabled = Boolean(restriction) || state.applyRunning || state.saveStarting || state.applyTargetIds.length === 0 || (copying && !state.settings?.saving?.default_output_directory);
   syncApplyOutputOptions();
 }
 
@@ -147,7 +147,7 @@ function syncSingleSaveMode() {
   $("#singleSaveDeleteOriginal").disabled = !canDelete || state.saving || state.saveStarting;
   if (!canDelete) $("#singleSaveDeleteOriginal").checked = false;
   $("#singleSaveChooseOutputDirectoryButton").disabled = state.outputDirectoryPicking || state.saving || state.saveStarting;
-  $("#singleSaveStartButton").disabled = state.saving || state.saveStarting || !isProcessableImage(image) || (copying && !state.outputDirectoryHandle) || (!copying && !canOverwrite);
+  $("#singleSaveStartButton").disabled = state.saving || state.saveStarting || !isProcessableImage(image) || (copying && !state.settings?.saving?.default_output_directory) || (!copying && !canOverwrite);
   $("#singleSaveSettings").disabled = state.saving || state.saveStarting;
   renderOutputDirectory();
   syncSingleOutputOptions();
@@ -181,65 +181,6 @@ async function chooseSingleOutputDirectory() {
   syncSingleSaveMode();
 }
 
-function singleOutputName(relativePath, suffix, sequence = 0, format = "original") {
-  const name = String(relativePath).split("/").at(-1) || "image";
-  const dot = name.lastIndexOf(".");
-  const stem = dot > 0 ? name.slice(0, dot) : name;
-  const extension = format === "original" ? (dot > 0 ? name.slice(dot) : "") : `.${format}`;
-  return `${stem}${suffix}${sequence ? `_${sequence}` : ""}${extension}`;
-}
-
-async function writeSingleOutput(handle, relativePath, suffix, response, format = "original") {
-  if (!navigator.locks || typeof navigator.locks.request !== "function") throw codedError("output_write_unsupported");
-  let entered = false;
-  let reservation;
-  try {
-    reservation = await navigator.locks.request("mozarie-output-name", { mode: "exclusive" }, async () => {
-      entered = true;
-      let fileHandle; let name; let created = false;
-      for (let sequence = 0; sequence < 10000; sequence += 1) {
-        name = singleOutputName(relativePath, suffix, sequence, format);
-        try { await handle.getFileHandle(name); }
-        catch (error) {
-          if (error?.name !== "NotFoundError") throw error;
-          fileHandle = await handle.getFileHandle(name, { create: true }); created = true; break;
-        }
-      }
-      if (!fileHandle) { const error = new Error("output_name_exhausted"); error.code = "output_name_exhausted"; throw error; }
-      return { name, fileHandle, created };
-    });
-  } catch (error) {
-    if (!entered) {
-      const lockFailure = codedError("output_write_unsupported");
-      lockFailure.cause = error;
-      throw lockFailure;
-    }
-    throw error;
-  }
-  let stream;
-  try {
-    try { stream = await reservation.fileHandle.createWritable({ keepExistingData: false, mode: "exclusive" }); }
-    catch (error) {
-      if (["TypeError", "NotSupportedError"].includes(error?.name)) throw codedError("output_write_unsupported");
-      throw error;
-    }
-    await response.body.pipeTo(stream);
-    return reservation;
-  } catch (error) {
-    try { await stream?.abort?.(); } catch {}
-    if (reservation.created) {
-      try { await handle.removeEntry(reservation.name); }
-      catch (cleanupError) {
-        const cleanupFailure = codedError("output_cleanup_failed");
-        cleanupFailure.cause = error;
-        cleanupFailure.cleanupCause = cleanupError;
-        throw cleanupFailure;
-      }
-    }
-    throw error;
-  }
-}
-
 async function renderSingleSave(payload) {
   const response = await fetch("/api/save/render", {
     method: "POST", headers: catalogRequestHeaders({ "Content-Type": "application/json" }),
@@ -249,6 +190,129 @@ async function renderSingleSave(payload) {
   const error = responseError(response, await response.json().catch(() => ({})));
   await resyncAfterStaleCatalog(error);
   throw error;
+}
+
+function newClientSaveToken() {
+  return crypto.randomUUID();
+}
+
+const pendingSaveStorageKey = "mozarie.pending-save-token.";
+const legacyPendingSaveStorageKey = "mozarie.pending-save-tokens";
+
+function pendingSaveTokens() {
+  const pending = {};
+  for (let index = 0; index < localStorage.length; index += 1) {
+    const key = localStorage.key(index);
+    if (!key?.startsWith(pendingSaveStorageKey)) continue;
+    try { pending[key.slice(pendingSaveStorageKey.length)] = JSON.parse(localStorage.getItem(key)); } catch {}
+  }
+  try { Object.assign(pending, JSON.parse(localStorage.getItem(legacyPendingSaveStorageKey) || "{}")); } catch {}
+  return pending;
+}
+
+function rememberPendingSave(entry, token, sourceAction = "keep") {
+  localStorage.setItem(`${pendingSaveStorageKey}${token}`, JSON.stringify({
+    imageId: entry.imageId, candidateRevision: entry.candidateRevision, sourceAction,
+    displayName: entry.relativePath || entry.name || "",
+  }));
+}
+
+function updatePendingSaveAction(token, sourceAction) {
+  const entry = pendingSaveTokens()[token];
+  if (entry) localStorage.setItem(`${pendingSaveStorageKey}${token}`, JSON.stringify({ ...entry, sourceAction }));
+}
+
+function forgetPendingSave(token) {
+  localStorage.removeItem(`${pendingSaveStorageKey}${token}`);
+  try {
+    const legacy = JSON.parse(localStorage.getItem(legacyPendingSaveStorageKey) || "{}");
+    if (legacy && typeof legacy === "object") { delete legacy[token]; localStorage.setItem(legacyPendingSaveStorageKey, JSON.stringify(legacy)); }
+  } catch {}
+}
+
+async function acknowledgePendingBrowserSave(token) {
+  try { const result = await api("/api/save/ack", { method: "POST", body: JSON.stringify({ saveToken: token }), resyncOnStale: false }); if (result?.acknowledged === true) { forgetPendingSave(token); return true; } return false; }
+  catch { return false; }
+}
+
+async function reserveSaveRender(entry, payload, clientSaveToken) {
+  rememberPendingSave(entry, clientSaveToken, payload.sourceAction || (payload.copyToDefault ? "keep" : "overwrite"));
+  const reserved = await api("/api/save/reserve", { method: "POST", body: JSON.stringify({
+    imageId: entry.imageId, candidateRevision: entry.candidateRevision, clientSaveToken,
+    copyToDefault: payload.copyToDefault === true, suffix: payload.suffix, format: payload.format,
+    keepMetadata: payload.keepMetadata,
+  }) });
+  if (reserved.state !== "rendering" && reserved.state !== "pending") throw Object.assign(new Error("save_state_changed"), { code: "save_state_changed" });
+  return reserved;
+}
+
+async function reconcilePendingBrowserSaves() {
+  const pending = pendingSaveTokens();
+  const deferred = [];
+  await Promise.all(Object.entries(pending).map(async ([saveToken, entry]) => {
+    const status = await api("/api/save/status", { method: "POST", body: JSON.stringify({ ...entry, saveToken, sourceAction: entry.sourceAction || "keep" }) }).catch(() => null);
+    if (!status) return;
+    if (["unknown", "cancelled"].includes(status.state)) { forgetPendingSave(saveToken); return; }
+    if (status.state === "committed") {
+      if (status.sourceDeletePending) deferred.push(entry.displayName || status.outputPath || entry.imageId || saveToken);
+      await acknowledgePendingBrowserSave(saveToken); return;
+    }
+    if (["rendering", "pending", "cleanup_pending"].includes(status.state)) await cancelBrowserSave(entry, saveToken);
+  }));
+  if (deferred.length) setStatus(t("sourceDelete.batchNotAvailable", {
+    complete: t("apply.complete", { completed: deferred.length }),
+    names: new Intl.ListFormat(document.documentElement.lang === "en" ? "en" : "ja", { style: "long", type: "conjunction" }).format(deferred),
+  }), "warning");
+}
+
+function outputPathFromResponse(response) {
+  const encoded = response.headers.get("X-Mozarie-Output-Path-B64") || "";
+  if (!encoded) return "";
+  const bytes = Uint8Array.from(atob(encoded.replace(/-/g, "+").replace(/_/g, "/")), (value) => value.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
+async function renderDefaultCopy(entry, payload) {
+  const clientSaveToken = newClientSaveToken();
+  try {
+    const reserved = await reserveSaveRender(entry, payload, clientSaveToken);
+    if (reserved.state === "pending") return { saveToken: clientSaveToken, outputPath: reserved.outputPath || "", noEffect: false };
+    const response = await renderSingleSave({ ...payload, clientSaveToken });
+    return {
+      saveToken: response.headers.get("X-Mozarie-Save-Token") || clientSaveToken,
+      outputPath: outputPathFromResponse(response),
+      noEffect: response.headers.get("X-Mozarie-No-Effect") === "1",
+    };
+  } catch (error) {
+    const status = await api("/api/save/status", { method: "POST", body: JSON.stringify({
+      imageId: entry.imageId, candidateRevision: entry.candidateRevision, saveToken: clientSaveToken, sourceAction: "keep",
+    }) }).catch(() => ({ state: "unknown" }));
+    if (status.state === "pending") return { saveToken: clientSaveToken, outputPath: status.outputPath || "", noEffect: status.noEffect === true };
+    if (status.state === "rendering") {
+      const response = await renderSingleSave({ ...payload, clientSaveToken });
+      return { saveToken: clientSaveToken, outputPath: outputPathFromResponse(response), noEffect: response.headers.get("X-Mozarie-No-Effect") === "1" };
+    }
+    await cancelBrowserSave(entry, clientSaveToken);
+    throw error;
+  }
+}
+
+async function renderStreamedSave(entry, payload) {
+  const clientSaveToken = newClientSaveToken();
+  try {
+    const reserved = await reserveSaveRender(entry, payload, clientSaveToken);
+    if (reserved.state === "pending") return await renderSingleSave({ ...payload, clientSaveToken });
+    return await renderSingleSave({ ...payload, clientSaveToken });
+  } catch (error) {
+    const status = await api("/api/save/status", { method: "POST", body: JSON.stringify({
+      imageId: entry.imageId, candidateRevision: entry.candidateRevision, saveToken: clientSaveToken, sourceAction: "overwrite",
+    }) }).catch(() => ({ state: "unknown" }));
+    if (status.state === "pending") await cancelBrowserSave(entry, clientSaveToken);
+    if (status.state === "rendering") return await renderSingleSave({ ...payload, clientSaveToken });
+    await cancelBrowserSave(entry, clientSaveToken);
+    error.saveState = status.state || "unknown";
+    throw error;
+  }
 }
 
 async function startSingleSave(event) {
@@ -261,16 +325,15 @@ async function startSingleSave(event) {
   const deleteOriginal = copying && $("#singleSaveDeleteOriginal").checked;
   const suffix = $("#singleSaveSuffix").value;
   const format = selectedSingleOutputFormat(); const keepMetadata = $("#singleSaveKeepMetadata").checked;
-  if (copying && !state.outputDirectoryHandle) return syncSingleSaveMode();
+  if (copying && !state.settings?.saving?.default_output_directory) return syncSingleSaveMode();
   state.saveStarting = true;
   syncSingleSaveMode();
   try {
-    if (copying) await ensureOutputDirectoryPermission();
     if (copying) await ensureSaveSources([save.imageId], "copy", deleteOriginal);
     if (!copying && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
     if (deleteOriginal && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
     state.saving = true; updateActionButtons(); syncSingleSaveMode(); setSingleSaveResult("");
-    let entry; let saveToken = ""; let output = null; let sourceSnapshot = null; let cleanupIntent = null;
+    let entry; let saveToken = ""; let output = null; let sourceSnapshot = null; let cleanupIntent = null; let browserSourceDelete = null;
     const cleanupProjectId = state.project?.id || null;
     try {
     await flushWorkspaceDraft(save.imageId);
@@ -278,39 +341,48 @@ async function startSingleSave(event) {
     entry = prepared.entries?.[0]; if (!entry) throw Object.assign(new Error("save_state_changed"), { code: "save_state_changed" });
     const access = sourceAccessFor(save.imageId);
     if (!copying) await ensureSaveSources([save.imageId], "overwrite", false);
-    const response = await renderSingleSave({ imageId: save.imageId, candidateRevision: entry.candidateRevision, divisor: save.divisor, draft: save.draft, copyToBrowser: copying, suffix, format, keepMetadata });
-    saveToken = response.headers.get("X-Mozarie-Save-Token") || "";
+    const rendered = copying
+      ? await renderDefaultCopy(entry, { imageId: save.imageId, candidateRevision: entry.candidateRevision, divisor: save.divisor, draft: save.draft, copyToDefault: true, suffix, format, keepMetadata })
+      : { response: await renderStreamedSave(entry, { imageId: save.imageId, candidateRevision: entry.candidateRevision, divisor: save.divisor, draft: save.draft, suffix, format, keepMetadata }) };
+    const response = rendered.response;
+    saveToken = rendered.saveToken || response?.headers.get("X-Mozarie-Save-Token") || "";
     if (!saveToken) throw Object.assign(new Error("save_state_changed"), { code: "save_state_changed" });
-    const noEffect = response.headers.get("X-Mozarie-No-Effect") === "1";
+    const noEffect = rendered.noEffect ?? (response?.headers.get("X-Mozarie-No-Effect") === "1");
     let sourceAction = noEffect ? "keep" : "overwrite";
     let committed; let commitStarted = false;
     try {
       if (copying) {
-        output = await writeSingleOutput(state.outputDirectoryHandle, entry.relativePath, suffix, response, format);
-        sourceAction = deleteOriginal ? "deleted" : "keep";
+        output = rendered.outputPath || "";
+        // Browser handles use the durable source-delete operation after the
+        // copy receipt is committed.  The save journal therefore remains a
+        // copy-only transaction and never tries to restore JS-local bytes.
+        sourceAction = deleteOriginal && !access?.fileHandle ? "deleted" : "keep";
         if (access?.fileHandle) {
           await ensureHandlePermission(access, deleteOriginal);
-          if (deleteOriginal) { sourceSnapshot = await snapshotSourceHandle(access); await removeSourceHandle(access); }
         }
       } else if (access?.fileHandle) {
         if (noEffect) await ensureHandlePermission(access, false);
         else {
           await ensureHandlePermission(access, true);
           sourceSnapshot = await snapshotSourceHandle(access);
+          if (!(sourceSnapshot instanceof Blob)) throw codedError("source_restore_failed");
           await writeSourceHandle(access, response);
           await ensureHandlePermission(access, false);
         }
       }
       if (sourceAction === "deleted" && cleanupProjectId) cleanupIntent = await rememberProjectImageSourceCleanup(cleanupProjectId, save.imageId);
+      if (sourceAction === "deleted") updatePendingSaveAction(saveToken, "deleted");
       commitStarted = true;
       committed = await commitBrowserSaveWithRetry({ imageId: save.imageId, candidateRevision: entry.candidateRevision, saveToken, sourceAction, ...(sourceAction === "overwrite" && access?.fileHandle ? sourceCommitMetadata(access) : {}) });
+      if (committed.sourceDeletePending) browserSourceDelete = { deleted: false, retryable: false };
+      if (copying && committed.outputPath) output = committed.outputPath;
+      if (copying && deleteOriginal && access?.fileHandle) browserSourceDelete = await deleteCopiedBrowserSource(image, saveToken);
     }
     catch (error) {
       const reconcile = !commitStarted || isDefinitiveCommitRejection(error) || error.saveState === "pending";
       if (reconcile) {
         await cancelBrowserSave(entry, saveToken);
         if (sourceSnapshot !== null) await restoreSourceHandle(access, sourceSnapshot, deleteOriginal);
-        if (output) await state.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
       }
       throw error;
     } finally {
@@ -322,7 +394,14 @@ async function startSingleSave(event) {
     if ((sourceAction === "overwrite") || deleteOriginal) {
       const capturedProjectId = state.project?.id || null;
       const capturedCatalogGeneration = state.serverCatalogGeneration;
-      const latest = await api("/api/images");
+      const latest = await api("/api/images").catch((error) => {
+        if (copying && deleteOriginal && browserSourceDelete) {
+          console.warn("コピー保存後の一覧更新は保留です: %s", error?.code || error);
+          return null;
+        }
+        throw error;
+      });
+      if (latest) {
       reconcileCatalogSnapshot(latest, capturedProjectId, capturedCatalogGeneration); state.images = latest.images;
       loadReviewedPaths();
       const savedImage = state.images.find((item) => item.id === save.imageId);
@@ -334,9 +413,14 @@ async function startSingleSave(event) {
       if (deleteOriginal) reconcileBrowserSaveState();
       else if (savedImage && state.currentId === save.imageId) await selectImage(save.imageId, true, { saveCurrentDraft: false });
       renderCatalogViews();
+      }
     }
     state.singleSave = null;
-    setSingleSaveResult(copying ? `${t("apply.complete", { completed: 1 })} ${state.outputDirectoryHandle.name}/${output.name}` : t("apply.complete", { completed: 1 }));
+    if (browserSourceDelete && !browserSourceDelete.deleted) {
+      if (browserSourceDelete.retryable === false) setSingleSaveResult(t("sourceDelete.notAvailable", { complete: t("apply.complete", { completed: 1 }), output }), true);
+      else
+      setSingleSaveResult(t("sourceDelete.singlePending", { complete: t("apply.complete", { completed: 1 }), output }), true);
+    } else setSingleSaveResult(copying ? `${t("apply.complete", { completed: 1 })} ${output}` : t("apply.complete", { completed: 1 }));
     } catch (error) {
       if (saveToken && entry) await cancelBrowserSave(entry, saveToken);
       if (cleanupIntent && isDefinitiveCommitRejection(error)) await clearProjectSourceCleanup({ intentIds: [cleanupIntent] });
@@ -369,36 +453,41 @@ function draftPayload(imageIds) {
 
 function renderOutputDirectory() {
   const configuredDirectory = state.settings?.saving?.default_output_directory || "";
-  const directory = state.outputDirectoryHandle?.name || "";
   $("#settingsDefaultOutputDirectory").value = configuredDirectory;
-  $("#applyOutputDirectoryStatus").value = directory || t("apply.outputDirectoryUnset");
-  $("#singleSaveOutputDirectoryStatus").textContent = directory ? t("apply.outputDirectorySelected", { name: directory }) : t("apply.outputDirectoryUnset");
+  $("#applyOutputDirectoryStatus").value = configuredDirectory || t("apply.outputDirectoryUnset");
+  $("#singleSaveOutputDirectoryStatus").textContent = configuredDirectory || t("apply.outputDirectoryUnset");
   syncApplyMode();
 }
 
 let outputDirectoryPickRequest = null;
+let outputPickerDisabledControls = null;
 
 function setOutputDirectoryPickerBusy(picking) {
   state.outputDirectoryPicking = picking;
-  $("#settingsChooseOutputDirectory").disabled = picking;
+  if (picking) {
+    outputPickerDisabledControls = new Map([...document.querySelectorAll("#settingsForm button, #settingsForm input, #settingsForm select")].map((control) => [control, control.disabled]));
+    for (const control of outputPickerDisabledControls.keys()) control.disabled = true;
+  } else if (outputPickerDisabledControls) {
+    for (const [control, disabled] of outputPickerDisabledControls) control.disabled = disabled;
+    outputPickerDisabledControls = null;
+  }
   syncApplyMode();
+  if (state.singleSave) syncSingleSaveMode();
+  updateActionButtons();
 }
 
 async function pickOutputDirectory() {
   if (!outputDirectoryPickRequest) {
     setOutputDirectoryPickerBusy(true);
-    if (typeof window.showDirectoryPicker !== "function") {
-      const error = new Error("directory_picker_unsupported"); error.code = "directory_picker_unsupported";
-      setOutputDirectoryPickerBusy(false);
-      throw error;
-    }
-    outputDirectoryPickRequest = window.showDirectoryPicker({ mode: "readwrite", id: "mozarie-output" })
-      .then(async (handle) => {
-        await ensureOutputDirectoryPermission(handle);
-        state.outputDirectoryHandle = handle;
-        await rememberOutputDirectoryHandle(handle);
+    outputDirectoryPickRequest = api("/api/output-directory/pick", {
+      method: "POST", body: JSON.stringify({ currentPath: state.settings?.saving?.default_output_directory || "" }),
+    }).then((data) => {
+        if (data.cancelled) return null;
+        state.settings = data.settings;
+        // The picker persists only the output directory.  Re-rendering the
+        // whole settings form here would discard edits the user has not saved.
         renderOutputDirectory();
-        return handle;
+        return data.path;
       })
       .finally(() => {
         outputDirectoryPickRequest = null;
@@ -406,17 +495,6 @@ async function pickOutputDirectory() {
       });
   }
   return outputDirectoryPickRequest;
-}
-
-async function ensureOutputDirectoryPermission(handle = state.outputDirectoryHandle) {
-  if (!handle) throw codedError("output_permission_denied");
-  try {
-    const options = { mode: "readwrite" };
-    let permission = await handle.queryPermission(options);
-    if (permission === "prompt") permission = await handle.requestPermission(options);
-    if (permission === "granted") return handle;
-  } catch {}
-  throw codedError("output_permission_denied");
 }
 
 async function chooseOutputDirectory() {
@@ -557,21 +635,13 @@ async function writeSourceHandle(access, response) {
   catch (error) { try { await stream.abort?.(); } catch { /* Preserve the original whenever possible. */ } throw error; }
 }
 
-async function removeSourceHandle(access) {
-  if (access.parentHandle) {
-    await access.parentHandle.removeEntry(access.fileHandle.name || access.name);
-    return;
-  }
-  throw codedError("source_action_unavailable");
-}
-
 function sourceCommitMetadata(access) {
   return { sourceMtimeMs: Math.max(0, Number(access.lastModified || 0)), sourceSizeBytes: Math.max(0, Number(access.size || 0)) };
 }
 
 async function snapshotSourceHandle(access) {
   const file = await access.fileHandle.getFile();
-  return typeof file.arrayBuffer === "function" ? new Uint8Array(await file.arrayBuffer()) : null;
+  return file instanceof Blob ? file.slice() : null;
 }
 
 async function restoreSourceHandle(access, snapshot, deleted) {
@@ -592,6 +662,78 @@ async function restoreSourceHandle(access, snapshot, deleted) {
   access.name = file.name; access.size = file.size; access.lastModified = file.lastModified;
 }
 
+async function deleteCopiedBrowserSource(image, saveToken) {
+  // The output has already been committed when this starts.  Keep deletion's
+  // File System Access handle and server claim in IndexedDB so a lost response
+  // or closed tab can finish this exact operation once.  The entry below also
+  // carries a durable source snapshot until the deletion receipt is final.
+  const browserEntry = browserDeleteEntry(image);
+  if (!browserEntry) return { deleted: false, error: codedError("source_action_unavailable") };
+  // The browser deletion happens before the server can atomically commit its
+  // catalogue change. Persist reversible bytes first; without them a 4xx
+  // commit rejection could leave an output copy with an unrecoverable source.
+  let sourceSnapshot;
+  try { sourceSnapshot = await snapshotSourceHandle(browserEntry); }
+  catch (error) { return { deleted: false, error: codedError("source_restore_failed") }; }
+  if (!(sourceSnapshot instanceof Blob)) return { deleted: false, error: codedError("source_restore_failed") };
+  browserEntry.sourceSnapshot = sourceSnapshot;
+  const deleteToken = crypto.randomUUID();
+  // Persist the handle before prepare: a server receipt must never outlive
+  // the browser capability needed to complete its claimed deletion.
+  let pending = { deleteToken, saveToken, retryOnResume: true, imageIds: [image.id], browserDeletedImageIds: [], browserEntries: [browserEntry], state: "preparing" };
+  try {
+    await rememberPendingSourceDelete(pending);
+    const prepared = await catalogApi("/api/catalog/delete-source/prepare", { imageIds: [image.id], deleteToken }, { method: "POST" });
+    if (!(prepared.preparedImageIds || []).includes(image.id)) throw codedError("save_state_changed");
+    pending = { ...pending, state: "prepared" };
+    await rememberPendingSourceDelete(pending);
+    await claimSourceDelete(deleteToken);
+    browserEntry.state = "deleting"; pending.state = "deleting";
+    await rememberPendingSourceDelete(pending);
+    await browserDeleteHandle(browserEntry, image);
+    browserEntry.state = "deleted"; pending.browserDeletedImageIds = [image.id]; pending.state = "deleted";
+    await rememberPendingSourceDelete(pending);
+    const committed = await commitSourceDeleteWithRetry({ imageIds: [image.id], deleteToken, browserDeletedImageIds: [image.id] });
+    const status = await api("/api/catalog/delete-source/status", { method: "POST", body: JSON.stringify({ deleteToken }), resyncOnStale: false });
+    if (status.state === "committed") {
+      await acknowledgeSourceDelete(deleteToken);
+      return { deleted: true, committed };
+    }
+    return { deleted: false, error: codedError("source_delete_cleanup_pending") };
+  } catch (error) {
+    if (browserEntry.state === "deleted" && isDefinitiveCommitRejection(error)) {
+      if (!await restoreCopiedBrowserSourcesAfterRejectedDelete(pending)) {
+        // The durable IDB snapshot and handles remain available for an
+        // explicit recovery action.  Do not report source deletion as done.
+        return { deleted: false, error: codedError("source_restore_failed") };
+      }
+    }
+    // Do not cancel or remove the durable record. resumePendingSourceDeletes
+    // reconciles the claimed/deleted state after reconnect or restart.
+    console.warn("コピー後のブラウザー元画像削除は保留です: %s", error?.code || error?.code || error);
+    return { deleted: false, error };
+  }
+}
+
+async function restoreCopiedBrowserSourcesAfterRejectedDelete(pending) {
+  const entries = (pending.browserEntries || []).filter((entry) => entry.state === "deleted");
+  if (!entries.length || entries.some((entry) => !(entry.sourceSnapshot instanceof Blob))) return false;
+  try {
+    for (const entry of entries) {
+      await restoreSourceHandle(entry, entry.sourceSnapshot, true);
+      entry.state = "ready";
+    }
+    pending.browserDeletedImageIds = []; pending.state = "restored"; pending.retryOnResume = false;
+    await rememberPendingSourceDelete(pending);
+    await releaseSourceDeleteClaim(pending.deleteToken);
+    await api("/api/catalog/delete-source/cancel", { method: "POST", body: JSON.stringify({ deleteToken: pending.deleteToken }), resyncOnStale: false });
+    await acknowledgeSourceDelete(pending.deleteToken);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
   const inputs = {
     imageIds: [...imageIds],
@@ -601,9 +743,8 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
     keepMetadata: $("#applyKeepMetadata").checked,
     deleteOriginal,
     mode,
-    outputDirectoryHandle: state.outputDirectoryHandle,
     projectId: state.project?.id || null,
-    parallelism: Math.min(8, Math.max(1, Math.round(Number(state.settings?.saving?.parallelism) || 2))),
+    parallelism: Math.max(1, Math.round(Number(state.settings?.saving?.parallelism) || 2)),
     drafts: new Map(Object.entries(draftPayload(imageIds))),
     sources: new Map(imageIds.map((imageId) => [imageId, {
       image: state.images.find((image) => image.id === imageId),
@@ -616,7 +757,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
   });
   const save = {
     entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false,
-    catalogEpoch: state.catalogEpoch, cleanupIntents: new Map(),
+    sourceDeleteFailures: [], catalogEpoch: state.catalogEpoch, cleanupIntents: new Map(),
   };
   state.browserSave = save;
   state.saving = true;
@@ -644,80 +785,62 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
         const access = source.access;
         let sourceAction = "keep";
         if (inputs.mode === "copy") {
-          let response;
+          let rendered;
           try {
-            response = await renderSingleSave({ imageId: entry.imageId, candidateRevision: entry.candidateRevision,
-              divisor: inputs.divisor, draft, copyToBrowser: true, suffix: inputs.suffix, format: inputs.format, keepMetadata: inputs.keepMetadata });
+            rendered = await renderDefaultCopy(entry, { imageId: entry.imageId, candidateRevision: entry.candidateRevision,
+              divisor: inputs.divisor, draft, copyToDefault: true, suffix: inputs.suffix, format: inputs.format, keepMetadata: inputs.keepMetadata });
           } finally { inputs.drafts.delete(entry.imageId); }
-          const saveToken = response.headers.get("X-Mozarie-Save-Token") || "";
+          const saveToken = rendered.saveToken;
           if (!saveToken) throw Object.assign(new Error("save_state_changed"), { code: "save_state_changed" });
-          let output;
-          try {
-            output = await writeSingleOutput(inputs.outputDirectoryHandle, entry.relativePath, inputs.suffix, response, inputs.format);
-          } catch (error) {
-            await cancelBrowserSave(entry, saveToken);
-            throw error;
-          }
           const commitCopy = async () => {
-            let sourceSnapshot = null;
-            const sourceAction = inputs.deleteOriginal ? "deleted" : "keep";
+            const browserCopyDelete = inputs.deleteOriginal && Boolean(access?.fileHandle);
+            const sourceAction = inputs.deleteOriginal && !browserCopyDelete ? "deleted" : "keep";
             let commitStarted = false;
             let cleanupIntent = null;
             try {
               if (access?.fileHandle) {
                 await ensureHandlePermission(access, inputs.deleteOriginal);
-                if (inputs.deleteOriginal) {
-                  sourceSnapshot = await snapshotSourceHandle(access);
-                  await removeSourceHandle(access);
-                }
               }
               if (sourceAction === "deleted" && inputs.projectId) {
                 cleanupIntent = await rememberProjectImageSourceCleanup(inputs.projectId, entry.imageId);
                 if (cleanupIntent) save.cleanupIntents.set(entry.imageId, cleanupIntent);
               }
+              if (sourceAction === "deleted") updatePendingSaveAction(saveToken, "deleted");
               commitStarted = true;
               const committed = await commitBrowserSaveWithRetry({
                 imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal: inputs.deleteOriginal, sourceAction, saveToken,
               });
-              return committed;
+              if (committed.sourceDeletePending) { save.sourceDeleteFailures.push(sourceImage?.name || entry.imageId); save.sourceDeleteNotAvailable = true; }
+              if (!browserCopyDelete) return { committed, sourceAction };
+              const sourceDelete = await deleteCopiedBrowserSource(sourceImage, saveToken);
+              if (!sourceDelete.deleted) save.sourceDeleteFailures.push(sourceImage?.name || entry.imageId);
+              return { committed, sourceAction: sourceDelete.deleted ? "deleted" : "keep" };
             }
             catch (error) {
               const reconcile = !commitStarted || isDefinitiveCommitRejection(error) || error.saveState === "pending";
-              if (reconcile && sourceSnapshot !== null) try {
-                if (sourceSnapshot === null) throw new Error();
-                await restoreSourceHandle(access, sourceSnapshot, true);
-                const liveAccess = sourceAccessFor(entry.imageId);
-                if (liveAccess) Object.assign(liveAccess, access);
-              } catch { throw codedError("source_restore_failed"); }
               if (reconcile) {
                 await cancelBrowserSave(entry, saveToken);
-                await inputs.outputDirectoryHandle.removeEntry(output.name).catch(() => {});
               }
               if (cleanupIntent && isDefinitiveCommitRejection(error)) {
                 await clearProjectSourceCleanup({ intentIds: [cleanupIntent] });
                 save.cleanupIntents.delete(entry.imageId);
               }
               throw error;
-            } finally { sourceSnapshot = null; }
+            }
           };
-          sourceAction = inputs.deleteOriginal ? "deleted" : "keep";
-          const committed = inputs.deleteOriginal && access?.fileHandle
+          sourceAction = inputs.deleteOriginal && !access?.fileHandle ? "deleted" : "keep";
+          const copyResult = inputs.deleteOriginal && access?.fileHandle
             ? await serializeBrowserHandleMutation(commitCopy)
             : await commitCopy();
-          return finishBrowserSaveEntry(committed, entry, save, sourceAction);
+          return finishBrowserSaveEntry(copyResult.committed, entry, save, copyResult.sourceAction);
         } else if (access?.fileHandle) {
           let binary;
           try {
-            binary = await fetch("/api/save/render", {
-            method: "POST", headers: catalogRequestHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: inputs.divisor, draft, format: inputs.format, keepMetadata: inputs.keepMetadata }),
+            binary = await renderStreamedSave(entry, {
+              imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: inputs.divisor, draft,
+              format: inputs.format, keepMetadata: inputs.keepMetadata,
             });
           } finally { inputs.drafts.delete(entry.imageId); }
-          if (!binary.ok) {
-            const error = responseError(binary, await binary.json().catch(() => ({})));
-            await resyncAfterStaleCatalog(error);
-            throw error;
-          }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           const noEffect = binary.headers?.get("X-Mozarie-No-Effect") === "1";
           return serializeBrowserHandleMutation(async () => {
@@ -727,6 +850,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
               if (!noEffect) {
                 await ensureHandlePermission(access, true);
                 sourceSnapshot = await snapshotSourceHandle(access);
+                if (!(sourceSnapshot instanceof Blob)) throw codedError("source_restore_failed");
                 await writeSourceHandle(access, binary);
                 sourceAction = "overwrite";
               } else {
@@ -748,16 +872,11 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
         } else if (sourceImage?.sourceKind === "filesystem") {
           let binary;
           try {
-            binary = await fetch("/api/save/render", {
-            method: "POST", headers: catalogRequestHeaders({ "Content-Type": "application/json" }),
-            body: JSON.stringify({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: inputs.divisor, draft, format: inputs.format, keepMetadata: inputs.keepMetadata }),
+            binary = await renderStreamedSave(entry, {
+              imageId: entry.imageId, candidateRevision: entry.candidateRevision, divisor: inputs.divisor, draft,
+              format: inputs.format, keepMetadata: inputs.keepMetadata,
             });
           } finally { inputs.drafts.delete(entry.imageId); }
-          if (!binary.ok) {
-            const error = responseError(binary, await binary.json().catch(() => ({})));
-            await resyncAfterStaleCatalog(error);
-            throw error;
-          }
           const saveToken = binary.headers?.get("X-Mozarie-Save-Token") || "";
           sourceAction = binary.headers?.get("X-Mozarie-No-Effect") === "1" ? "keep" : "overwrite";
           const committed = await commitBrowserSaveWithRetry({ imageId: entry.imageId, candidateRevision: entry.candidateRevision, deleteOriginal: inputs.deleteOriginal, sourceAction, saveToken });
@@ -776,15 +895,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
         showBrowserSaveProgress(save, entry);
       };
       let nextEntry = 0;
-      // Browser saves decode pixels, masks and an encoder buffer just like the
-      // server-side path. Keep the same 512 MiB budget so an 8-image setting
-      // cannot turn a 4K batch into a multi-gigabyte allocation spike.
-      const largestRenderBytes = Math.max(1, ...save.entries.map((entry) => {
-        const image = inputs.sources.get(entry.imageId)?.image;
-        return Math.max(1, Number(image?.width) || 1) * Math.max(1, Number(image?.height) || 1) * 32;
-      }));
-      const memoryWorkers = Math.max(1, Math.floor((512 * 1024 * 1024) / largestRenderBytes));
-      const parallelism = Math.min(save.entries.length, inputs.parallelism, memoryWorkers);
+      const parallelism = Math.min(save.entries.length, inputs.parallelism);
       const settled = await Promise.allSettled(Array.from({ length: parallelism }, async () => {
         while (true) {
           // Cancellation is observed only before an entry starts. Once an output or source has
@@ -804,7 +915,9 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
     const cancelled = save.cancelled;
     setApplyResult(cancelled
       ? t("apply.cancelled", { completed: save.completed })
-      : (save.stale ? t("apply.completeWithStale", { completed: save.completed, stale: save.stale }) : t("apply.complete", { completed: save.completed })));
+      : (save.sourceDeleteFailures.length
+        ? t(save.sourceDeleteNotAvailable ? "sourceDelete.batchNotAvailable" : "sourceDelete.batchPending", { complete: t("apply.complete", { completed: save.completed }), names: save.sourceDeleteFailures.join("、") })
+        : (save.stale ? t("apply.completeWithStale", { completed: save.completed, stale: save.stale }) : t("apply.complete", { completed: save.completed }))));
   } finally {
     inputs.drafts.clear();
     inputs.sources.clear();
@@ -856,10 +969,14 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy") {
 }
 
 async function commitBrowserSaveWithRetry(payload) {
+  updatePendingSaveAction(payload.saveToken, payload.sourceAction || "keep");
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (attempt) await new Promise((resolve) => setTimeout(resolve, 150));
     try {
-      return await api("/api/save/commit", { method: "POST", body: JSON.stringify(payload) });
+      const committed = await api("/api/save/commit", { method: "POST", body: JSON.stringify(payload) });
+      if (committed?.sourceAction) updatePendingSaveAction(payload.saveToken, committed.sourceAction);
+      await acknowledgePendingBrowserSave(payload.saveToken);
+      return committed;
     } catch (error) {
       // A database write may have completed after the server started returning
       // an error. Retry the identical token once, then ask the server which
@@ -868,7 +985,9 @@ async function commitBrowserSaveWithRetry(payload) {
       if (!retryable || attempt) {
         if (!retryable) throw error;
         const status = await api("/api/save/status", { method: "POST", body: JSON.stringify(payload) }).catch(() => ({ state: "unknown" }));
-        if (status.state === "committed") return status;
+        if (status.state === "committed") {
+          await acknowledgePendingBrowserSave(payload.saveToken); return status;
+        }
         error.saveState = status.state || "unknown";
         throw error;
       }
@@ -877,10 +996,15 @@ async function commitBrowserSaveWithRetry(payload) {
 }
 
 async function cancelBrowserSave(entry, saveToken) {
-  await api("/api/save/cancel", { method: "POST", body: JSON.stringify({
+  const result = await api("/api/save/cancel", { method: "POST", body: JSON.stringify({
     imageId: entry.imageId, candidateRevision: entry.candidateRevision, saveToken,
-  }) }).catch(() => {});
+  }) }).catch(() => null);
+  if (result?.state === "committed") await acknowledgePendingBrowserSave(saveToken);
+  else if (result && ["cancelled", "unknown"].includes(result.state)) forgetPendingSave(saveToken);
 }
+
+window.addEventListener("online", () => { void reconcilePendingBrowserSaves(); });
+void reconcilePendingBrowserSaves();
 
 function isDefinitiveCommitRejection(error) { return Number.isInteger(error?.status) && error.status >= 400 && error.status < 500; }
 
@@ -897,11 +1021,10 @@ async function startApplyFromDialog(event) {
   const mode = selectedSaveMode();
   const copy = mode === "copy";
   const suffix = $("#applySuffix").value;
-  if (copy && !state.outputDirectoryHandle) { syncApplyMode(); return; }
+  if (copy && !state.settings?.saving?.default_output_directory) { syncApplyMode(); return; }
   state.saveStarting = true;
   syncApplyMode();
   try {
-    if (copy) await ensureOutputDirectoryPermission();
     if (!copy && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
     if (copy && $("#deleteOriginal").checked && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
     state.saving = true;

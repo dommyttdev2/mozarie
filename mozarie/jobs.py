@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image
 
 from .core import JOB_LABELS, LOGGER, CandidateRole, ClientError, ImageRecord, Job, JobControl
-from .image_io import calculate_block_size
+from .image_io import calculate_block_size, open_image
 from .masks import compose_masks, expand_mask, union_mask
 from .runtime import runtime_backend
 
@@ -110,6 +110,7 @@ class JobsMixin:
         with self.lock:
             if self._job_is_current(job_generation, catalog_generation):
                 self.job.parallelism = parallelism
+                self._publish_job_snapshot_unchecked()
 
     def _pause_job_clock(self) -> None:
         if self.job.paused_at is None:
@@ -120,7 +121,7 @@ class JobsMixin:
             self.job.paused_seconds += max(0.0, time.time() - self.job.paused_at)
             self.job.paused_at = None
 
-    def request_pause(self) -> Job:
+    def request_pause(self) -> dict[str, Any]:
         with self.lock:
             self._assert_request_catalog_expectation()
             if (self.job.kind not in {"apply", "detect"} or self.job.state != "running"
@@ -140,9 +141,12 @@ class JobsMixin:
                 if self.job.state == "paused":
                     self.job.current = ""
                     self._pause_job_clock()
-        return self.job
+                kind, completed, total, state = self.job.kind, self.job.completed, self.job.total, self.job.state
+                snapshot = self._copy_job_snapshot(self._publish_job_snapshot_unchecked())
+        LOGGER.info("バックグラウンド処理を一時停止: %s 完了=%d/%d 状態=%s", JOB_LABELS.get(kind, kind), completed, total, state)
+        return snapshot
 
-    def resume_job(self) -> Job:
+    def resume_job(self) -> dict[str, Any]:
         with self.lock:
             self._assert_request_catalog_expectation()
             if self.job.kind not in {"apply", "detect"} or self.job.state != "paused":
@@ -151,10 +155,13 @@ class JobsMixin:
             self.job_control.pause_requested.clear()
             self._resume_job_clock()
             self.job.state = "running"
-            return self.job
+            kind, completed, total = self.job.kind, self.job.completed, self.job.total
+            snapshot = self._copy_job_snapshot(self._publish_job_snapshot_unchecked())
+        LOGGER.info("バックグラウンド処理を再開: %s 完了=%d/%d", JOB_LABELS.get(kind, kind), completed, total)
+        return snapshot
 
 
-    def request_cancel(self) -> Job:
+    def request_cancel(self) -> dict[str, Any]:
         with self.lock:
             self._assert_request_catalog_expectation()
             if self.job.kind not in {"apply", "detect"} or self.job.state not in {"running", "pausing", "paused"}:
@@ -171,8 +178,10 @@ class JobsMixin:
                 control.cancel_requested.set()
                 control.pause_requested.clear()
                 self.job.cancel_requested = True
-                job = self.job
-        return job
+                kind, completed, total = self.job.kind, self.job.completed, self.job.total
+                snapshot = self._copy_job_snapshot(self._publish_job_snapshot_unchecked())
+        LOGGER.info("バックグラウンド処理のキャンセルを受け付け: %s 完了=%d/%d", JOB_LABELS.get(kind, kind), completed, total)
+        return snapshot
 
     def _records_for_ids(self, image_ids: list[str]) -> list[ImageRecord]:
         if not isinstance(image_ids, list):
@@ -266,9 +275,10 @@ class JobsMixin:
                 started_at=time.time(),
                 image_ids=tuple(record.image_id for record in records),
             )
+            self._publish_job_snapshot_unchecked()
             self._job_output_slots: dict[int, str] = {}
             self.job_control = control
-        LOGGER.debug("バックグラウンド処理を開始: %s (%d件)", JOB_LABELS.get(kind, kind), len(records))
+        LOGGER.info("バックグラウンド処理を開始: %s 対象=%d件", JOB_LABELS.get(kind, kind), len(records))
         def run_worker() -> None:
             try:
                 worker(
@@ -296,6 +306,7 @@ class JobsMixin:
                     self.job.state = "paused"
                     self.job.current = ""
                     self._pause_job_clock()
+                    self._publish_job_snapshot_unchecked()
             time.sleep(0.1)
 
     def _cancel_job(self, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
@@ -307,6 +318,11 @@ class JobsMixin:
                 self.job.ended_at = time.time()
                 self.job.current = ""
                 self.job.active_count = 0
+                kind, completed, total = self.job.kind, self.job.completed, self.job.total
+                self._publish_job_snapshot_unchecked()
+            else:
+                return
+        LOGGER.info("バックグラウンド処理をキャンセル: %s 完了=%d/%d", JOB_LABELS.get(kind, kind), completed, total)
     def combined_candidate_mask(
         self,
         image_id: str,
@@ -342,7 +358,7 @@ class JobsMixin:
             for candidate in candidates:
                 self.materialize_candidate_mask(candidate, image_id)
                 try:
-                    with Image.open(candidate.mask_path) as mask_image:
+                    with open_image(candidate.mask_path) as mask_image:
                         mask = expand_mask(np.asarray(mask_image.convert("L"), dtype=np.uint8), candidate.expand_px)
                 except FileNotFoundError as exc:
                     raise ClientError("検出候補のマスクが見つかりません。自動検出をやり直してください。", "catalog_changed") from exc
@@ -375,6 +391,7 @@ class JobsMixin:
             if self._job_is_current(job_generation, catalog_generation):
                 self.job.current = current
                 self.job.completed = len(self.job.completed_image_ids)
+                self._publish_job_snapshot_unchecked()
 
     def _set_detection_model_preparation(
         self,
@@ -386,6 +403,7 @@ class JobsMixin:
         with self.lock:
             if self._job_is_current(job_generation, catalog_generation) and self.job.kind == "detect":
                 self.job.preparing_models = max(0, self.job.preparing_models + (1 if active else -1))
+                self._publish_job_snapshot_unchecked()
 
     def _mark_image_completed(
         self,
@@ -398,6 +416,7 @@ class JobsMixin:
                 completed = {*self.job.completed_image_ids, image_id}
                 self.job.completed_image_ids = tuple(item for item in self.job.image_ids if item in completed)
                 self.job.completed = len(self.job.completed_image_ids)
+                self._publish_job_snapshot_unchecked()
 
     def _record_job_success(
         self,
@@ -416,6 +435,7 @@ class JobsMixin:
                 slots[index] = output
                 self._job_output_slots = slots
                 self.job.outputs = [slots[position] for position in range(len(self.job.image_ids)) if position in slots]
+                self._publish_job_snapshot_unchecked()
         self._mark_image_completed(image_id, job_generation, catalog_generation)
 
     def _finish_claimed_task(
@@ -433,10 +453,12 @@ class JobsMixin:
                     and not control.failed.is_set() and self.job.active_count == 0):
                 if self.job.completed >= self.job.total:
                     control.pause_requested.clear()
+                    self._publish_job_snapshot_unchecked()
                     return self.job.active_count
                 self.job.state = "paused"
                 self.job.current = ""
                 self._pause_job_clock()
+            self._publish_job_snapshot_unchecked()
             return self.job.active_count
 
     def _run_fixed_workers(
@@ -470,6 +492,7 @@ class JobsMixin:
                 with self.lock:
                     if self._job_is_current(job_generation, catalog_generation):
                         self.job.active_count += 1
+                        self._publish_job_snapshot_unchecked()
                 return index, records[index]
 
         def worker() -> None:
@@ -511,7 +534,9 @@ class JobsMixin:
             self.job.active_count = 0
             kind = self.job.kind
             total = self.job.total
-        LOGGER.debug("バックグラウンド処理が完了: %s (%d件)", JOB_LABELS.get(kind, kind), total)
+            started_at = self.job.started_at
+            self._publish_job_snapshot_unchecked()
+        LOGGER.info("バックグラウンド処理が完了: %s 完了=%d件 所要=%.2f秒", JOB_LABELS.get(kind, kind), total, max(0.0, time.time() - started_at))
 
     def _fail_job(self, exc: Exception, job_generation: int | None = None, catalog_generation: int | None = None) -> None:
         unexpected: Exception | None = None
@@ -548,7 +573,9 @@ class JobsMixin:
             self.job.params = dict(exc.params)
             self.job.current = ""
             self.job.active_count = 0
+            error_code = self.job.error_code
+            self._publish_job_snapshot_unchecked()
         if unexpected is not None:
-            LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc, exc_info=unexpected)
+            LOGGER.error("バックグラウンド処理に失敗: %s error_code=%s: %s", JOB_LABELS.get(kind, kind), error_code, exc, exc_info=unexpected)
         else:
-            LOGGER.error("バックグラウンド処理に失敗: %s: %s", JOB_LABELS.get(kind, kind), exc)
+            LOGGER.error("バックグラウンド処理に失敗: %s error_code=%s: %s", JOB_LABELS.get(kind, kind), error_code, exc)

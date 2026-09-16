@@ -21,8 +21,6 @@ from typing import Any, Callable
 
 APP_DIR = Path(__file__).resolve().parent
 RELEASE_API = "https://api.github.com/repos/norqis/mozarie/releases/latest"
-MAX_ARCHIVE_BYTES = 512 * 1024 * 1024
-MAX_ARCHIVE_FILES = 10_000
 
 _WINDOWS_RESERVED_NAMES = frozenset({
     "CON", "PRN", "AUX", "NUL", "CLOCK$", "CONIN$", "CONOUT$",
@@ -68,13 +66,13 @@ MESSAGES = {
         "download_url": "ダウンロード先が見つかりません。",
         "download_digest": "GitHub Releaseの更新ファイル検証情報が正しくありません。",
         "archive_digest": "ダウンロードした更新ファイルのSHA-256が一致しません。",
-        "archive_too_large": "更新ファイルが大きすぎます。",
+        "archive_disk_space": "更新ファイルを展開する空き容量が不足しています。",
         "downloading_progress": "ダウンロード中: {megabytes} MB",
         "archive_download": "更新ファイルをダウンロードできませんでした。",
         "archive_invalid_path": "更新ZIPに不正なパスが含まれています。",
+        "archive_unmanaged": "更新ZIPにMozarie本体以外のファイルが含まれています。",
         "archive_symlink": "更新ZIPにシンボリックリンクが含まれています。",
-        "archive_invalid_count": "更新ZIPのファイル数が正しくありません。",
-        "archive_extracted_too_large": "展開後の更新ファイルが大きすぎます。",
+        "archive_invalid_count": "更新ZIPの内容が正しくありません。",
         "archive_extract": "更新ZIPを展開できませんでした。",
         "archive_missing_app": "更新ZIPにMozarie本体が見つかりません。",
         "requirements_updating": "依存関係を更新しています...",
@@ -111,13 +109,13 @@ MESSAGES = {
         "download_url": "No download URL was found.",
         "download_digest": "The GitHub Release update verification information is invalid.",
         "archive_digest": "The downloaded update archive SHA-256 does not match.",
-        "archive_too_large": "The update archive is too large.",
+        "archive_disk_space": "There is not enough free disk space to extract the update.",
         "downloading_progress": "Downloading: {megabytes} MB",
         "archive_download": "Could not download the update archive.",
         "archive_invalid_path": "The update archive contains an invalid path.",
+        "archive_unmanaged": "The update archive contains files outside Mozarie.",
         "archive_symlink": "The update archive contains a symbolic link.",
-        "archive_invalid_count": "The update archive has an invalid file count.",
-        "archive_extracted_too_large": "The extracted update is too large.",
+        "archive_invalid_count": "The update archive contents are invalid.",
         "archive_extract": "Could not extract the update archive.",
         "archive_missing_app": "The update archive does not contain Mozarie.",
         "requirements_updating": "Updating dependencies...",
@@ -281,15 +279,58 @@ def release_archive(release: dict[str, Any]) -> tuple[str, str, int]:
         raise UpdateError(tr("download_url"))
     if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
         raise UpdateError(tr("download_digest"))
-    if not isinstance(size, int) or size < 1 or size > MAX_ARCHIVE_BYTES:
-        raise UpdateError(tr("archive_too_large"))
+    if not isinstance(size, int) or size < 1:
+        raise UpdateError(tr("download_url"))
     return url, digest.removeprefix("sha256:"), size
+
+
+def _require_free_space(destination: Path, required: int) -> None:
+    try:
+        anchor = destination
+        while not anchor.exists() and anchor.parent != anchor:
+            anchor = anchor.parent
+        if shutil.disk_usage(anchor).free < required:
+            raise UpdateError(tr("archive_disk_space"))
+    except UpdateError:
+        raise
+    except OSError as exc:
+        raise UpdateError(tr("archive_disk_space")) from exc
+
+
+def _managed_size(root: Path) -> int:
+    """Count the installed files that must coexist with their backup."""
+    total = 0
+    for relative in MANAGED_FILES:
+        path = root / relative
+        if path.is_file():
+            total += path.stat().st_size
+    for relative in MANAGED_DIRECTORIES:
+        directory = root / relative
+        if directory.is_dir():
+            total += sum(path.stat().st_size for path in directory.rglob("*") if path.is_file())
+    return total
+
+
+def _storage_key(path: Path) -> str:
+    return str(path.resolve().anchor).casefold()
+
+
+def _require_update_storage(temporary_root: Path, extracted_size: int, app_dir: Path) -> None:
+    """Reserve extraction, rollback, and the incoming managed copy before writing."""
+    requirements: dict[str, tuple[Path, int]] = {}
+    for root, required in ((temporary_root, extracted_size), (app_dir.parent, _managed_size(app_dir) + extracted_size)):
+        key = _storage_key(root)
+        anchor, accumulated = requirements.get(key, (root, 0))
+        requirements[key] = (anchor, accumulated + required)
+    for root, required in requirements.values():
+        _require_free_space(root, required)
 
 
 def download_archive(url: str, destination: Path, expected_digest: str, expected_size: int,
                      opener: Callable[..., Any] = urllib.request.urlopen) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": "Mozarie-Updater"})
     try:
+        _require_free_space(destination.parent, expected_size)
         with opener(request, timeout=60) as response, destination.open("wb") as output:
             total = 0
             digest = hashlib.sha256()
@@ -298,8 +339,8 @@ def download_archive(url: str, destination: Path, expected_digest: str, expected
                 if not chunk:
                     break
                 total += len(chunk)
-                if total > MAX_ARCHIVE_BYTES:
-                    raise UpdateError(tr("archive_too_large"))
+                if total > expected_size:
+                    raise UpdateError(tr("archive_download"))
                 output.write(chunk)
                 digest.update(chunk)
                 print(f"\r{tr('downloading_progress', megabytes=total // 1024 // 1024)}", end="", flush=True)
@@ -318,6 +359,10 @@ def _safe_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
     name = info.filename
     if not name or "\x00" in name or "\\" in name:
         raise UpdateError(tr("archive_invalid_path"))
+    raw_parts = name.split("/")
+    segments = raw_parts[:-1] if info.is_dir() else raw_parts
+    if (info.is_dir() and raw_parts[-1] != "") or any(part in {"", ".", ".."} for part in segments):
+        raise UpdateError(tr("archive_invalid_path"))
     path = PurePosixPath(name)
     if path.is_absolute() or any(part in {"", ".", ".."} or ":" in part for part in path.parts):
         raise UpdateError(tr("archive_invalid_path"))
@@ -333,35 +378,87 @@ def _safe_member_path(info: zipfile.ZipInfo) -> PurePosixPath:
     return path
 
 
-def extract_archive(archive: Path, destination: Path) -> Path:
+def _managed_archive_member(path: PurePosixPath, *, is_directory: bool) -> bool:
+    name = path.as_posix()
+    if name in MANAGED_FILES:
+        return not is_directory
+    if name in MANAGED_DIRECTORIES:
+        return is_directory
+    if any(name.startswith(f"{directory}/") for directory in MANAGED_DIRECTORIES):
+        return True
+    return is_directory and any(file.startswith(f"{name}/") for file in MANAGED_FILES)
+
+
+def _archive_plan(archive: Path) -> tuple[str, list[tuple[str, PurePosixPath, int, bool]], int]:
+    with zipfile.ZipFile(archive) as bundle:
+        infos = bundle.infolist()
+        if not infos:
+            raise UpdateError(tr("archive_invalid_count"))
+        entries = [(info, _safe_member_path(info)) for info in infos]
+        roots = {path.parts[0] for _info, path in entries}
+        if len(roots) != 1:
+            raise UpdateError(tr("archive_missing_app"))
+        source_name = roots.pop()
+        planned: list[tuple[str, PurePosixPath, int, bool]] = []
+        targets: dict[tuple[str, ...], bool] = {}
+        extracted_size = 0
+        for info, path in entries:
+            member = PurePosixPath(*path.parts[1:])
+            if not member.parts:
+                if not info.is_dir():
+                    raise UpdateError(tr("archive_missing_app"))
+                continue
+            if not _managed_archive_member(member, is_directory=info.is_dir()):
+                raise UpdateError(tr("archive_unmanaged"))
+            canonical_target = tuple(part.casefold() for part in member.parts)
+            if canonical_target in targets:
+                raise UpdateError(tr("archive_invalid_count"))
+            targets[canonical_target] = info.is_dir()
+            planned.append((info.filename, member, info.file_size, info.is_dir()))
+            if not info.is_dir():
+                extracted_size += info.file_size
+        file_targets = {target for target, is_directory in targets.items() if not is_directory}
+        if any(target[:depth] in file_targets for target in targets for depth in range(1, len(target))):
+            raise UpdateError(tr("archive_invalid_count"))
+        return source_name, planned, extracted_size
+
+
+def extract_archive(archive: Path, destination: Path, app_dir: Path = APP_DIR) -> Path:
     try:
         destination_root = destination.resolve()
+        source_name, entries, extracted_size = _archive_plan(archive)
+        source_root = destination_root / source_name
+        try:
+            source_root.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise UpdateError(tr("archive_invalid_path")) from exc
+        else:
+            raise UpdateError(tr("archive_invalid_path"))
+        _require_update_storage(destination_root, extracted_size, app_dir)
         with zipfile.ZipFile(archive) as bundle:
-            infos = bundle.infolist()
-            if not infos or len(infos) > MAX_ARCHIVE_FILES:
-                raise UpdateError(tr("archive_invalid_count"))
-            if sum(info.file_size for info in infos) > MAX_ARCHIVE_BYTES:
-                raise UpdateError(tr("archive_extracted_too_large"))
-            for info in infos:
-                relative = _safe_member_path(info)
-                target = destination_root.joinpath(*relative.parts).resolve()
+            source_root.mkdir(parents=True, exist_ok=False)
+            for name, relative, expected_size, is_directory in entries:
+                target = source_root.joinpath(*relative.parts).resolve()
                 if not target.is_relative_to(destination_root):
                     raise UpdateError(tr("archive_invalid_path"))
-                if info.is_dir():
+                if is_directory:
                     target.mkdir(parents=True, exist_ok=True)
                     continue
                 target.parent.mkdir(parents=True, exist_ok=True)
-                with bundle.open(info) as source, target.open("wb") as output:
-                    shutil.copyfileobj(source, output)
+                with bundle.open(name) as source, target.open("wb") as output:
+                    written = 0
+                    while chunk := source.read(1024 * 1024):
+                        output.write(chunk)
+                        written += len(chunk)
+                    if written != expected_size:
+                        raise UpdateError(tr("archive_extract"))
     except UpdateError:
         raise
     except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
         raise UpdateError(tr("archive_extract")) from exc
 
-    children = list(destination_root.iterdir())
-    if len(children) != 1 or not children[0].is_dir():
-        raise UpdateError(tr("archive_missing_app"))
-    source_root = children[0]
     required_files = tuple(source_root / relative for relative in MANAGED_FILES)
     required_directories = tuple(source_root / relative for relative in MANAGED_DIRECTORIES)
     if not all(path.is_file() for path in required_files) or not all(path.is_dir() for path in required_directories):
@@ -600,7 +697,7 @@ def _perform_update(
         url, digest, size = release_archive(release)
         download_archive(url, archive, digest, size, opener)
         print(tr("verifying"))
-        source_root = extract_archive(archive, extracted)
+        source_root = extract_archive(archive, extracted, app_dir)
         archive_version = read_local_version(source_root)
         if parse_version(archive_version) != parse_version(latest_raw):
             raise UpdateError(tr("archive_version_mismatch"))

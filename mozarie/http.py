@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import uuid
 import zipfile
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,20 +19,28 @@ from urllib.parse import parse_qs, unquote, urlparse
 from PIL import Image, ImageOps
 
 from .core import (
-    APP_DIR, IO_CHUNK_BYTES, LOGGER, MAX_BODY_BYTES, PNG_SIGNATURE, STATIC_DIR,
+    APP_DIR, IO_CHUNK_BYTES, LOGGER, PNG_SIGNATURE, STATIC_DIR,
     ClientError, ForbiddenClientError, ImageRecord, StaleMaskError,
     read_detection_confidence, _read_detection_parallelism, _read_mosaic_divisor,
     _read_save_suffix, _read_target_classes, public_error_params,
 )
 from . import state as state_module
 from .state import STATE, StudioState
-from .image_io import _decode_mask, _valid_color, calculate_block_size, inference_device_name, parse_png_chunks
+from .image_io import _decode_mask, _valid_color, calculate_block_size, inference_device_name, open_image_without_png_text, parse_png_chunks
 from .model_downloads import ModelDownloadError, ModelDownloadInProgress
+from .config import SettingsError, validate_output_directory_ready
 
 
 CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 _update_start_lock = threading.Lock()
 _update_start_requested = False
+
+
+def _is_canonical_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value
+    except (ValueError, AttributeError, TypeError):
+        return False
 
 
 def _reserve_update_start() -> bool:
@@ -46,6 +55,165 @@ def _reserve_update_start() -> bool:
 
 def _is_api_path(path: str) -> bool:
     return path == "/api" or path.startswith("/api/")
+
+
+_POST_OPERATION_LABELS = {
+    "/api/import/file": "ブラウザー画像の読み込み",
+    "/api/import/start": "ブラウザー画像の読み込み開始",
+    "/api/import/finish": "ブラウザー画像の読み込み確定",
+    "/api/folder": "フォルダー読み込み",
+    "/api/projects": "プロジェクト作成",
+    "/api/project/name": "プロジェクト名変更",
+    "/api/project/complete": "プロジェクト完了",
+    "/api/project/close": "プロジェクトを閉じる",
+    "/api/project/open": "プロジェクトを開く",
+    "/api/project/resume": "プロジェクトを再開",
+    "/api/project/mismatches": "元画像の差分解決",
+    "/api/project/source-check": "元フォルダー確認",
+    "/api/project/source/relink": "元フォルダー再指定",
+    "/api/catalog/clear": "画像一覧クリア",
+    "/api/workspace/images": "画像状態の一括変更",
+    "/api/catalog/remove": "画像一覧から削除",
+    "/api/catalog/delete-source": "元画像を完全削除",
+    "/api/catalog/delete-source/prepare": "元画像削除の確認",
+    "/api/catalog/delete-source/claim": "元画像削除の所有権確定",
+    "/api/catalog/delete-source/release": "元画像削除の所有権解除",
+    "/api/catalog/delete-source/status": "元画像削除の状態確認",
+    "/api/catalog/delete-source/cancel": "元画像削除の取消",
+    "/api/catalog/delete-source/ack": "元画像削除の確認完了",
+    "/api/masks/clear": "モザイク指定クリア",
+    "/api/detect": "自動検出",
+    "/api/candidates/batch": "候補の一括変更",
+    "/api/workspace/recreate": "作業データ再作成",
+    "/api/settings": "設定保存",
+    "/api/settings/gpu-diagnostic": "GPU診断",
+    "/api/settings/reset": "設定初期化",
+    "/api/model-file/pick": "モデルファイル選択",
+    "/api/output-directory/pick": "保存先フォルダー選択",
+    "/api/model-download/start": "モデルダウンロード開始",
+    "/api/model-download/cancel": "モデルダウンロード取消",
+    "/api/update/start": "更新開始",
+    "/api/boundary": "境界候補追加",
+    "/api/save/prepare": "ブラウザー保存準備",
+    "/api/save/render": "ブラウザー保存レンダー",
+    "/api/save/reserve": "ブラウザー保存予約",
+    "/api/save/commit": "ブラウザー保存確定",
+    "/api/save/status": "ブラウザー保存状態確認",
+    "/api/save/ack": "ブラウザー保存確定受領",
+    "/api/save/cancel": "ブラウザー保存取消",
+    "/api/apply": "ファイル保存",
+    "/api/job/pause": "バックグラウンド処理一時停止",
+    "/api/job/resume": "バックグラウンド処理再開",
+    "/api/job/cancel": "バックグラウンド処理取消",
+}
+
+_DELETE_OPERATION_LABELS = {
+    "/api/catalog/image/": "画像一覧から削除",
+    "/api/project/": "プロジェクト削除",
+}
+
+_PER_IMAGE_OPERATION_ROUTES = {
+    "/api/import/file",
+    "/api/save/reserve",
+    "/api/save/render",
+    "/api/save/commit",
+    "/api/save/ack",
+}
+
+
+def _operation_log_spec(method: str, path: str) -> tuple[str, str] | None:
+    """Return a user-facing operation name and an ID-free route for CMD logs."""
+    if method == "POST":
+        label = _POST_OPERATION_LABELS.get(path)
+        if label is not None:
+            return label, path
+        if path.startswith("/api/workspace/manual/"):
+            if "/layer/" in path:
+                return "手描きマスク転送", "/api/workspace/manual/layer"
+            if path.endswith("/begin"):
+                return "手描きマスク転送開始", "/api/workspace/manual/begin"
+            if path.endswith("/commit"):
+                return "手描きマスク転送確定", "/api/workspace/manual/commit"
+            if path.endswith("/cancel"):
+                return "手描きマスク転送取消", "/api/workspace/manual/cancel"
+        if path.startswith("/api/project/history/"):
+            return "プロジェクト履歴", "/api/project/history"
+        if path.startswith("/api/workspace/image/"):
+            return "画像状態変更", "/api/workspace/image"
+        if path.startswith("/api/images/") and path.endswith("/transform"):
+            return "画像反転", "/api/images/transform"
+        if path.startswith("/api/candidate/"):
+            return "候補変更", "/api/candidate"
+        return None
+    if method == "DELETE":
+        for prefix, label in _DELETE_OPERATION_LABELS.items():
+            if path.startswith(prefix):
+                return label, prefix.rstrip("/")
+        if path.startswith("/api/candidate/"):
+            return "候補削除", "/api/candidate"
+        if path.startswith("/api/workspace/manual/"):
+            return "手描き範囲削除", "/api/workspace/manual"
+    return None
+
+
+def _operation_log_details(path: str, payload: dict[str, Any]) -> str:
+    details: list[str] = []
+    image_ids = payload.get("imageIds")
+    if isinstance(image_ids, list):
+        details.append(f"対象={len(image_ids)}件")
+    if path in {"/api/folder", "/api/project/source-check", "/api/project/source/relink", "/api/output-directory/pick"}:
+        source_path = payload.get("path") if path != "/api/output-directory/pick" else payload.get("currentPath")
+        if isinstance(source_path, str) and source_path:
+            details.append(f"パス={source_path}")
+    return f" {' '.join(details)}" if details else ""
+
+
+def _log_operation_started(operation: tuple[str, str] | None, path: str, payload: dict[str, Any]) -> float | None:
+    if operation is None:
+        return None
+    label, route = operation
+    if route in _PER_IMAGE_OPERATION_ROUTES:
+        # A browser import/save session already logs its start and completion.
+        # Per-image successes make the CMD output noisy without adding a useful
+        # operation-level signal; failures remain warnings below.
+        return time.monotonic()
+    LOGGER.info("操作開始: %s [%s]%s", label, route, _operation_log_details(path, payload))
+    return time.monotonic()
+
+
+def _log_operation_finished(operation: tuple[str, str] | None, started_at: float | None) -> None:
+    if operation is None or started_at is None:
+        return
+    label, route = operation
+    if route in _PER_IMAGE_OPERATION_ROUTES:
+        return
+    LOGGER.info("操作完了: %s [%s] status=200 所要=%.2f秒", label, route, time.monotonic() - started_at)
+
+
+def _log_operation_failed(operation: tuple[str, str] | None, started_at: float | None, status: HTTPStatus, error: Exception) -> None:
+    if operation is None or started_at is None:
+        return
+    label, route = operation
+    error_code = error.error_code if isinstance(error, ClientError) else "internal_error"
+    LOGGER.warning("操作失敗: %s [%s] status=%d error_code=%s 所要=%.2f秒", label, route, int(status), error_code, time.monotonic() - started_at)
+
+
+def _read_fluid_color_fill_options(payload: dict[str, Any], settings: dict[str, Any]) -> tuple[bool, int]:
+    """Read the per-run fluid expansion snapshot without accepting coercions."""
+
+    enabled_key = "fluidColorFillEnabled"
+    tolerance_key = "fluidColorFillTolerance"
+    provided = {key for key in (enabled_key, tolerance_key) if key in payload}
+    if provided and provided != {enabled_key, tolerance_key}:
+        raise ClientError("精液候補の色拡張設定が正しくありません。", "input_invalid")
+    if not provided:
+        detection = settings["detection"]
+        return bool(detection["fluid_color_fill_enabled"]), int(detection["fluid_color_fill_tolerance"])
+    enabled = payload[enabled_key]
+    tolerance = payload[tolerance_key]
+    if not isinstance(enabled, bool) or isinstance(tolerance, bool) or not isinstance(tolerance, int) or not 0 <= tolerance <= 255:
+        raise ClientError("精液候補の色拡張設定が正しくありません。", "input_invalid")
+    return enabled, tolerance
 
 
 def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]]) -> dict[str, object]:
@@ -68,16 +236,25 @@ def _run_native_picker(script: str, environment: dict[str, str], *, failed_messa
             raise ClientError(failed_message, "model_picker_failed")
         encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
         try:
-            completed = subprocess.run(
+            process = subprocess.Popen(
                 [str(executable), "-NoLogo", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encoded_script],
-                stdin=subprocess.DEVNULL, capture_output=True, check=False, timeout=300, shell=False, env=environment,
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False, env=environment,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+            while True:
+                try:
+                    stdout, _stderr = process.communicate(timeout=0.1)
+                    break
+                except subprocess.TimeoutExpired:
+                    if state.shutdown_requested.is_set():
+                        process.terminate()
+                        process.communicate()
+                        raise ClientError(failed_message, "model_picker_failed")
+        except OSError as exc:
             raise ClientError(failed_message, "model_picker_failed") from exc
-        if completed.returncode:
+        if process.returncode:
             raise ClientError(failed_message, "model_picker_failed")
-        encoded = completed.stdout.strip()
+        encoded = stdout.strip()
         if not encoded:
             return None
         try:
@@ -134,6 +311,41 @@ try {{
     return str(path.resolve())
 
 
+def _pick_output_directory(state: StudioState = STATE, current_path: str = "") -> str | None:
+    """Pick and verify a writable directory; a browser handle has no full path."""
+    with state.lock:
+        if state.active_import_count or state.job.state in {"running", "pausing", "paused"} or state._has_active_worker():
+            raise ClientError("処理中は保存先を変更できません。", "job_running")
+    script = """
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$owner = New-Object System.Windows.Forms.Form
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+try {
+  $owner.ShowInTaskbar = $false; $owner.Opacity = 0; $owner.TopMost = $true
+  $owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+  $owner.Size = New-Object System.Drawing.Size(1, 1)
+  $owner.Show(); $owner.Activate(); $owner.BringToFront()
+  $initial = $env:MOZARIE_OUTPUT_INITIAL_DIRECTORY
+  if ($initial -and [System.IO.Directory]::Exists($initial)) { $dialog.SelectedPath = $initial }
+  if ($dialog.ShowDialog($owner) -ne [System.Windows.Forms.DialogResult]::OK) { exit 0 }
+  $bytes = [System.Text.Encoding]::UTF8.GetBytes($dialog.SelectedPath)
+  [Console]::Out.Write([Convert]::ToBase64String($bytes))
+} finally { $dialog.Dispose(); $owner.Close(); $owner.Dispose() }
+"""
+    environment = os.environ.copy()
+    candidate = _picker_hint_path(current_path) if isinstance(current_path, str) else None
+    if candidate is not None and candidate.is_dir():
+        environment["MOZARIE_OUTPUT_INITIAL_DIRECTORY"] = str(candidate.resolve())
+    selected = _run_native_picker(script, environment, failed_message="保存先フォルダーの選択を開けませんでした。", busy_message="保存先フォルダーを選択しています。", state=state)
+    if selected is None:
+        return None
+    try:
+        return str(validate_output_directory_ready(selected))
+    except (SettingsError, OSError) as exc:
+        raise ClientError("選択した保存先フォルダーを使用できません。", "output_folder_unavailable") from exc
+
+
 class MosaicHandler(BaseHTTPRequestHandler):
     server_version = "Mozarie/1.0"
     protocol_version = "HTTP/1.1"
@@ -144,9 +356,16 @@ class MosaicHandler(BaseHTTPRequestHandler):
 
     def _request_body_length(self, *, required: bool = False) -> int:
         """Validate the only request framing this HTTP/1.1 server accepts."""
-        if self.headers.get_all("Transfer-Encoding"):
+        get_all = getattr(self.headers, "get_all", None)
+        def header_values(name: str) -> list[str]:
+            if get_all:
+                return get_all(name, [])
+            return [self.headers[name]] if name in self.headers else []
+
+        transfer_encodings = header_values("Transfer-Encoding")
+        if transfer_encodings:
             self._reject_unread_request(ClientError("リクエスト形式が正しくありません。", "input_invalid"))
-        lengths = self.headers.get_all("Content-Length", [])
+        lengths = header_values("Content-Length")
         if not lengths:
             if required:
                 self._reject_unread_request(ClientError("リクエストサイズが不正です。", "input_invalid"))
@@ -156,10 +375,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
         raw_length = lengths[0]
         if not raw_length or not raw_length.isascii() or not raw_length.isdecimal():
             self._reject_unread_request(ClientError("リクエストサイズが不正です。", "input_invalid"))
-        if len(raw_length) > len(str(MAX_BODY_BYTES)):
+        try:
+            content_length = int(raw_length)
+        except ValueError:
             self._reject_unread_request(ClientError("リクエストサイズが正しくありません。", "input_invalid"))
-        content_length = int(raw_length)
-        if content_length > MAX_BODY_BYTES or (required and content_length <= 0):
+        if required and content_length <= 0:
             self._reject_unread_request(ClientError("リクエストサイズが正しくありません。", "input_invalid"))
         return content_length
 
@@ -304,9 +524,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path.startswith("/api/project/history/"):
                 self._json(STATE.project_history_status(path.removeprefix("/api/project/history/")))
             elif path == "/api/job":
-                STATE.cleanup_expired_browser_save_tokens()
-                with STATE.lock:
-                    self._json(STATE.job.as_dict())
+                self._json(STATE.job_snapshot())
             elif path.startswith("/api/image/"):
                 self._send_image(path.removeprefix("/api/image/"), thumbnail=False, version=_request_version(parsed.query))
             elif path.startswith("/api/thumbnail/"):
@@ -332,7 +550,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     raise ClientError("マスク種別が正しくありません。", "input_invalid")
                 if STATE.workspace_store.project(project_id) is None:
                     raise ClientError("プロジェクトが見つかりません。", "project_not_found")
-                with tempfile.NamedTemporaryFile(prefix="mozarie-masks-", suffix=".zip", delete=False) as output:
+                with tempfile.NamedTemporaryFile(dir=STATE.cache_dir, prefix="mozarie-masks-", suffix=".zip", delete=False) as output:
                     archive_path = Path(output.name)
                 try:
                     with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -363,9 +581,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
             self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 
     def do_POST(self) -> None:  # noqa: N802
+        operation: tuple[str, str] | None = None
+        operation_started_at: float | None = None
         try:
             parsed = urlparse(self.path)
             path = unquote(parsed.path)
+            operation = _operation_log_spec("POST", path)
+            operation_started_at = _log_operation_started(operation, path, {})
             if STATE is None:
                 if path == "/api/workspace/recreate":
                     self._require_recovery_request()
@@ -373,6 +595,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     restored = state_module.recreate_workspace()
                     globals()["STATE"] = restored
                     self._json({"ok": True})
+                    _log_operation_finished(operation, operation_started_at)
                     return
                 self._require_local_host()
                 self.close_connection = True
@@ -380,6 +603,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     # The unavailable-state route does not consume arbitrary
                     # request bodies.  Close this connection so a rejected
                     # JSON body cannot be parsed as a second HTTP request.
+                    error = ClientError("作業データを作り直してから操作してください。", "workspace_recreate_required")
+                    _log_operation_failed(operation, operation_started_at, HTTPStatus.CONFLICT, error)
                     self._workspace_recreate_required()
                 else:
                     self._client_error(ClientError("ページが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
@@ -396,7 +621,7 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 import_session_id = self.headers.get("X-Mozarie-Import-Session", "")
                 raw_mtime = self.headers.get("X-Mozarie-File-Mtime", "0")
                 raw_size = self.headers.get("X-Mozarie-File-Size", "0")
-                if (source_identity and (len(source_identity) > 128 or not source_identity.replace("-", "").isalnum())
+                if (source_identity and not _is_canonical_uuid(source_identity)
                         or source_kind not in {"browser-files", "browser-directory"}
                         or import_intent not in {"add", "restore"}
                         or not raw_mtime.isdigit() or not raw_size.isdigit()):
@@ -418,48 +643,89 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     self.close_connection = True
                     raise
                 response = None
+                succeeded = False
                 try:
-                    with STATE.import_staging_gate:
+                    staged_path: Path | None = None
+                    try:
                         staged_path = self._read_binary_body_to_file(content_length)
+                        STATE.record_import_transfer_bytes(import_session_id, content_length)
                         requested_catalog = unquote(self.headers.get("X-Mozarie-Catalog-Id", ""))
-                        try:
-                            # Keep implicit API callers from splitting a
-                            # parallel empty-catalog upload across IDs. This
-                            # lock only verifies that the browser is still
-                            # importing into its already-open project;
-                            # decoding and file copy below retain their
-                            # parallelism.  A request header never opens or
-                            # changes a project.
-                            with STATE.import_lock:
-                                if requested_catalog and STATE.catalog_id != requested_catalog:
-                                    raise ClientError("画像追加中にフォルダを切り替えることはできません。", "operation_in_progress")
-                            import_args = {
-                                "name": name, "relative_path": relative_path, "client_key": client_key,
-                                "include_images": False, "transfer_active": True,
-                                "import_session_id": import_session_id,
-                                "import_project_id": expected_project_id,
-                                "import_catalog_generation": expected_catalog_generation,
-                                "source_identity": source_identity or None,
-                                "source_kind": source_kind,
-                                "intent": import_intent,
-                                "mtime_ns": mtime_ns,
-                                "size_bytes": size_bytes,
-                            }
-                            _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
-                        finally:
+                        # Keep implicit API callers from splitting a
+                        # parallel empty-catalog upload across IDs. This
+                        # lock only verifies that the browser is still
+                        # importing into its already-open project;
+                        # decoding and file copy below retain their
+                        # parallelism.  A request header never opens or
+                        # changes a project.
+                        with STATE.import_lock:
+                            if requested_catalog and STATE.catalog_id != requested_catalog:
+                                raise ClientError("画像追加中にフォルダを切り替えることはできません。", "operation_in_progress")
+                        import_args = {
+                            "name": name, "relative_path": relative_path, "client_key": client_key,
+                            "include_images": False, "transfer_active": True,
+                            "import_session_id": import_session_id,
+                            "import_project_id": expected_project_id,
+                            "import_catalog_generation": expected_catalog_generation,
+                            "source_identity": source_identity or None,
+                            "source_kind": source_kind,
+                            "intent": import_intent,
+                            "mtime_ns": mtime_ns,
+                            "size_bytes": size_bytes,
+                        }
+                        _images, imported = STATE.import_image_file_for_api(staged_path, **import_args)
+                        STATE.cleanup_browser_save_files()
+                    finally:
+                        if staged_path is not None:
                             staged_path.unlink(missing_ok=True)
                     response = {"imported": imported, "catalogId": STATE.catalog_id,
                                 "catalogGeneration": STATE.catalog_snapshot()["catalogGeneration"]}
+                    succeeded = True
                 finally:
-                    STATE.end_import_transfer(import_session_id)
+                    STATE.end_import_transfer(import_session_id, succeeded=succeeded)
                 self._json(response)
+                _log_operation_finished(operation, operation_started_at)
+                return
+            manual_parts = path.split("/")
+            if len(manual_parts) == 8 and manual_parts[1:4] == ["api", "workspace", "manual"] and manual_parts[5] == "layer":
+                image_id, session_id, layer = manual_parts[4], manual_parts[6], manual_parts[7]
+                self._require_binary_import_request()
+                content_length = self._request_body_length(required=True)
+                try:
+                    expected_project_id, expected_catalog_generation = self._catalog_expectation()
+                    target = self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                    lambda: STATE.manual_upload_layer_path(image_id, session_id, layer))
+                except ClientError as exc:
+                    self._reject_unread_request(exc)
+                try:
+                    self._read_binary_body_to_path(target, content_length)
+                    self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                           lambda: STATE.finish_manual_upload_layer(image_id, session_id, layer, content_length))
+                except Exception:
+                    STATE.abort_manual_upload_layer(image_id, session_id, layer)
+                    raise
+                self._json({"ok": True})
+                _log_operation_finished(operation, operation_started_at)
                 return
             self._require_json_request()
             payload = self._read_json_body()
             expected_project_id, expected_catalog_generation = self._catalog_expectation(payload)
-            if path == "/api/import/finish":
+            if operation is not None and (details := _operation_log_details(path, payload)):
+                LOGGER.info("操作対象: %s [%s]%s", operation[0], operation[1], details)
+            if path == "/api/import/start":
+                self._json(STATE.start_import_session(str(payload.get("sessionId", "")), expected_project_id,
+                                                      expected_catalog_generation))
+            elif path == "/api/import/finish":
+                completed = payload.get("completed", 0)
+                if isinstance(completed, bool) or not isinstance(completed, int) or completed < 0:
+                    raise ClientError("画像追加の完了件数が正しくありません。", "input_invalid")
+                if any(not isinstance(payload.get(name, False), bool) for name in ("failed", "cancelled")):
+                    raise ClientError("画像追加の完了状態が正しくありません。", "input_invalid")
                 self._json(STATE.finish_import_session(str(payload.get("sessionId", "")), expected_project_id,
-                                                        expected_catalog_generation))
+                                                        expected_catalog_generation, {
+                                                            "completed": completed,
+                                                            "failed": bool(payload.get("failed", False)),
+                                                            "cancelled": bool(payload.get("cancelled", False)),
+                                                        }))
             elif path == "/api/folder":
                 _result, snapshot = self._catalog_transition_snapshot(
                     lambda: STATE.set_root(str(payload.get("path", "")), expected_project_id=expected_project_id,
@@ -534,6 +800,20 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/workspace/images":
                 self._json({"flags": self._catalog_mutation(expected_project_id, expected_catalog_generation,
                                                               lambda: STATE.set_image_flags_bulk(payload))})
+            elif path.startswith("/api/workspace/manual/") and path.endswith("/begin"):
+                image_id = path.removeprefix("/api/workspace/manual/").removesuffix("/begin").rstrip("/")
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.begin_manual_upload(image_id, str(payload.get("sessionId", "")), payload.get("dirtyLayers"))))
+            elif path.startswith("/api/workspace/manual/") and path.endswith("/commit"):
+                image_id = path.removeprefix("/api/workspace/manual/").removesuffix("/commit").rstrip("/")
+                self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                       lambda: STATE.commit_manual_upload(image_id, str(payload.get("sessionId", "")), payload))
+                self._json({"ok": True})
+            elif path.startswith("/api/workspace/manual/") and path.endswith("/cancel"):
+                image_id = path.removeprefix("/api/workspace/manual/").removesuffix("/cancel").rstrip("/")
+                self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                       lambda: STATE.cancel_manual_upload(image_id, str(payload.get("sessionId", ""))))
+                self._json({"ok": True})
             elif path.startswith("/api/workspace/manual/"):
                 self._catalog_mutation(expected_project_id, expected_catalog_generation,
                                        lambda: STATE.save_manual_workspace(path.removeprefix("/api/workspace/manual/"), payload))
@@ -545,6 +825,25 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/catalog/remove":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
                                                    lambda: STATE.remove_images_from_catalog(payload.get("imageIds", []))))
+            elif path == "/api/catalog/delete-source/prepare":
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.prepare_source_delete(payload)))
+            elif path == "/api/catalog/delete-source/claim":
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.claim_source_delete(str(payload.get("deleteToken", "")))))
+            elif path == "/api/catalog/delete-source/release":
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.release_source_delete_claim(str(payload.get("deleteToken", "")))))
+            elif path == "/api/catalog/delete-source":
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.delete_images_with_sources(payload)))
+            elif path == "/api/catalog/delete-source/status":
+                self._json(STATE.source_delete_status(str(payload.get("deleteToken", ""))))
+            elif path == "/api/catalog/delete-source/cancel":
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
+                                                   lambda: STATE.cancel_source_delete(str(payload.get("deleteToken", "")))))
+            elif path == "/api/catalog/delete-source/ack":
+                self._json(STATE.acknowledge_source_delete(str(payload.get("deleteToken", ""))))
             elif path == "/api/masks/clear":
                 self._json({"cleared": self._catalog_mutation(expected_project_id, expected_catalog_generation,
                                                                 lambda: STATE.clear_masks(payload.get("imageIds", [])))})
@@ -554,12 +853,17 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     read_detection_confidence(payload.get("confidence", STATE.settings["detection"]["threshold"])),
                     _read_detection_parallelism(payload.get("parallelism", STATE.settings["detection"]["parallelism"])),
                 )
+                fluid_color_fill = _read_fluid_color_fill_options(payload, STATE.settings)
                 if "targetClasses" in payload:
                     self._catalog_mutation(expected_project_id, expected_catalog_generation,
-                                           lambda: STATE.start_detection(*detect_args, _read_target_classes(payload["targetClasses"])))
+                                           lambda: STATE.start_detection(
+                                               *detect_args,
+                                               _read_target_classes(payload["targetClasses"]),
+                                               fluid_color_fill=fluid_color_fill,
+                                           ))
                 else:
                     self._catalog_mutation(expected_project_id, expected_catalog_generation,
-                                           lambda: STATE.start_detection(*detect_args))
+                                           lambda: STATE.start_detection(*detect_args, fluid_color_fill=fluid_color_fill))
                 self._json({"ok": True})
             elif path == "/api/candidates/batch":
                 image_id = str(payload.get("imageId", ""))
@@ -593,6 +897,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
             elif path == "/api/model-file/pick":
                 selected = _pick_model_file(str(payload.get("modelKey", "")), current_path=str(payload.get("currentPath", "")))
                 self._json({"path": selected} if selected else {"cancelled": True})
+            elif path == "/api/output-directory/pick":
+                selected = _pick_output_directory(current_path=str(payload.get("currentPath", "")))
+                if selected is None:
+                    self._json({"cancelled": True})
+                else:
+                    settings = STATE.update_settings({"saving": {"default_output_directory": selected}})
+                    self._json({"settings": settings, "path": settings["saving"]["default_output_directory"]})
             elif path == "/api/model-download/start":
                 try:
                     self._json(STATE.model_downloads.start(str(payload.get("modelKey", "")), str(payload.get("samType", ""))))
@@ -621,9 +932,20 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     _read_bool(payload.get("deleteOriginal", False), "元画像削除"),
                 ))
                 self._json({"entries": entries})
+            elif path == "/api/save/reserve":
+                self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.reserve_browser_save(
+                    str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
+                    _read_client_save_token(payload.get("clientSaveToken")),
+                    copy_to_default=_read_bool(payload.get("copyToDefault", False), "既定の保存先へコピー"),
+                    suffix=_read_save_suffix(payload.get("suffix", "_censored")),
+                    output_format=str(payload.get("format", "original")),
+                    keep_metadata=_read_bool(payload.get("keepMetadata", True), "メタ情報の保持"),
+                )))
             elif path == "/api/save/render":
                 copy_to_default = _read_bool(payload.get("copyToDefault", False), "既定の保存先へコピー")
                 copy_to_browser = _read_bool(payload.get("copyToBrowser", False), "ブラウザ保存")
+                if copy_to_browser:
+                    raise ClientError("コピー保存は選択済みの保存先へ実行してください。", "input_invalid")
                 rendered = self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.render_browser_save(
                     str(payload.get("imageId", "")),
                     _read_candidate_revision(payload.get("candidateRevision")),
@@ -631,23 +953,33 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     payload.get("draft"),
                     copy_to_default=copy_to_default,
                     copy_to_browser=copy_to_browser,
+                    client_save_token=_read_client_save_token(payload.get("clientSaveToken")),
                     suffix=_read_save_suffix(payload.get("suffix", "_censored")),
                     output_format=str(payload.get("format", "original")),
                     keep_metadata=_read_bool(payload.get("keepMetadata", True), "メタ情報の保持"),
                 ))
-                output, record, revision, save_token = rendered
+                revision, save_token = rendered.candidate_revision, rendered.save_token
                 if copy_to_default:
-                    self._json({"output": str(rendered.output_path), "candidateRevision": revision, "saveToken": save_token})
-                else:
                     self._binary(
-                        output,
-                        rendered.mime_type,
+                        b"", "application/octet-stream",
                         headers={
                             "X-Mozarie-Revision": str(revision),
                             "X-Mozarie-Save-Token": save_token,
+                            "X-Mozarie-Output-Path-B64": base64.urlsafe_b64encode(str(rendered.output_path).encode("utf-8")).decode("ascii"),
                             "X-Mozarie-No-Effect": "1" if rendered.no_effect else "0",
                         },
                     )
+                else:
+                    assert rendered.response_path is not None
+                    try:
+                        self._stream_path(rendered.response_path, rendered.mime_type, {
+                            "X-Mozarie-Revision": str(revision),
+                            "X-Mozarie-Save-Token": save_token,
+                            "X-Mozarie-No-Effect": "1" if rendered.no_effect else "0",
+                        })
+                    finally:
+                        if rendered.response_path_is_temporary:
+                            rendered.response_path.unlink(missing_ok=True)
             elif path == "/api/save/commit":
                 source_mtime_ms = payload.get("sourceMtimeMs")
                 source_size_bytes = payload.get("sourceSizeBytes")
@@ -668,6 +1000,8 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
                     str(payload.get("saveToken", "")), str(payload.get("sourceAction", "")),
                 )))
+            elif path == "/api/save/ack":
+                self._json(STATE.acknowledge_browser_save(str(payload.get("saveToken", ""))))
             elif path == "/api/save/cancel":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation, lambda: STATE.cancel_browser_save(
                     str(payload.get("imageId", "")), _read_candidate_revision(payload.get("candidateRevision")),
@@ -685,13 +1019,13 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"ok": started, "cancelled": not started})
             elif path == "/api/job/pause":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
-                                                   lambda: STATE.request_pause().as_dict()))
+                                                   STATE.request_pause))
             elif path == "/api/job/resume":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
-                                                   lambda: STATE.resume_job().as_dict()))
+                                                   STATE.resume_job))
             elif path == "/api/job/cancel":
                 self._json(self._catalog_mutation(expected_project_id, expected_catalog_generation,
-                                                   lambda: STATE.request_cancel().as_dict()))
+                                                   STATE.request_cancel))
             elif path.startswith("/api/candidate/"):
                 image_id, candidate_id = _route_ids(path, "/api/candidate/")
                 revision = self._catalog_mutation(expected_project_id, expected_catalog_generation,
@@ -699,28 +1033,40 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True, "candidateRevision": revision})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
+            _log_operation_finished(operation, operation_started_at)
         except ForbiddenClientError as exc:
+            _log_operation_failed(operation, operation_started_at, HTTPStatus.FORBIDDEN, exc)
             self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
-            self._client_error(exc, HTTPStatus.CONFLICT if exc.error_code == "stale_catalog" else HTTPStatus.BAD_REQUEST)
+            status = HTTPStatus.CONFLICT if exc.error_code == "stale_catalog" else HTTPStatus.BAD_REQUEST
+            _log_operation_failed(operation, operation_started_at, status, exc)
+            self._client_error(exc, status)
         except Exception as exc:
             # Recovery can fail while no state exists.  It is not a GPU error,
             # and must still return the normal structured server error.
             if STATE is not None and (gpu_oom := STATE.recover_gpu_oom_for_request(exc)) is not None:
                 LOGGER.error("POST リクエストでGPUメモリが不足: %s", self.path)
+                _log_operation_failed(operation, operation_started_at, HTTPStatus.BAD_REQUEST, gpu_oom)
                 self._client_error(gpu_oom, HTTPStatus.BAD_REQUEST)
                 return
+            _log_operation_failed(operation, operation_started_at, HTTPStatus.INTERNAL_SERVER_ERROR, exc)
             LOGGER.exception("POST リクエストの処理に失敗: %s", self.path)
             self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 
     def do_DELETE(self) -> None:  # noqa: N802
+        operation: tuple[str, str] | None = None
+        operation_started_at: float | None = None
         try:
             path = unquote(urlparse(self.path).path)
+            operation = _operation_log_spec("DELETE", path)
+            operation_started_at = _log_operation_started(operation, path, {})
             content_length = self._request_body_length()
             if STATE is None:
                 self._require_local_host()
                 self.close_connection = True
                 if _is_api_path(path):
+                    error = ClientError("作業データを作り直してから操作してください。", "workspace_recreate_required")
+                    _log_operation_failed(operation, operation_started_at, HTTPStatus.CONFLICT, error)
                     self._workspace_recreate_required()
                 else:
                     self._client_error(ClientError("ページが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
@@ -755,15 +1101,21 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             else:
                 self._client_error(ClientError("APIが見つかりません。", "api_not_found"), HTTPStatus.NOT_FOUND)
+            _log_operation_finished(operation, operation_started_at)
         except ForbiddenClientError as exc:
+            _log_operation_failed(operation, operation_started_at, HTTPStatus.FORBIDDEN, exc)
             self._client_error(exc, HTTPStatus.FORBIDDEN)
         except ClientError as exc:
-            self._client_error(exc, HTTPStatus.CONFLICT if exc.error_code == "stale_catalog" else HTTPStatus.BAD_REQUEST)
+            status = HTTPStatus.CONFLICT if exc.error_code == "stale_catalog" else HTTPStatus.BAD_REQUEST
+            _log_operation_failed(operation, operation_started_at, status, exc)
+            self._client_error(exc, status)
         except Exception as exc:
             if STATE is not None and (gpu_oom := STATE.recover_gpu_oom_for_request(exc)) is not None:
                 LOGGER.error("DELETE リクエストでGPUメモリが不足: %s", self.path)
+                _log_operation_failed(operation, operation_started_at, HTTPStatus.BAD_REQUEST, gpu_oom)
                 self._client_error(gpu_oom, HTTPStatus.BAD_REQUEST)
                 return
+            _log_operation_failed(operation, operation_started_at, HTTPStatus.INTERNAL_SERVER_ERROR, exc)
             LOGGER.exception("DELETE リクエストの処理に失敗: %s", self.path)
             self._client_error(exc, HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error")
 
@@ -771,11 +1123,26 @@ class MosaicHandler(BaseHTTPRequestHandler):
         if content_length is None:
             content_length = self._request_body_length(required=True)
         try:
-            raw = self.rfile.read(content_length)
-            if len(raw) != content_length:
-                self._reject_unread_request(ClientError("リクエストを最後まで読み込めません。", "input_invalid"))
-            payload = json.loads(raw.decode("utf-8"))
-        except ValueError as exc:
+            remaining = content_length
+            # JSON operations are normally small, but keep framing safe even
+            # when a catalogue has a long image list.  Large mask PNGs use the
+            # binary transaction route and never pass through this parser.
+            with tempfile.SpooledTemporaryFile(max_size=IO_CHUNK_BYTES, mode="w+b") as staged:
+                while remaining:
+                    chunk = self.rfile.read(min(IO_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        self._reject_unread_request(ClientError("リクエストを最後まで読み込めません。", "input_invalid"))
+                    staged.write(chunk)
+                    remaining -= len(chunk)
+                staged.seek(0)
+                text = io.TextIOWrapper(staged, encoding="utf-8")
+                try:
+                    payload = json.load(text)
+                finally:
+                    text.detach()
+        except ClientError:
+            raise
+        except (UnicodeDecodeError, ValueError) as exc:
             raise ClientError("JSONを読み込めません。", "input_invalid") from exc
         if not isinstance(payload, dict):
             raise ClientError("JSONオブジェクトが必要です。", "input_invalid")
@@ -810,6 +1177,29 @@ class MosaicHandler(BaseHTTPRequestHandler):
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
+    def _read_binary_body_to_path(self, target: Path, content_length: int) -> None:
+        """Stream one framed binary body to its private transaction directory."""
+        temporary_path: Path | None = None
+        remaining = content_length
+        try:
+            with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".upload.tmp", delete=False) as handle:
+                temporary_path = Path(handle.name)
+                while remaining:
+                    chunk = self.rfile.read(min(IO_CHUNK_BYTES, remaining))
+                    if not chunk:
+                        self._reject_unread_request(ClientError("手描きマスクを最後まで読み込めません。", "image_read_failed"))
+                    handle.write(chunk)
+                    remaining -= len(chunk)
+                handle.flush()
+            temporary_path.replace(target)
+            temporary_path = None
+        except Exception:
+            self.close_connection = True
+            raise
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
+
     def _send_image(self, image_id: str, thumbnail: bool, version: str | None) -> None:
         with STATE.image_io_lock(image_id):
             record = STATE.image_snapshot(image_id)
@@ -829,39 +1219,39 @@ class MosaicHandler(BaseHTTPRequestHandler):
             thumbnail_dir = STATE.cache_dir / "thumbnails"
             thumbnail_dir.mkdir(parents=True, exist_ok=True)
             thumbnail_path = thumbnail_dir / f"{record.image_id}-{asset_version}.jpg"
-            # Single-flight first: waiters for the same thumbnail do not consume a
-            # global generation slot.  Only its cache-miss producer takes one.
+            # A visible thumbnail is single-flight by asset.  Unrelated visible
+            # requests are not held behind a fixed process-wide worker count.
             if not thumbnail_path.is_file():
-                with STATE.thumbnail_gate:
-                    if not thumbnail_path.is_file():
-                        with STATE.lock:
-                            current = STATE.images.get(image_id)
-                            if current is None or STATE.asset_version(current) != asset_version:
-                                raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
-                        temporary_path: Path | None = None
-                        try:
-                            with Image.open(record.path) as image:
-                                image = ImageOps.exif_transpose(image)
-                                if record.flip_horizontal != record.source_flip_horizontal:
-                                    image = ImageOps.mirror(image)
-                                if record.flip_vertical != record.source_flip_vertical:
-                                    image = ImageOps.flip(image)
-                                image.thumbnail((280, 280), Image.Resampling.LANCZOS)
-                                output = io.BytesIO()
-                                image.convert("RGB").save(output, format="JPEG", quality=82)
-                            with tempfile.NamedTemporaryFile(dir=thumbnail_dir, suffix=".thumbnail.tmp", delete=False) as handle:
-                                temporary_path = Path(handle.name)
-                                handle.write(output.getvalue())
-                                handle.flush()
-                            with STATE.lock:
-                                current = STATE.images.get(image_id)
-                                if current is None or STATE.asset_version(current) != asset_version:
-                                    raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
-                            os.replace(temporary_path, thumbnail_path)
-                            temporary_path = None
-                        finally:
-                            if temporary_path is not None:
-                                temporary_path.unlink(missing_ok=True)
+                with STATE.lock:
+                    current = STATE.images.get(image_id)
+                    if current is None or STATE.asset_version(current) != asset_version:
+                        raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
+                temporary_path: Path | None = None
+                try:
+                    with open_image_without_png_text(record.path) as image:
+                        image = ImageOps.exif_transpose(image)
+                        if record.flip_horizontal != record.source_flip_horizontal:
+                            image = ImageOps.mirror(image)
+                        if record.flip_vertical != record.source_flip_vertical:
+                            image = ImageOps.flip(image)
+                        image.thumbnail((280, 280), Image.Resampling.LANCZOS)
+                        output = io.BytesIO()
+                        image.convert("RGB").save(output, format="JPEG", quality=82)
+                    with tempfile.NamedTemporaryFile(dir=thumbnail_dir, suffix=".thumbnail.tmp", delete=False) as handle:
+                        temporary_path = Path(handle.name)
+                        handle.write(output.getvalue())
+                        handle.flush()
+                    with STATE.lock:
+                        current = STATE.images.get(image_id)
+                        if current is None or STATE.asset_version(current) != asset_version:
+                            raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
+                    os.replace(temporary_path, thumbnail_path)
+                    temporary_path = None
+                except (MemoryError, OSError) as exc:
+                    raise ClientError("サムネイルを作成できませんでした。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
+                finally:
+                    if temporary_path is not None:
+                        temporary_path.unlink(missing_ok=True)
             try:
                 with thumbnail_path.open("rb") as handle:
                     self._stream_file(handle, None, "image/jpeg", cache_control)
@@ -1027,6 +1417,12 @@ def _read_candidate_revision(value: Any) -> int:
 def _read_bool(value: Any, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise ClientError(f"{field_name}はONまたはOFFで指定してください。", "input_invalid")
+    return value
+
+
+def _read_client_save_token(value: Any) -> str:
+    if not isinstance(value, str) or not _is_canonical_uuid(value):
+        raise ClientError("保存確認トークンが正しくありません。", "input_invalid")
     return value
 
 

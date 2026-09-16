@@ -100,7 +100,7 @@ Review each model's source terms and licenses and the [third-party notices and m
 
 ## Use
 
-Set one to four workers for automatic detection on GPU or CPU. A single-image job uses one worker.
+Set one or more workers for automatic detection on GPU or CPU. The number of selected images is the effective upper limit. DirectML uses one effective worker.
 
 1. Load images or a folder.
 2. Run automatic detection for the current image or all images.
@@ -122,6 +122,18 @@ Use **Check for updates** in Settings or run `update.bat`. Close Mozarie before 
 ## Manual verification
 
 Follow the [manual verification guide](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md).
+
+## Tests
+
+Install the test dependencies, then run the backend and frontend suites.
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pip install -r requirements-test.txt
+npm ci
+node scripts/test-quiet.cjs all
+```
+
+The automated suites verify HTTP, SQLite, real-file, and browser UI contracts. `frontend` and `all` run the uninstrumented 20,000-item catalogue performance scenario once after coverage completes. Run the [manual verification guide](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md) before a release as well.
 
 ## License
 

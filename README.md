@@ -100,7 +100,7 @@ Sensitiveの変換:
 
 ## 使い方
 
-自動検出の同時処理数は、GPU・CPUともに1〜4で指定します。対象が画像1枚のみの場合は1になります。
+自動検出の同時処理数は、GPU・CPUともに1以上で指定できます。実効上限は対象画像数です。DirectMLでは実効並列数は1になります。
 
 1. 画像またはフォルダーを読み込みます。
 2. 現在の画像または全画像に自動検出を実行します。
@@ -122,6 +122,18 @@ GPUを使う場合は、**設定 > 検出**で選択します。GPUが対応し�
 ## 実機確認
 
 [実機確認手順](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md)に従って確認してください。
+
+## テスト
+
+依存関係を準備して、バックエンドとフロントエンドのテストを実行します。
+
+```powershell
+& ".\.venv\Scripts\python.exe" -m pip install -r requirements-test.txt
+npm ci
+node scripts/test-quiet.cjs all
+```
+
+自動テストはHTTP、SQLite、実ファイル、ブラウザーUIの契約を確認します。`frontend`と`all`はcoverage完了後に、coverageを付けない20,000件カタログ性能試験も1回実行します。リリース前には[実機確認手順](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md)も実施してください。
 
 ## ライセンス
 

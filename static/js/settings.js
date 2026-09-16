@@ -232,7 +232,7 @@ function setSettingsForm(settings, status = null) {
   syncDetectionActions();
   $("#confirmClearMasks").checked = settings.confirmations?.clearMasks !== false;
   $("#confirmClearCatalog").checked = settings.confirmations?.clearCatalog !== false;
-  $("#confirmRemoveImage").checked = settings.confirmations?.removeImage !== false;
+  $("#confirmRemoveImage").checked = true;
   $("#confirmCandidateDelete").checked = settings.confirmations?.candidateDelete !== false;
   $("#confirmCandidateRoleDelete").checked = settings.confirmations?.candidateRoleDelete !== false;
   $("#confirmOverwriteSource").checked = settings.confirmations?.overwriteSource !== false;
@@ -265,7 +265,12 @@ function setFillColorTolerance(value) {
   const tolerance = Math.max(0, Math.min(255, Math.round(Number(value))));
   $("#bucketTolerance").value = String(tolerance);
   $("#bucketToleranceValue").textContent = String(tolerance);
+  $("#bucketToleranceDecrease").disabled = tolerance <= 0;
+  $("#bucketToleranceIncrease").disabled = tolerance >= 255;
 }
+
+let fillToleranceMutation = Promise.resolve();
+let fillToleranceVersion = 0;
 
 async function saveFillColorTolerance() {
   const input = $("#bucketTolerance");
@@ -274,14 +279,18 @@ async function saveFillColorTolerance() {
   setFillColorTolerance(tolerance);
   if (tolerance === previous) return;
   state.settings.editing.fill_color_tolerance = tolerance;
+  const version = ++fillToleranceVersion;
+  const save = fillToleranceMutation.then(async () => api("/api/settings?status=0", { method: "POST", body: JSON.stringify({ editing: { fill_color_tolerance: tolerance } }) }));
+  fillToleranceMutation = save.catch(() => {});
   try {
-    const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify({ editing: { fill_color_tolerance: tolerance } }) });
-    state.settings = data.settings;
-    setFillColorTolerance(data.settings.editing.fill_color_tolerance);
+    const data = await save;
+    if (version === fillToleranceVersion) { state.settings = data.settings; setFillColorTolerance(data.settings.editing.fill_color_tolerance); }
   } catch (error) {
-    state.settings.editing.fill_color_tolerance = previous;
-    setFillColorTolerance(previous);
-    showUserError(error, input);
+    if (version === fillToleranceVersion) {
+      state.settings.editing.fill_color_tolerance = previous;
+      setFillColorTolerance(previous);
+      showUserError(error, input);
+    }
   }
 }
 
@@ -312,13 +321,40 @@ function settingsPayload() {
       exclude_forced_default: $("#settingsExcludeForcedDefault").checked, targets: detectionTargets(),
     },
     saving: {
-      parallelism: Math.min(8, Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2))),
+      parallelism: Math.max(1, Math.round(Number($("#settingsSaveParallelism").value) || 2)),
       default_output_directory: $("#settingsDefaultOutputDirectory").value.trim(),
     },
     shortcuts: { enabled: $("#settingsShortcutsEnabled").checked, bindings: shortcutBindingsPayload(), actions: shortcutActionsPayload() },
     editing: { fill_color_tolerance: state.settings.editing.fill_color_tolerance },
-    confirmations: { clearMasks: $("#confirmClearMasks").checked, clearCatalog: $("#confirmClearCatalog").checked, removeImage: $("#confirmRemoveImage").checked, candidateDelete: $("#confirmCandidateDelete").checked, candidateRoleDelete: $("#confirmCandidateRoleDelete").checked, overwriteSource: $("#confirmOverwriteSource").checked, deleteSourceAfterCopy: $("#confirmDeleteSourceAfterCopy").checked },
+    confirmations: { clearMasks: $("#confirmClearMasks").checked, clearCatalog: $("#confirmClearCatalog").checked, removeImage: true, candidateDelete: $("#confirmCandidateDelete").checked, candidateRoleDelete: $("#confirmCandidateRoleDelete").checked, overwriteSource: $("#confirmOverwriteSource").checked, deleteSourceAfterCopy: $("#confirmDeleteSourceAfterCopy").checked },
   };
+}
+
+function isWindowsAbsoluteSettingsPath(value, allowEmpty = false) {
+  const path = String(value || "").trim();
+  if (!path) return allowEmpty;
+  return /^(?:[a-zA-Z]:[\\/]|(?:\\\\|\/\/)[^\\/]+[\\/][^\\/]+)/.test(path);
+}
+
+function validateAbsoluteSettingsPaths() {
+  const fields = [
+    ["settingsDefaultOutputDirectory", "settings.defaultOutputDirectory", "general", false],
+    ["settingsTargetModel", "settings.targetModel", "models", true],
+    ["settingsNtd11Model", "settings.ntd11Model", "models", true],
+    ["settingsSensitiveModel", "settings.sensitiveModel", "models", true],
+    ["settingsSamModel", "settings.samModel", "models", true],
+    ["settingsHandModel", "settings.handModel", "models", true],
+    ["settingsHandSegmentationModel", "settings.handSegmentationModel", "models", true],
+  ];
+  document.querySelectorAll("#settingsForm input[aria-invalid='true']").forEach((input) => input.setAttribute("aria-invalid", "false"));
+  const invalid = fields.find(([id, _label, _tab, allowEmpty]) => !isWindowsAbsoluteSettingsPath($(`#${id}`).value, allowEmpty))
+    || (!Object.values(samCheckpointPaths).every((path) => isWindowsAbsoluteSettingsPath(path, true)) ? ["settingsSamModel", "settings.samModel", "models"] : null);
+  if (!invalid) return true;
+  const [id, label, tab] = invalid;
+  selectSettingsTab(tab);
+  const input = $(`#${id}`); input.setAttribute("aria-invalid", "true"); input.focus();
+  const result = $("#settingsResult"); result.textContent = t("settings.absolutePathRequired", { field: t(label) }); result.classList.add("error");
+  return false;
 }
 
 function selectSettingsTab(name) {
@@ -372,6 +408,7 @@ async function saveSettings(event) {
   if (!validateDetectionTargets(detectionTargets())) {
     result.textContent = t("error.detectionTargetsRequired"); result.classList.add("error"); return;
   }
+  if (!validateAbsoluteSettingsPaths()) return;
   try {
     const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(settingsPayload()) });
     const languageChanged = state.settings?.general?.language !== data.settings.general.language;

@@ -88,7 +88,8 @@ function setCatalogNode(windowState, image, index, layout, rowNode) {
     item.querySelector(".gallery-review-badge").textContent = reviewed ? t("review.reviewedBadge") : t("review.unreviewedBadge");
     item.setAttribute("aria-label", [image.relativePath, reviewed ? t("review.reviewedBadge") : t("review.unreviewedBadge")].join(t("a11y.separator")));
     item.onclick = () => { windowState.focusId = image.id; selectCatalogImage(image.id); };
-    item.onmouseenter = () => { schedulePrefetch(image, 2); prefetchNeighbors(image); };
+    item.onmouseenter = () => { state.hoverPrefetchId = image.id; schedulePrefetch(image); };
+    item.onmouseleave = () => { if (state.hoverPrefetchId === image.id) { state.hoverPrefetchId = null; syncResourceOwnership(); } };
   } else {
     item.querySelector(".overview-item-name").textContent = image.relativePath.split(/[\\/]/).pop();
     item.querySelector(".overview-item-dimensions").textContent = `${image.width} × ${image.height}`;
@@ -145,7 +146,14 @@ function renderCatalogWindow(windowState) {
   const lastRow = Math.min(Math.ceil(windowState.images.length / layout.columns), Math.ceil((scrollTop + viewport) / layout.rowHeight) + options.overscan);
   const first = firstRow * layout.columns; const last = Math.min(windowState.images.length, lastRow * layout.columns);
   const mounted = new Set(windowState.images.slice(first, last).map((image) => image.id));
-  for (const [id, item] of nodes) if (!mounted.has(id)) { forgetThumbnail(item.querySelector("img")); item.parentNode.remove(); nodes.delete(id); }
+  let clearedHover = false;
+  for (const [id, item] of nodes) if (!mounted.has(id)) {
+    if (state.hoverPrefetchId === id) {
+      state.hoverPrefetchId = null;
+      clearedHover = true;
+    }
+    forgetThumbnail(item.querySelector("img")); item.parentNode.remove(); nodes.delete(id);
+  }
   for (const [row, rowNode] of windowState.rows) if (row < firstRow || row >= lastRow) { rowNode.remove(); windowState.rows.delete(row); }
   let previousRow = spacer;
   for (let row = firstRow; row < lastRow; row += 1) {
@@ -155,13 +163,22 @@ function renderCatalogWindow(windowState) {
     for (let index = rowStart; index < Math.min(windowState.images.length, rowStart + layout.columns); index += 1) setCatalogNode(windowState, windowState.images[index], index, layout, rowNode);
   }
   for (const item of nodes.values()) item.style.visibility = "";
+  if (clearedHover) syncResourceOwnership();
   return layout;
 }
 
 function renderCatalog(scope, images, nodes, options) {
   if (!document.createElement) {
     const ids = new Set(images.map((image) => image.id));
-    for (const [id, item] of nodes) if (!ids.has(id)) { forgetThumbnail(item.querySelector("img")); item.parentNode.remove(); nodes.delete(id); }
+    let clearedHover = false;
+    for (const [id, item] of nodes) if (!ids.has(id)) {
+      if (state.hoverPrefetchId === id) {
+        state.hoverPrefetchId = null;
+        clearedHover = true;
+      }
+      forgetThumbnail(item.querySelector("img")); item.parentNode.remove(); nodes.delete(id);
+    }
+    if (clearedHover) syncResourceOwnership();
     return null;
   }
   const windowState = catalogWindow(scope, $(options.container), nodes, options);
@@ -201,6 +218,7 @@ function renderGallery(force = false) {
   $("#galleryEmptyState").hidden = state.images.length !== 0;
   $("#galleryFilteredEmptyState").hidden = !(state.images.length && !visibleImages.length);
   renderCatalog("gallery", visibleImages, state.galleryNodes, { container: "#gallery", template: "#galleryItemTemplate", padding: 8, gap: 8, minWidth: 108, rowHeight: 152, overscan: 3 });
+  syncResourceOwnership();
   updateActionButtons();
 }
 
@@ -216,6 +234,12 @@ function imageMatchesGalleryFilter(image) {
   return imageMatchesStateFilter(image, state.galleryFilter);
 }
 function galleryFilteredImages() { return state.images.filter(imageMatchesGalleryFilter); }
+function galleryNavigationNeighbors(imageId) {
+  const images = galleryFilteredImages();
+  const index = images.findIndex((image) => image.id === imageId);
+  if (index < 0) return [...new Set([images.at(-1), images[0]].filter(Boolean))];
+  return [images[index - 1], images[index + 1]].filter(Boolean);
+}
 function nextVisibleImage(images, imageId, { excludedImageIds = new Set(), fallback = false } = {}) {
   const index = images.findIndex((image) => image.id === imageId);
   const next = images.slice(index < 0 ? 0 : index + 1).find((image) => !excludedImageIds.has(image.id));
@@ -350,7 +374,7 @@ async function reviewAndMoveNext() {
   if (isGestureActive() || currentImageActionPending() || !current) return null;
   const currentId = current.id;
   const filteredImages = galleryFilteredImages();
-  const target = nextVisibleImage(filteredImages, currentId, { fallback: true });
+  const target = nextVisibleImage(filteredImages, currentId);
   const reviewed = await queueImageMutation(currentId, async () => {
     const scroll = state.contextMenuScroll;
     return saveWorkspaceFlagNow(current, "reviewed", true, () => {
@@ -358,12 +382,12 @@ async function reviewAndMoveNext() {
     });
   }, { lockCandidateControls: true });
   if (!reviewed) return null;
+  if (!hasDurableHistory() && state.currentId === currentId && typeof recordHistoryOperation === "function") recordHistoryOperation({ kind: "workspaceFlag" });
   if (state.currentId !== currentId) return target;
   if (target && state.images.some((image) => image.id === target.id)) {
     await selectImage(target.id);
     return target;
   }
-  clearCurrentImageSelection();
   return null;
 }
 async function hideAndMoveNext() {
@@ -371,11 +395,10 @@ async function hideAndMoveNext() {
   const current = currentRecord();
   if (!current) return;
   const currentId = current.id;
-  const target = nextGalleryFilteredImage(currentId, { fallback: true });
+  const target = nextGalleryFilteredImage(currentId);
   if (!await setHidden(current, true)) return;
   if (state.currentId !== currentId) return;
   if (target) await selectImage(target.id);
-  else clearCurrentImageSelection();
 }
 async function runNavigationAction(action) {
   await action();

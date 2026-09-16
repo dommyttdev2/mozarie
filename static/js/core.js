@@ -9,12 +9,12 @@ const state = {
   tool: "brush", panning: false, drawing: false, gestureDisplaySide: null, hoverDisplaySide: "left", boundaryPending: false,
   boundaryRoi: null, boundaryStart: null, boundaryStartClient: null, boundaryPoint: null, boundaryPromptPoint: null, boundaryDragging: false, boundaryDisplaySide: "left",
   boundaryDrafts: [], boundaryDraftSequence: 0, boundaryActiveId: null, boundaryBrushStroke: null,
-  polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(), blinkModes: new Map(), blinkPhase: false, blinkTimer: null,
+  polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(), blinkModes: new Map(), blinkRoleModes: new Map(), blinkPhase: false, blinkTimer: null,
   pointer: null, hover: null, brushCursorGeometry: "", history: [], historyIndex: 0, activeStroke: null, manualStrokePaintFrame: 0, removedCandidateIds: new Set(),
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false, transformPending: false,
-  catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, serverCatalogGeneration: null, catalogTransition: null, viewGeneration: 0, historyRestoreToken: 0, translations: {},
-  applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false, mosaicWorkerBusy: false, mosaicPending: null, mosaicPreviewRoi: null, mosaicSourceImage: null, mosaicSourceId: "", mosaicSourcePromise: null, mosaicPreviewFailureReported: false,
-  outputDirectoryPicking: false, outputDirectoryHandle: null, singleSave: null,
+  catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, serverCatalogGeneration: null, catalogTransition: null, viewGeneration: 0, historyRestoreBusy: false, workspaceId: null, historyDurable: false, translations: {},
+  applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false, mosaicWorkerBusy: false, mosaicPending: null, mosaicPreviewRoi: null, mosaicPreviewFull: false, mosaicSourceImage: null, mosaicSourceId: "", mosaicSourcePromise: null, mosaicPreviewFailureReported: false,
+  outputDirectoryPicking: false, singleSave: null,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(), imageMutationChains: new Map(), candidateControlLocks: new Map(),
@@ -24,11 +24,10 @@ const state = {
   sourceAccess: new Map(),
   // Projectless directory imports retain their root only until the session is named.
   projectlessDirectorySources: new Map(),
-  processing: null, imageInflight: new Map(), candidateInflight: new Map(), loadingDelay: null, pendingImageKey: null, pendingCandidateKey: null,
+  processing: null, imageInflight: new Map(), candidateInflight: new Map(), imageLoadControllers: new Map(), candidateLoadControllers: new Map(), loadingDelay: null, pendingImageKey: null, pendingCandidateKey: null,
   galleryCollapsed: false, inspectorCollapsed: false,
   settings: null, settingsStatus: null, jobPollTimer: null,
-  imageCache: null, candidateBundleCache: null, catalogLoadControllers: new Set(),
-  prefetchQueue: [], prefetchActive: 0, prefetchTimer: null,
+  imageCache: null, candidateBundleCache: null, catalogLoadControllers: new Set(), resourceImageKeys: new Set(), resourceCandidateKeys: new Set(), hoverPrefetchId: null,
   fillWorker: null, fillPending: false,
   project: null, projectReadOnly: false, projectHistory: new Map(), projectHistoryBusy: false, projectOperationPending: false,
   missingNativeSources: [],
@@ -81,12 +80,12 @@ const USER_ERROR_CODES = {
   model_profile_invalid: "model_file_invalid", sam_checkpoint_invalid: "model_type_mismatch",
   sam_provider_unavailable: "gpu_runtime_unavailable", hand_segmentation_invalid: "model_load_failed",
   model_picker_busy: "operation_in_progress", model_picker_failed: "model_picker_failed", model_picker_invalid: "model_file_invalid",
-  model_download_invalid: "model_download_invalid", catalog_changed: "catalog_changed", job_running: "operation_in_progress",
+  model_download_invalid: "model_download_invalid", catalog_changed: "catalog_changed", stale_catalog: "catalog_changed", job_running: "operation_in_progress",
   mask_not_found: "mask_not_found", candidate_not_found: "mask_not_found", invalid_settings: "input_invalid", invalid_request: "input_invalid",
   api_not_found: "response_invalid", connection_lost: "connection_lost", output_folder_unavailable: "output_folder_unavailable", output_permission_denied: "output_permission_denied", request_failed: "internal_error",
   image_not_found: "image_not_found", image_hidden: "image_hidden", image_read_failed: "image_read_failed", image_format_unsupported: "image_format_unsupported",
-  save_write_failed: "save_write_failed", save_state_changed: "save_state_changed", folder_not_found: "folder_not_found",
-  source_restore_failed: "project_source_unavailable", project_source_unavailable: "project_source_unavailable", project_source_conflict: "project_source_conflict", project_source_no_match: "project_source_no_match", project_name_invalid: "project_name_invalid", project_name_duplicate: "project_name_duplicate", project_read_only: "project_read_only",
+  save_write_failed: "save_write_failed", save_state_changed: "save_state_changed", save_recovery_pending: "save_recovery_pending", folder_not_found: "folder_not_found",
+  source_restore_failed: "project_source_unavailable", source_unavailable: "project_source_unavailable", source_changed: "image_changed", source_delete_failed: "source_action_unavailable", source_delete_recovery_unavailable: "source_delete_recovery_unavailable", source_delete_cleanup_pending: "source_delete_cleanup_pending", browser_source_not_deleted: "source_action_unavailable", source_delete_not_prepared: "catalog_changed", project_source_unavailable: "project_source_unavailable", project_source_conflict: "project_source_conflict", project_source_no_match: "project_source_no_match", project_name_invalid: "project_name_invalid", project_name_duplicate: "project_name_duplicate", project_read_only: "project_read_only",
   project_not_found: "folder_not_found", workspace_recreate_required: "workspace_corrupt", source_mismatch: "image_changed",
   source_permission_denied: "source_permission_denied", source_action_unavailable: "source_action_unavailable",
   source_busy: "source_busy", source_write_unsupported: "source_write_unsupported", output_write_unsupported: "output_write_unsupported", output_cleanup_failed: "output_cleanup_failed",
@@ -104,7 +103,7 @@ const USER_ERROR_CODES = {
 
 const CANDIDATE_CLASS_TOKENS = new Set(["penis", "pussy", "testicles", "boundary", "boundary_polygon", "hand", "fluid"]);
 const CANDIDATE_SOURCE_TOKENS = new Set(["auto", "target", "ntd11", "sensitive", "boundary", "hand_exclusion", "fluid_exclusion"]);
-const CANDIDATE_REFINEMENT_TOKENS = new Set(["sam_high_precision"]);
+const CANDIDATE_REFINEMENT_TOKENS = new Set(["sam_fallback", "sam_high_precision"]);
 
 function validCandidateTokens(candidate) {
   return CANDIDATE_CLASS_TOKENS.has(candidate?.labelToken)
@@ -378,7 +377,7 @@ function setDetectionConfidence(value) {
   $("#detectConfidenceNumber").value = confidence.toFixed(2);
 }
 function activeDetection() { return state.job?.kind === "detect" && ["running", "pausing", "paused"].includes(state.job?.state); }
-function normaliseDivisor(value) { return Math.max(1, Math.min(10000, Math.round(Number(value) || 100))); }
+function normaliseDivisor(value) { return Math.max(1, Math.round(Number(value) || 100)); }
 function mosaicDivisor() { return normaliseDivisor($("#divisor").value); }
 function calculatedBlockSize(image = currentRecord(), divisor = mosaicDivisor()) {
   return image ? Math.max(4, Math.ceil(Math.max(image.width, image.height) / divisor)) : 0;
@@ -387,7 +386,7 @@ function isBusy() {
   return ["running", "pausing", "paused"].includes(state.job?.state)
     || state.saving || state.saveStarting || state.detectionStarting || state.masksClearing
     || state.processing?.kind === "detect"
-    || state.catalogMutation || state.boundaryPending || state.fillPending || state.projectHistoryBusy;
+    || state.catalogMutation || state.boundaryPending || state.fillPending || state.projectHistoryBusy || state.historyRestoreBusy;
 }
 function beginCatalogEpoch() { state.catalogEpoch += 1; return state.catalogEpoch; }
 function isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }
@@ -463,6 +462,7 @@ async function resyncCatalog(epoch = state.catalogEpoch, signal = undefined) {
   const snapshot = await api("/api/images", { signal, resyncOnStale: false });
   if (!isCurrentCatalogEpoch(epoch)) return null;
   catalogResponse(snapshot);
+  if (typeof flushPendingBrowserSaveAcks === "function") void flushPendingBrowserSaveAcks();
   resetCatalog(snapshot.images || [], snapshot.root || "");
   applyProjectSnapshot(snapshot);
   state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(snapshot.sources) : [];
@@ -483,6 +483,7 @@ async function syncCatalogOnReturn() {
     const changed = (Number.isSafeInteger(snapshot.catalogGeneration) && snapshot.catalogGeneration !== knownGeneration)
       || (snapshot?.project?.id || null) !== knownProjectId;
     catalogResponse(snapshot);
+    if (typeof flushPendingBrowserSaveAcks === "function") void flushPendingBrowserSaveAcks();
     if (changed) {
       resetCatalog(snapshot.images || [], snapshot.root || "");
       state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(snapshot.sources) : [];
@@ -535,8 +536,8 @@ function catalogRecordMatches(record, epoch, { version = imageAssetVersion(recor
 function abortCatalogLoads() {
   for (const controller of state.catalogLoadControllers) controller.abort();
   state.catalogLoadControllers.clear();
-  state.imageInflight.clear(); state.candidateInflight.clear(); state.prefetchQueue = [];
-  clearTimeout(state.prefetchTimer); state.prefetchTimer = null;
+  state.imageLoadControllers.clear(); state.candidateLoadControllers.clear();
+  state.imageInflight.clear(); state.candidateInflight.clear();
 }
 function cancelFillWork() { state.fillWorker?.terminate?.(); state.fillWorker = null; state.fillPending = false; }
 function isGestureActive() { return state.drawing || state.panning || state.boundaryDragging; }
@@ -573,6 +574,9 @@ function publishWorkspaceFlags(imageId, flags) {
   return true;
 }
 function candidateControlLocked(imageId) { return (state.candidateControlLocks.get(imageId) || 0) > 0; }
+function manualCanvasInputLocked(imageId = state.currentId) {
+  return candidateControlLocked(imageId) || state.candidateBatchPending.has(imageId);
+}
 function queueImageMutation(imageId, send, { lockCandidateControls = false } = {}) {
   if (!imageId) return Promise.resolve(false);
   if (lockCandidateControls) {
@@ -597,12 +601,12 @@ function queueImageMutation(imageId, send, { lockCandidateControls = false } = {
 async function flushAllImageMutations() {
   while (state.imageMutationChains.size) await Promise.allSettled([...state.imageMutationChains.values()]);
 }
-function saveWorkspaceFlagNow(image, field, desired, onSaved) {
+function saveWorkspaceFlagNow(image, field, desired, onSaved, force = false) {
   if (!image) return Promise.resolve(false);
   const key = `${image.id}:${field}`;
   const pending = state.workspaceFlagPending.get(key);
-  if (pending?.desired === desired) return pending.promise;
-  if (!pending && image[field] === desired) return Promise.resolve(true);
+  if (!force && pending?.desired === desired) return pending.promise;
+  if (!force && !pending && image[field] === desired) return Promise.resolve(true);
   let promise;
   promise = queueWorkspaceFlags(image.id, { [field]: desired }).then((flags) => {
     if (!publishWorkspaceFlags(image.id, flags)) return false;
@@ -634,9 +638,13 @@ function setHidden(image, hidden) {
     // Non-displayable images reject later manual saves. Persist the current
     // drawing before publishing the hidden flag so hiding never drops it.
     if (hidden) await flushWorkspaceDraft(image.id);
+    const changed = image.hidden !== hidden;
     return saveWorkspaceFlagNow(image, "hidden", hidden, () => {
       if (!state.images.some((item) => item.id === image.id)) return;
       preserveCatalogScroll(renderCatalogViews, scroll); updateSelectionActionBar(); updateNavigationControls(); updateActionButtons();
+    }).then((saved) => {
+      if (saved && changed && !hasDurableHistory() && image.id === state.currentId && typeof recordHistoryOperation === "function") recordHistoryOperation({ kind: "workspaceFlag" });
+      return saved;
     });
   }, { lockCandidateControls: true }).catch((error) => {
     showUserError(error);
@@ -676,8 +684,14 @@ function refreshReviewViews(scroll = null) {
 }
 function setReviewed(image, reviewed) {
   const scroll = state.contextMenuScroll;
-  return saveWorkspaceFlag(image, "reviewed", reviewed, () => {
+  if (!image) return Promise.resolve(false);
+  const previous = image.reviewed === true;
+  publishWorkspaceFlags(image.id, { reviewed });
+  return queueImageMutation(image.id, () => saveWorkspaceFlagNow(image, "reviewed", reviewed, () => {
     if (state.images.some((item) => item.id === image.id)) refreshReviewViews(scroll);
+  }, true), { lockCandidateControls: true }).then((saved) => {
+    if (!saved) publishWorkspaceFlags(image.id, { reviewed: previous });
+    return saved;
   });
 }
 function markImagesUnreviewed(imageIds, renderAfter = true) {
@@ -701,6 +715,11 @@ function imageIndex(imageId = state.currentId) { return state.images.findIndex((
 function hasOpenDialog() { return [...document.querySelectorAll("dialog")].some((dialog) => dialog.open); }
 function isEditableTarget(target) {
   return Boolean(target?.isContentEditable || ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target?.tagName));
+}
+function isTextEditableTarget(target) {
+  if (target?.isContentEditable || target?.tagName === "TEXTAREA") return true;
+  if (target?.tagName !== "INPUT") return false;
+  return !["button", "checkbox", "color", "radio", "range", "submit"].includes(String(target.type || "text").toLowerCase());
 }
 function focusElement(element) { element?.focus({ preventScroll: true }); }
 function focusCanvas() { focusElement(canvas); }
@@ -769,7 +788,7 @@ function updateActionButtons() {
   const currentSaveDisabled = busyLocked || mutationLocked || catalogStaging || switchingImages || mutatingCandidates || !currentProcessable;
   $("#saveButton").disabled = currentSaveDisabled;
   $("#applyStartButton").disabled = busyLocked || mutationLocked || catalogStaging || mutatingCandidates || state.applyTargetIds.length === 0
-    || Boolean(applyRestrictionMessage()) || (selectedSaveMode() === "copy" && !state.outputDirectoryHandle);
+    || Boolean(applyRestrictionMessage()) || (selectedSaveMode() === "copy" && !state.settings?.saving?.default_output_directory);
   $("#overviewButton").disabled = busyLocked || state.images.length === 0;
   const visibleImages = galleryFilteredImages();
   const visibleIndex = visibleImages.findIndex((image) => image.id === state.currentId);
@@ -937,18 +956,28 @@ function resetCatalog(images, root) {
 
 function applyProjectSnapshot(snapshot) {
   state.project = snapshot?.project || null;
+  state.workspaceId = snapshot?.workspaceId || null;
+  state.historyDurable = snapshot?.historyDurable === true;
   state.projectReadOnly = snapshot?.readOnly === true || state.project?.status === "completed";
   if (typeof renderProjectCurrent === "function") renderProjectCurrent();
   updateActionButtons();
 }
 
+function hasDurableHistory() { return state.historyDurable === true; }
+
 function discardCatalogNodes(nodes, container) {
+  let clearedHover = false;
   for (const item of nodes.values()) {
+    if (state.hoverPrefetchId === item.dataset?.id) {
+      state.hoverPrefetchId = null;
+      clearedHover = true;
+    }
     const preview = item.querySelector?.("img");
     if (preview) forgetThumbnail(preview);
     item.remove?.();
   }
   nodes.clear();
+  if (clearedHover) syncResourceOwnership();
 }
 
 function updateProgress(job) {
@@ -961,7 +990,10 @@ function updateProgress(job) {
 }
 
 async function loadFolder({ skipSameSourceWarning = false, path: suppliedPath = null, allowDuringCatalogTransition = false } = {}) {
-  if (isBusy() || state.importing || (state.catalogTransition && !allowDuringCatalogTransition)) return;
+  if (isBusy() || state.importing || (state.catalogTransition && !allowDuringCatalogTransition)) {
+    setStatusKey("status.importUnavailable");
+    return;
+  }
   const path = suppliedPath || $("#folderPath").value.trim();
   if (!path) return setStatusKey("status.enterFolder");
   if (!skipSameSourceWarning && typeof openSameSourceDialog === "function" && await openSameSourceDialog(path)) return;
