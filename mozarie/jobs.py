@@ -169,7 +169,8 @@ class JobsMixin:
     def request_cancel(self) -> dict[str, Any]:
         with self.lock:
             self._assert_request_catalog_expectation()
-            if self.job.kind not in {"apply", "detect"} or self.job.state not in {"running", "pausing", "paused"}:
+            if (self.job.kind not in {"apply", "detect"} or self.job.state not in {"running", "pausing", "paused"}
+                    or (self.job.kind == "detect" and self.job.publication_started)):
                 raise ClientError("キャンセルできる処理はありません。", "operation_in_progress")
             assert self.job_control is not None
             control = self.job_control
@@ -178,7 +179,8 @@ class JobsMixin:
         with control.claim_lock:
             with self.lock:
                 self._assert_request_catalog_expectation()
-                if self.job_control is not control or self.job.state not in {"running", "pausing", "paused"}:
+                if (self.job_control is not control or self.job.state not in {"running", "pausing", "paused"}
+                        or (self.job.kind == "detect" and self.job.publication_started)):
                     raise ClientError("キャンセルできる処理はありません。", "operation_in_progress")
                 control.cancel_requested.set()
                 control.pause_requested.clear()
@@ -320,6 +322,7 @@ class JobsMixin:
                 self._resume_job_clock()
                 self.job.state = "cancelled"
                 self.job.cancel_requested = False
+                self.job.publication_started = False
                 self.job.ended_at = time.time()
                 self.job.current = ""
                 self.job.active_count = 0
@@ -544,6 +547,7 @@ class JobsMixin:
             self._resume_job_clock()
             self.job.state = "complete"
             self.job.cancel_requested = False
+            self.job.publication_started = False
             self.job.ended_at = time.time()
             self.job.completed = self.job.total
             self.job.processed = self.job.total
@@ -584,6 +588,7 @@ class JobsMixin:
             self._resume_job_clock()
             self.job.state = "error"
             self.job.cancel_requested = False
+            self.job.publication_started = False
             self.job.ended_at = time.time()
             self.job.error = str(exc)
             self.job.error_code = exc.error_code

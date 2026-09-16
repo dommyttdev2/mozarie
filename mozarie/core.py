@@ -272,6 +272,9 @@ class Job:
     error: str = ""
     error_code: str = ""
     cancel_requested: bool = False
+    # Detection has one atomic candidate publication. Once it starts, its
+    # result cannot be cancelled without leaving durable candidates behind.
+    publication_started: bool = False
     params: dict[str, Any] = field(default_factory=dict)
     started_at: float | None = None
     ended_at: float | None = None

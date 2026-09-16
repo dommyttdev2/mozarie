@@ -2529,6 +2529,61 @@ class MozarieTests(unittest.TestCase):
             detect_image.assert_not_called()
             self.assertEqual(state.job.state, "cancelled")
 
+    def test_detection_rejects_cancel_after_publication_starts_and_completes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            record = state.image_for_id(image_id)
+            old_path = state.cache_dir / image_id / "old.png"
+            old_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(old_path)
+            state.candidates[image_id] = [Candidate("old", "penis", .8, old_path)]
+            control = core_module.JobControl()
+            state.job = core_module.Job(
+                started_at=time.time(), kind="detect", state="running", total=1,
+                image_ids=(image_id,),
+            )
+            state.job_control = control
+            cleanup_started = threading.Event()
+            allow_cleanup = threading.Event()
+            original_unlink = Path.unlink
+
+            def detect_image(*_args, **_kwargs):
+                pending_path = state.cache_dir / image_id / ".mozarie-pending-new.png"
+                Image.fromarray(self._mask(16, 16)).save(pending_path)
+                return [Candidate("new", "penis", .9, pending_path)]
+
+            def block_old_cleanup(path, *args, **kwargs):
+                if path == old_path:
+                    cleanup_started.set()
+                    self.assertTrue(allow_cleanup.wait(2))
+                return original_unlink(path, *args, **kwargs)
+
+            worker = threading.Thread(
+                target=state._detect_worker,
+                args=([record], DEFAULT_DETECTION_CONFIDENCE),
+                kwargs={"control": control, "catalog_generation": state.catalog_generation},
+            )
+            with patch.object(state, "_ensure_models", return_value=object()), \
+                    patch.object(state, "_detect_image", side_effect=detect_image), \
+                    patch.object(Path, "unlink", new=block_old_cleanup):
+                worker.start()
+                self.assertTrue(cleanup_started.wait(2))
+                with self.assertRaisesRegex(ClientError, "キャンセルできる処理"):
+                    state.request_cancel()
+                self.assertFalse(control.cancel_requested.is_set())
+                self.assertFalse(state.job.cancel_requested)
+                allow_cleanup.set()
+                worker.join(2)
+
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(state.job.state, "complete")
+            self.assertFalse(state.job.publication_started)
+            self.assertEqual([candidate.candidate_id for candidate in state.candidates[image_id]], ["new"])
+            self.assertFalse(old_path.exists())
+
     def test_detection_pause_before_workers_resumes_with_shared_model(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

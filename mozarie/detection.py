@@ -444,6 +444,11 @@ class DetectionMixin:
                                 or any(self.images.get(record.image_id) is not record for record in records)
                                 or any(self._candidate_revision(record.image_id) != expected_revisions[record.image_id] for record in records)):
                             raise ClientError("フォルダを再読み込みしたため、検出結果を破棄しました。", "catalog_changed")
+                        # ``request_cancel`` takes this same lock. Once the
+                        # atomic publication starts, it must not accept a
+                        # cancellation that would report discarded results
+                        # after they have become durable.
+                        self.job.publication_started = True
                         try:
                             pending = self.workspace_store.prepare_detection_states(
                                 states, history_group=getattr(self, "_detection_history_group", None),
