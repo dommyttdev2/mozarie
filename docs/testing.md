@@ -26,7 +26,7 @@ AIには対象の利用者観測を一つずつ示し、初期状態、操作、
 
 固定時間の待機、`skip`、`TODO`、文字列が含まれるだけの確認は作らない。ブラウザーでは locator、応答、状態遷移を待ち、fixtureは専用の一時状態で閉じる。追加したテストは、対象の変更を意図的に壊したときに失敗することを確認し、人が差分を読んでから採用する。coverageの数字を上げる目的でテストを増やさない。
 
-`tests/` 配下の `test_*.cjs` は再帰的に同じ順序で通常実行とcoverageへ渡す。Nodeの構造化テスト結果でSKIP/TODOが一件でも報告された実行は失敗にする。Windows専用のPython試験はWindows CIで実行するため、backendもskip 0件を要求する。
+`tests/` 配下の `test_*.cjs` は再帰的に同じ順序で通常実行とcoverageへ渡す。`test_gallery_performance_e2e.cjs`だけはcoverageから外し、`test-quiet` の `frontend` と `all` がcoverage成功後に非instrumentedで1回実行する。Nodeの構造化テスト結果でSKIP/TODOが一件でも報告された実行は失敗にする。Windows専用のPython試験はWindows CIで実行するため、backendもskip 0件を要求する。
 
 ## 回帰境界
 
@@ -42,7 +42,7 @@ AIには対象の利用者観測を一つずつ示し、初期状態、操作、
 
 ## CIとcoverage
 
-CIは隔離fixtureで実行できるテストを常に実行する。Playwrightは利用者に見える画面と隔離した`BrowserContext`を使い、固定待機ではなくlocatorや応答などのweb-first条件で待つ。coverageは全対象のレポートを毎回生成し、未検証の境界を見つける補助にする。100%などの数値を合否条件にせず、損失・破損・権限・復旧の重要経路を人が確認する。数値達成のためのテスト、内部実装を固定するテスト、skipによる見かけの成功を作らない。実行時間やメモリが増える回帰は、小さいfixtureで件数に比例しないことを確認する。
+CIは隔離fixtureで実行できるテストを常に実行する。frontend jobはcoverageを完了してから、非instrumentedの20,000件カタログ性能試験を1回実行する。Playwrightは利用者に見える画面と隔離した`BrowserContext`を使い、固定待機ではなくlocatorや応答などのweb-first条件で待つ。coverageは全対象のレポートを毎回生成し、未検証の境界を見つける補助にする。100%などの数値を合否条件にせず、損失・破損・権限・復旧の重要経路を人が確認する。数値達成のためのテスト、内部実装を固定するテスト、skipによる見かけの成功を作らない。実行時間やメモリが増える回帰は、小さいfixtureで件数に比例しないことを確認する。
 
 ## 参照
 

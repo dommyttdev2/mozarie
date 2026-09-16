@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { assertNoSkippedUnittestTests } = require("./test-result-policy.cjs");
+const { frontendPerformanceTestFiles, frontendTestArguments } = require("./test-discovery.cjs");
 
 const root = path.resolve(__dirname, "..");
 
@@ -220,14 +221,26 @@ async function runBackend(temporaryRoot, artifacts) {
   return `backend: passed (${testCount(tests)} tests; coverage report line ${rates.line}%, branch ${rates.branch}%)`;
 }
 
-async function runFrontend(temporaryRoot, artifacts) {
+function performanceEnvironment(source = process.env) {
+  const env = { ...source };
+  delete env.MOZARIE_JS_COVERAGE;
+  delete env.MOZARIE_BROWSER_COVERAGE_FILE;
+  delete env.NODE_V8_COVERAGE;
+  return env;
+}
+
+async function runFrontend(temporaryRoot, artifacts, dependencies = {}) {
+  const run = dependencies.requiredCommand || requiredCommand;
   const directory = artifactDirectory(temporaryRoot, artifacts, "frontend");
-  await requiredCommand("frontend syntax", process.platform === "win32" ? "npm.cmd" : "npm", ["run", "check"], { env: process.env });
-  const output = await requiredCommand("frontend coverage", process.execPath, [path.join("scripts", "coverage-js.cjs")], {
+  await run("frontend syntax", process.platform === "win32" ? "npm.cmd" : "npm", ["run", "check"], { env: process.env });
+  const output = await run("frontend coverage", process.execPath, [path.join("scripts", "coverage-js.cjs")], {
     env: { ...process.env, MOZARIE_JS_COVERAGE_DIR: directory },
   });
   if (!fs.existsSync(path.join(directory, "report", "coverage-final.json"))) throw new Error("frontend coverage JSON was not created");
-  return `frontend: passed (${testCount(output)} tests; JavaScript coverage report created)`;
+  const performance = await run("frontend performance", process.execPath, frontendTestArguments(frontendPerformanceTestFiles()), {
+    env: performanceEnvironment(),
+  });
+  return `frontend: passed (${testCount(output)} coverage tests; ${testCount(performance)} performance tests; JavaScript coverage report created)`;
 }
 
 async function runSuites({ suite, artifacts }, dependencies = {}) {
@@ -253,4 +266,4 @@ async function main(argv = process.argv.slice(2)) {
 
 if (require.main === module) main().catch((error) => { console.error(error.message || error); process.exitCode = 1; });
 
-module.exports = { artifactDirectory, backendEnvironment, coverageRates, diagnostic, parseArguments, requiredCommand, runCommand, runSuites, temporaryDirectory, testCount, verifyBackendCoverage, workspaceArtifacts };
+module.exports = { artifactDirectory, backendEnvironment, coverageRates, diagnostic, parseArguments, performanceEnvironment, requiredCommand, runCommand, runFrontend, runSuites, temporaryDirectory, testCount, verifyBackendCoverage, workspaceArtifacts };

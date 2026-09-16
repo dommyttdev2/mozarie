@@ -133,7 +133,7 @@ npm ci
 node scripts/test-quiet.cjs all
 ```
 
-自動テストはHTTP、SQLite、実ファイル、ブラウザーUIの契約を確認します。リリース前には[実機確認手順](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md)も実施してください。
+自動テストはHTTP、SQLite、実ファイル、ブラウザーUIの契約を確認します。`frontend`と`all`はcoverage完了後に、coverageを付けない20,000件カタログ性能試験も1回実行します。リリース前には[実機確認手順](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md)も実施してください。
 
 ## ライセンス
 

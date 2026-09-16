@@ -133,7 +133,7 @@ npm ci
 node scripts/test-quiet.cjs all
 ```
 
-The automated suites verify HTTP, SQLite, real-file, and browser UI contracts. Run the [manual verification guide](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md) before a release as well.
+The automated suites verify HTTP, SQLite, real-file, and browser UI contracts. `frontend` and `all` run the uninstrumented 20,000-item catalogue performance scenario once after coverage completes. Run the [manual verification guide](https://github.com/norqis/mozarie/blob/main/docs/manual-verification.md) before a release as well.
 
 ## License
 

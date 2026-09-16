@@ -126,6 +126,46 @@ async function runArtifactCases() {
   }
 }
 
+async function runFrontendCases() {
+  const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mozarie-quiet-frontend-"));
+  const calls = [];
+  try {
+    const summary = await runner.runFrontend(temporaryRoot, null, {
+      async requiredCommand(label, command, args, options) {
+        calls.push({ label, command, args, options });
+        if (label === "frontend coverage") {
+          const report = path.join(options.env.MOZARIE_JS_COVERAGE_DIR, "report");
+          fs.mkdirSync(report, { recursive: true });
+          fs.writeFileSync(path.join(report, "coverage-final.json"), "{}");
+          return "# tests 44";
+        }
+        if (label === "frontend performance") return "# tests 1";
+        return "";
+      },
+    });
+    assert.deepEqual(calls.map(({ label }) => label), ["frontend syntax", "frontend coverage", "frontend performance"], "performance runs once only after successful syntax and coverage checks");
+    assert.equal(calls[2].args.includes("tests/test_gallery_performance_e2e.cjs"), true, "the 20k gallery scenario is the only quiet-runner performance target");
+    assert.equal(calls[2].options.env.MOZARIE_JS_COVERAGE, undefined, "the performance run is not instrumented for JavaScript coverage");
+    assert.match(summary, /44 coverage tests; 1 performance tests/, "the compact result distinguishes coverage and performance runs");
+    assert.deepEqual(runner.performanceEnvironment({ MOZARIE_JS_COVERAGE: "1", MOZARIE_BROWSER_COVERAGE_FILE: "browser.json", NODE_V8_COVERAGE: "v8", KEEP: "value" }), { KEEP: "value" }, "the performance environment removes all coverage instrumentation");
+
+    await assert.rejects(runner.runFrontend(temporaryRoot, null, {
+      async requiredCommand(label, command, args, options) {
+        if (label === "frontend coverage") {
+          const report = path.join(options.env.MOZARIE_JS_COVERAGE_DIR, "report");
+          fs.mkdirSync(report, { recursive: true });
+          fs.writeFileSync(path.join(report, "coverage-final.json"), "{}");
+          return "# tests 44";
+        }
+        if (label === "frontend performance") throw new Error("performance failure marker");
+        return "";
+      },
+    }), /performance failure marker/, "a failed performance scenario fails the quiet frontend suite");
+  } finally {
+    fs.rmSync(temporaryRoot, { recursive: true, force: true });
+  }
+}
+
 assert.deepEqual(runner.parseArguments(["frontend", "--artifacts", "coverage-artifacts"]).suite, "frontend", "the requested suite is parsed");
 assert.deepEqual(runner.coverageRates('<coverage line-rate="1" branch-rate="1"/>'), { line: 100, branch: 100 }, "coverage rates are summarized as percentages");
 assert.doesNotThrow(() => runner.verifyBackendCoverage('<coverage><class filename="server.py" line-rate="0" branch-rate="0"/><class filename="updater.py" line-rate="0" branch-rate="0"/><class filename="setup_gpu_check.py" line-rate="0" branch-rate="0"/></coverage>'), "required files are reported without a numeric coverage gate");
@@ -145,5 +185,6 @@ fs.rmSync(artifactFixture, { recursive: true, force: true });
   await runCommandCases();
   await runTemporaryDirectoryCases();
   await runArtifactCases();
+  await runFrontendCases();
   console.log("test_quiet_runner: passed");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
