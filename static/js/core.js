@@ -94,7 +94,7 @@ const USER_ERROR_CODES = {
   output_unavailable: "output_folder_unavailable", model_not_configured: "model_not_configured",
   directory_picker_unsupported: "directory_picker_unsupported", output_name_exhausted: "output_name_exhausted",
   model_file_missing: "model_file_missing", model_file_invalid: "model_file_invalid", model_load_failed: "model_load_failed", sam_checkpoint_missing: "sam_checkpoint_missing",
-  gpu_runtime_unavailable: "gpu_runtime_unavailable", operation_in_progress: "operation_in_progress", outline_not_found: "outline_not_found",
+  gpu_runtime_unavailable: "gpu_runtime_unavailable", operation_in_progress: "operation_in_progress", operation_cancelled: "operation_cancelled", outline_not_found: "outline_not_found",
   input_invalid: "input_invalid", session_expired: "session_expired", model_download_network: "model_download_network",
   model_download_write_failed: "model_download_write_failed", model_download_integrity: "model_download_integrity",
   mosaic_preview_failed: "mosaic_preview_failed",
@@ -1012,7 +1012,11 @@ async function loadFolder({ skipSameSourceWarning = false, path: suppliedPath = 
       state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(data.sources) : [];
       if (typeof restoreBrowserProjectSourcesForCurrentCatalog === "function") void restoreBrowserProjectSourcesForCurrentCatalog().catch(() => {});
       setStatusKey("status.imagesLoaded", { count: state.images.length });
+      showImportFailures(data.importFailures, state.images.length, $("loadFolderButton"));
       if (typeof showSourceMismatches === "function") await showSourceMismatches();
     }, { allowEdits: true, allowNested: allowDuringCatalogTransition });
-  } catch (error) { showUserError(error); }
+  } catch (error) {
+    if (Array.isArray(error?.params?.failures)) showImportFailures(error.params.failures, 0, $("loadFolderButton"));
+    else showUserError(error);
+  }
 }

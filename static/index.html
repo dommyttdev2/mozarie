@@ -205,6 +205,7 @@
   <template id="galleryItemTemplate">
     <button class="gallery-item" type="button" aria-haspopup="menu">
       <img loading="lazy" alt="">
+      <span class="thumbnail-error" hidden></span>
       <span class="gallery-review-badge"></span>
       <span class="catalog-card-footer"><span class="gallery-name"></span><span class="gallery-meta"></span></span>
     </button>
@@ -213,6 +214,7 @@
   <template id="overviewItemTemplate">
     <button class="overview-item" type="button">
       <img loading="lazy" alt="">
+      <span class="thumbnail-error" hidden></span>
       <span class="overview-review-badge"></span><span class="catalog-card-footer"><span class="overview-item-name"></span><span class="overview-item-dimensions"></span></span>
     </button>
   </template>
@@ -257,6 +259,15 @@
       <div class="error-dialog-copy"><p class="fixed-note" data-i18n="errorDialog.causeLabel">原因</p><p id="errorDialogCause"></p></div>
       <div class="error-dialog-copy"><p class="fixed-note" data-i18n="errorDialog.actionLabel">次にすること</p><p id="errorDialogAction"></p></div>
       <div class="dialog-actions"><button id="errorDialogClose" type="button" autofocus data-i18n="dialog.close">閉じる</button></div>
+    </section>
+  </dialog>
+
+  <dialog id="importFailuresDialog" class="modal-dialog import-failures-dialog" aria-labelledby="importFailuresTitle" aria-describedby="importFailuresSummary">
+    <section class="dialog-body">
+      <h2 id="importFailuresTitle"></h2>
+      <p id="importFailuresSummary"></p>
+      <ul id="importFailuresList" class="import-failures-list"></ul>
+      <div class="dialog-actions"><button id="importFailuresClose" type="button" autofocus data-i18n="dialog.close">閉じる</button></div>
     </section>
   </dialog>
 

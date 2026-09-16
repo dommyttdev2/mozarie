@@ -12,10 +12,27 @@ async function runCommandCases() {
   assert.equal(success.output.trim(), "ok", "a successful child output is captured instead of streamed");
 
   await assert.rejects(runner.requiredCommand("fixture", process.execPath, ["-e", "console.error('useful failure'); process.exit(7)"], {}), (error) => {
-    assert.match(error.message, /fixture failed \(exit 7\)/, "a failed child reports its exit status");
+    assert.match(error.message, /fixture failed \(exit 7; elapsed /, "a failed child reports its exit status and elapsed time");
     assert.match(error.message, /useful failure/, "a failed child includes its diagnostic output");
     return true;
   });
+
+  const artifacts = fs.mkdtempSync(path.join(os.tmpdir(), "mozarie-quiet-failure-"));
+  try {
+    await assert.rejects(runner.requiredCommand("failure evidence", process.execPath, ["-e", "console.error('raw expected: one\\nraw actual: two\\nraw operator: strictEqual\\nraw message: marker'); process.exit(3)"], { artifactDirectory: artifacts }), (error) => {
+      assert.match(error.message, /raw output: .*failure-evidence\.failure\.log/, "a failed suite names its retained raw log");
+      assert.equal(fs.readFileSync(error.rawLog, "utf8").includes("raw expected: one"), true, "the raw artifact keeps the complete child output");
+      return true;
+    });
+    const evidence = JSON.parse(fs.readFileSync(path.join(artifacts, "failure-evidence.failure.json"), "utf8"));
+    assert.deepEqual(Object.keys(evidence).sort(), ["args", "command", "elapsedMs", "rawLog", "status", "timedOut"], "failure metadata identifies the command, elapsed time, and raw log");
+  } finally {
+    fs.rmSync(artifacts, { recursive: true, force: true });
+  }
+
+  const timedOut = await runner.runCommand(process.execPath, ["-e", "setTimeout(() => {}, 10000)"], { timeoutMs: 40 });
+  assert.equal(timedOut.timedOut, true, "a command exceeding its explicit suite timeout is terminated");
+  assert.equal(timedOut.status, 124, "a terminated command has a stable timeout status");
 }
 
 function diagnosticCases() {
@@ -61,6 +78,9 @@ function diagnosticCases() {
     "not ok 2 - outer failure",
     "  ---",
     "  message: outer-marker",
+    "  expected: expected-marker",
+    "  actual: actual-marker",
+    "  operator: strictEqual",
     "  ...",
     "not ok 3 - deferred # TODO planned later",
     "not ok 4 - skipped # SKIP unavailable",
@@ -74,6 +94,9 @@ function diagnosticCases() {
   assert.match(tapDiagnostic, /outer failure/, "later TAP failures are retained");
   assert.match(tapDiagnostic, /nested-marker/, "TAP error details are retained");
   assert.match(tapDiagnostic, /outer-marker/, "TAP message details are retained");
+  assert.match(tapDiagnostic, /expected-marker/, "TAP expected values are retained");
+  assert.match(tapDiagnostic, /actual-marker/, "TAP actual values are retained");
+  assert.match(tapDiagnostic, /strictEqual/, "TAP assertion operators are retained");
   assert.doesNotMatch(tapDiagnostic, /deferred # TODO|skipped # SKIP/, "TAP TODO and SKIP entries are not reported as failures");
   assert.match(tapDiagnostic, /# fail 2/, "TAP failure counts are retained");
 
@@ -175,6 +198,14 @@ deferredTestPolicyCases();
 const backendEnvironment = runner.backendEnvironment(path.join(os.tmpdir(), "mozarie-quiet-env"), "coverage-data");
 assert.equal(backendEnvironment.PYTHONPYCACHEPREFIX, path.join(os.tmpdir(), "mozarie-quiet-env", "pycache"), "backend bytecode is directed to the temporary directory");
 assert.equal(backendEnvironment.MOZARIE_RUNTIME, undefined, "ambient runtime selection cannot change test behavior");
+const testPythonRoot = fs.mkdtempSync(path.join(os.tmpdir(), "mozarie-test-python-"));
+const testPython = path.join(testPythonRoot, process.platform === "win32" ? "python.exe" : "python");
+fs.writeFileSync(testPython, "fixture");
+assert.equal(runner.testPythonExecutable({ MOZARIE_TEST_PYTHON: testPython }), path.resolve(testPython), "the test runner uses only its explicit dedicated interpreter");
+assert.throws(() => runner.testPythonExecutable({ MOZARIE_TEST_PYTHON: path.join(__dirname, "..", ".venv", "Scripts", "python.exe") }), /must not point into the product .venv/, "the test runner rejects the product interpreter");
+fs.rmSync(testPythonRoot, { recursive: true, force: true });
+assert.equal(backendEnvironment.MOZARIE_TEST_PYTHON, undefined, "the explicit test interpreter selects the child executable without changing test state");
+assert.equal(backendEnvironment.MOZARIE_TEST_APP_DIR, path.join(os.tmpdir(), "mozarie-quiet-env", "app"), "a timed-out backend suite leaves its app fixture under the runner-owned temporary root");
 const artifactFixture = fs.mkdtempSync(path.join(os.tmpdir(), "mozarie-quiet-artifact-check-"));
 fs.mkdirSync(path.join(artifactFixture, "mozarie", "__pycache__"), { recursive: true });
 fs.writeFileSync(path.join(artifactFixture, ".http-coverage.stderr.log"), "fixture");

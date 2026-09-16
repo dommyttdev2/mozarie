@@ -1,6 +1,7 @@
 const modalInvokers = new WeakMap();
 
 $("#errorDialogClose").addEventListener("click", () => $("#errorDialog").close());
+$("#importFailuresClose").addEventListener("click", () => $("#importFailuresDialog").close());
 
 function showModalFromInvoker(dialog, invoker = document.activeElement) {
   if (dialog.open) return;

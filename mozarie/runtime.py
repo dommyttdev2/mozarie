@@ -9,6 +9,11 @@ from typing import Any
 
 
 BACKENDS = {"cuda", "directml", "cpu"}
+ONNX_PROVIDERS = {
+    "cuda": "CUDAExecutionProvider",
+    "directml": "DmlExecutionProvider",
+    "cpu": "CPUExecutionProvider",
+}
 _DXGI_ERROR_NOT_FOUND = -2005270526
 
 
@@ -59,6 +64,25 @@ def runtime_backend(*, ort_module: Any | None = None, torch_module: Any | None =
     except (ImportError, OSError, RuntimeError):
         pass
     return "cpu"
+
+
+def onnx_execution_status(*, ort_module: Any | None = None) -> tuple[str, bool]:
+    """Return the selected ONNX backend and whether its provider is exported.
+
+    This deliberately reads only the runtime's provider list. Creating a
+    session here would make settings polling allocate model and GPU resources.
+    """
+    selected = configured_backend()
+    try:
+        module = ort_module or importlib.import_module("onnxruntime")
+        providers = set(module.get_available_providers())
+    except (ImportError, OSError, RuntimeError, AttributeError):
+        return selected or "cpu", False
+    if selected is None:
+        selected = "cuda" if ONNX_PROVIDERS["cuda"] in providers else (
+            "directml" if ONNX_PROVIDERS["directml"] in providers else "cpu"
+        )
+    return selected, ONNX_PROVIDERS[selected] in providers
 
 
 def directml_module() -> Any:

@@ -23,6 +23,7 @@ from PIL import Image
 
 import mozarie.http as http_module
 import mozarie.state as state_module
+from mozarie.core import ClientError
 from mozarie.http import MosaicHandler
 from mozarie.state import StudioState
 
@@ -226,6 +227,108 @@ class LiveHttpEndpointTests(unittest.TestCase):
         self.assertEqual(response["catalogId"], self.state.catalog_id)
         self.assertEqual(response["catalogGeneration"], self.state.catalog_generation)
 
+    def test_live_manual_layer_transfer_persists_and_recovers_after_cancel_or_commit_failure(self) -> None:
+        """Run the browser's begin/layer/commit protocol through a real server."""
+        status, _headers, body = self.request("POST", "/api/projects", {"name": "Manual transfer"}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        project_id = json.loads(body)["project"]["id"]
+        status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        image_id = json.loads(body)["images"][0]["id"]
+        def mask_bytes(point: tuple[int, int]) -> bytes:
+            encoded = io.BytesIO(); image = Image.new("L", (12, 8), 0)
+            image.putpixel(point, 255); image.save(encoded, format="PNG")
+            return encoded.getvalue()
+        layers = {"add": mask_bytes((3, 4)), "exclusion": mask_bytes((5, 4)), "exclusionErase": mask_bytes((5, 4))}
+        base_payload = {
+            "emptyLayers": [], "manualEnabled": True, "manualExclusionEnabled": True,
+            "manualExclusionEraseEnabled": True, "manualExclusionForced": True,
+            "removedCandidateIds": [], "candidateRevision": 0, "hasEffectiveMask": True,
+            "dirtyRois": {"add": {"left": 2, "top": 3, "right": 5, "bottom": 6}},
+        }
+
+        def begin(session_id: str, dirty_layers: list[str]) -> None:
+            status, _headers, response = self.request(
+                "POST", f"/api/workspace/manual/{image_id}/begin",
+                {"sessionId": session_id, "dirtyLayers": dirty_layers}, authorized=True,
+            )
+            self.assertEqual(status, 200, response.decode("utf-8") if status != 200 else "")
+
+        def layer(session_id: str, layer_name: str, value: bytes) -> None:
+            status, _headers, response = self.raw_request(
+                "POST", f"/api/workspace/manual/{image_id}/layer/{session_id}/{layer_name}", value,
+                {
+                    "Origin": self.origin, "X-Mozarie-Token": self.state.session_token,
+                    "Content-Type": "application/octet-stream",
+                },
+            )
+            self.assertEqual(status, 200, response.decode("utf-8") if status != 200 else "")
+
+        session = "00000000-0000-4000-8000-000000000101"
+        begin(session, list(layers))
+        for layer_name, value in layers.items(): layer(session, layer_name, value)
+        status, _headers, response = self.request(
+            "POST", f"/api/workspace/manual/{image_id}/commit", {**base_payload, "sessionId": session}, authorized=True,
+        )
+        self.assertEqual(status, 200, response.decode("utf-8") if status != 200 else "")
+        persisted = self.state.manual_workspace(image_id)
+        self.assertIsNotNone(persisted)
+        self.assertTrue(all(persisted[layer_name].startswith("data:image/png;base64,") for layer_name in layers))
+        self.assertTrue(persisted["hasEffectiveMask"])
+        status, _headers, response = self.request("GET", f"/api/workspace/manual/{image_id}")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(response)["draft"]["add"], persisted["add"])
+
+        reopened = StudioState(self.state.cache_dir, self.state.session_base_dir)
+        previous_state = http_module.STATE
+        try:
+            reopened.open_project(project_id)
+            http_module.STATE = reopened
+            status, _headers, response = self.request("GET", f"/api/workspace/manual/{image_id}")
+            self.assertEqual(status, 200, response.decode("utf-8") if status != 200 else "")
+            restarted = json.loads(response)["draft"]
+            self.assertEqual({name: restarted[name] for name in layers}, {name: persisted[name] for name in layers})
+        finally:
+            http_module.STATE = previous_state
+            reopened.shutdown()
+
+        emptied = "00000000-0000-4000-8000-000000000102"
+        begin(emptied, ["exclusionErase"])
+        status, _headers, response = self.request(
+            "POST", f"/api/workspace/manual/{image_id}/commit", {**base_payload, "sessionId": emptied, "emptyLayers": ["exclusionErase"], "dirtyRois": {}}, authorized=True,
+        )
+        self.assertEqual(status, 200, response.decode("utf-8") if status != 200 else "")
+        persisted = self.state.manual_workspace(image_id)
+        self.assertEqual(persisted["exclusionErase"], "")
+
+        cancelled = "00000000-0000-4000-8000-000000000103"
+        begin(cancelled, ["add"]); layer(cancelled, "add", layers["add"])
+        status, _headers, response = self.request(
+            "POST", f"/api/workspace/manual/{image_id}/cancel", {"sessionId": cancelled}, authorized=True,
+        )
+        self.assertEqual(status, 200, response.decode("utf-8") if status != 200 else "")
+        self.assertNotIn(cancelled, self.state._manual_uploads)
+        self.assertEqual(self.state.manual_workspace(image_id)["add"], persisted["add"])
+
+        failed = "00000000-0000-4000-8000-000000000104"
+        begin(failed, ["add"]); layer(failed, "add", layers["add"])
+        with patch.object(self.state, "save_manual_workspace", side_effect=ClientError("保存に失敗しました。", "workspace_write_failed")):
+            status, _headers, response = self.request(
+                "POST", f"/api/workspace/manual/{image_id}/commit", {**base_payload, "sessionId": failed}, authorized=True,
+            )
+        self.assertEqual(status, 400)
+        self.assertEqual(json.loads(response)["error_code"], "workspace_write_failed")
+        self.assertNotIn(failed, self.state._manual_uploads)
+        self.assertEqual(self.state.manual_workspace(image_id)["add"], persisted["add"])
+
+        retry = "00000000-0000-4000-8000-000000000105"
+        begin(retry, ["add"]); layer(retry, "add", layers["add"])
+        status, _headers, response = self.request(
+            "POST", f"/api/workspace/manual/{image_id}/commit", {**base_payload, "sessionId": retry}, authorized=True,
+        )
+        self.assertEqual(status, 200, response.decode("utf-8") if status != 200 else "")
+        self.assertNotIn(retry, self.state._manual_uploads)
+
     def test_project_mask_export_succeeds_when_warnings_are_errors(self) -> None:
         status, _headers, body = self.request("POST", "/api/projects", {"name": "Masks"}, authorized=True)
         self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
@@ -348,6 +451,23 @@ class LiveHttpEndpointTests(unittest.TestCase):
         self.assertEqual(status, 500)
         self.assertEqual(json.loads(body)["error_code"], "workspace_database_error")
         self.assertFalse(self.state.images[image_id].hidden)
+
+    def test_hidden_images_are_rejected_by_explicit_detect_apply_and_browser_save_requests(self) -> None:
+        """A stale client cannot process a hidden image by posting its ID directly."""
+        _status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        image_id = json.loads(body)["images"][0]["id"]
+        status, _headers, body = self.request("POST", f"/api/workspace/image/{image_id}", {"hidden": True}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8"))
+
+        self.state.settings["models"]["provider"] = "cpu"
+        for path, payload in (
+            ("/api/detect", {"imageIds": [image_id], "confidence": 0.5, "parallelism": 1, "targetClasses": ["penis"]}),
+            ("/api/apply", {"imageIds": [image_id], "divisor": 100, "drafts": {}, "copyToDefault": False, "suffix": "_censored", "format": "original", "keepMetadata": True}),
+            ("/api/save/reserve", {"imageId": image_id, "candidateRevision": 0, "clientSaveToken": "00000000-0000-4000-8000-000000000011", "copyToDefault": False, "suffix": "_censored", "format": "original", "keepMetadata": True}),
+        ):
+            status, _headers, body = self.request("POST", path, payload, authorized=True)
+            self.assertEqual(status, 400, f"{path}: {body.decode('utf-8')}")
+            self.assertEqual(json.loads(body)["error_code"], "image_hidden")
 
 
 if __name__ == "__main__":

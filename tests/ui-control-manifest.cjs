@@ -11,6 +11,7 @@ sourceDeleteResume
 detectParallelism dialogTargetPenis dialogTargetPussy detectConfidenceRange detectConfidenceNumber detectCandidatePadding detectExcludeCandidatePadding detectFluidColorFillEnabled detectFluidColorFillTolerance detectCancelButton detectStartButton
 settingsCloseButton settingsTabGeneral settingsTabModels settingsTabDisplay settingsTabShortcuts settingsTabConfirm settingsTabInfo settingsLanguage settingsPort settingsDefaultOutputDirectory settingsChooseOutputDirectory settingsImportParallelism settingsSaveParallelism settingsOpenBrowser settingsProvider settingsGpuDevice settingsTargetModel settingsNtd11Toggle settingsNtd11Model settingsSensitiveToggle settingsSensitiveModel settingsPrecisionToggle settingsSamType settingsSamModel settingsHandToggle settingsHandModel settingsHandSegmentationToggle settingsHandSegmentationModel settingsFluidToggle settingsApplyColor settingsExcludeColor settingsOpacity settingsMosaicPreview settingsExcludeForcedDefault settingsShortcutsEnabled confirmClearMasks confirmClearCatalog confirmRemoveImage confirmCandidateDelete confirmCandidateRoleDelete confirmOverwriteSource confirmDeleteSourceAfterCopy checkUpdateButton settingsResetButton settingsSaveButton
 modelDownloadClose modelDownloadCopy modelDownloadStart modelDownloadCancel applyTargetMode applyCopyMode applyOverwriteMode applySuffix deleteOriginal applyOutputDirectoryStatus chooseOutputDirectoryButton applyDivisor applyOutputFormat applyKeepMetadata applyCloseButton applyPauseButton applyCancelButton applyStartButton singleSaveCopyMode singleSaveOverwriteMode singleSaveSuffix singleSaveDeleteOriginal singleSaveChooseOutputDirectoryButton singleSaveOutputFormat singleSaveKeepMetadata singleSaveCloseButton singleSaveStartButton mosaicHelpCloseButton processingPauseButton processingCancelButton modelHelpCloseButton modelHelpCopy
+importFailuresClose
 `.trim().split(/\s+/);
 
 // Text-entry controls are exercised with a real keyboard event.  Selects,
@@ -83,7 +84,9 @@ function interactionFor(id) {
   const action = keyboardIds.has(id) ? "keyboard" : changeIds.has(id) ? "change" : "click";
   let resultKind = "dom";
   let scenario = "workspace";
-  if (/^project/.test(id) || /^sourceMismatch/.test(id)) {
+  if (id === "importFailuresClose") {
+    resultKind = "dialog"; scenario = "import";
+  } else if (/^project/.test(id) || /^sourceMismatch/.test(id)) {
     resultKind = "dialog"; scenario = "workspace";
   } else if (/^(pickFolder|folderPath|loadFolderButton|pickImages|pickFolderFiles)/.test(id)) {
     resultKind = "dialog"; scenario = "import";

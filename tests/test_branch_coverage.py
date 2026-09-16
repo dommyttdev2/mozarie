@@ -110,6 +110,7 @@ class ImageIoBranchTests(unittest.TestCase):
         gray = Image.new("L", (2, 2), 90)
         self.assertTrue(np.all(_decode_mask(data_url(alpha), 2, 2) == 80))
         self.assertTrue(np.all(_decode_mask(data_url(gray), 2, 2) == 90))
+        self.assertTrue(np.all(_decode_mask(png_data(gray), 2, 2) == 90))
         for raw in ("", "data:image/png;base64,!!!", data_url(Image.new("RGB", (2, 2))), data_url(Image.new("L", (3, 2)))):
             with self.subTest(raw=raw[:20]):
                 with self.assertRaises(ClientError):
@@ -117,7 +118,7 @@ class ImageIoBranchTests(unittest.TestCase):
         self.assertEqual(decode_draft_masks(None, 2, 2), (None, None, None))
         with self.assertRaises(ClientError):
             decode_draft_masks([], 2, 2)
-        masks = decode_draft_masks({"add": data_url(gray), "manualExclusionEnabled": False}, 2, 2)
+        masks = decode_draft_masks({"add": png_data(gray), "manualExclusionEnabled": False}, 2, 2)
         self.assertIsNotNone(masks[0])
         self.assertIsNone(masks[1])
 

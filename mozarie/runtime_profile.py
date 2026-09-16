@@ -65,7 +65,7 @@ def installed_profile() -> str | None:
     return next(iter(profiles), None)
 
 
-def preflight(profile: str) -> None:
+def preflight(profile: str, *, require_installed: bool = False) -> None:
     requested = normalize_profile(profile)
     assert requested is not None
     current = installed_profile()
@@ -75,6 +75,10 @@ def preflight(profile: str) -> None:
             "The environment was not changed. Back up or remove .venv before changing runtimes."
         )
     if current is None:
+        if require_installed:
+            raise ProfileError(
+                f"The selected {requested} ONNX Runtime is missing. Run setup.bat again to repair the environment."
+            )
         return
     try:
         import onnxruntime as ort
@@ -259,6 +263,7 @@ def main() -> int:
     parser.add_argument("profile", nargs="?")
     parser.add_argument("--venv", type=Path, default=Path(__file__).resolve().parent / ".venv")
     parser.add_argument("--write-marker", action="store_true")
+    parser.add_argument("--require-installed", action="store_true")
     parser.add_argument("--gpu-device", type=int, default=0)
     args = parser.parse_args()
     try:
@@ -270,7 +275,7 @@ def main() -> int:
         if args.profile is None:
             raise ProfileError("A runtime profile is required.")
         if args.command == "preflight":
-            preflight(args.profile)
+            preflight(args.profile, require_installed=args.require_installed)
             return 0
         result = validate(args.profile, args.gpu_device)
         if args.write_marker:

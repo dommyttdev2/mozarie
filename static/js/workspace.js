@@ -14,7 +14,13 @@ function queueWorkspaceMutation(imageId, send, rememberFailure = true) {
   };
   next.then(clearSettledChain, clearSettledChain);
   if (rememberFailure) next.then(
-    () => {},
+    () => {
+      state.workspaceMutationErrors.delete(imageId);
+      if (state.workspaceUnsavedImageId === imageId) {
+        delete state.workspaceUnsavedImageId;
+        if (state.status?.key === "status.workspaceUnsaved") clearStatus();
+      }
+    },
     (error) => { state.workspaceMutationErrors.set(imageId, error); },
   );
   return next;
@@ -458,7 +464,12 @@ function queueWorkspaceDraft(imageId, immediate = false) {
     });
   };
   if (immediate) return write();
-  const promise = new Promise((resolve) => state.workspaceDraftTimers.set(imageId, setTimeout(() => resolve(write().catch((error) => { showUserError(error); })), 250)));
+  const promise = new Promise((resolve) => state.workspaceDraftTimers.set(imageId, setTimeout(() => resolve(write().catch((error) => {
+    // Retain the bitmap and dirty layers for retry, while making it explicit
+    // that the displayed hand-drawn edit is not durable yet.
+    state.workspaceUnsavedImageId = imageId;
+    setStatusKey("status.workspaceUnsaved", {}, "warning"); showUserError(error);
+  })), 250)));
   return promise;
 }
 
@@ -488,7 +499,19 @@ async function flushWorkspaceDraft(imageId) {
     const chain = state.workspaceDraftChains.get(imageId);
     await (chain || Promise.resolve());
     const failure = state.workspaceMutationErrors.get(imageId);
-    if (failure) { state.workspaceMutationErrors.delete(imageId); throw failure; }
+    if (failure) {
+      const draft = state.drafts.get(imageId);
+      // A rejected debounced write leaves its bitmap and dirty layers in the
+      // draft. Requeue that retained edit instead of consuming the error and
+      // allowing the caller to move away with no durable retry.
+      if (draft?.dirtyLayers?.length) {
+        state.workspaceMutationErrors.delete(imageId);
+        await queueWorkspaceDraft(imageId, true);
+        continue;
+      }
+      state.workspaceMutationErrors.delete(imageId);
+      throw failure;
+    }
     if (!state.workspaceDraftTimers.has(imageId) && state.workspaceDraftChains.get(imageId) === chain) return;
   }
 }
@@ -509,6 +532,12 @@ async function flushAllWorkspaceMutations() {
     const failedImageId = [...state.workspaceMutationErrors.keys()][0];
     if (failedImageId) {
       const storedFailure = state.workspaceMutationErrors.get(failedImageId);
+      const draft = state.drafts.get(failedImageId);
+      if (draft?.dirtyLayers?.length) {
+        state.workspaceMutationErrors.delete(failedImageId);
+        await queueWorkspaceDraft(failedImageId, true);
+        continue;
+      }
       state.workspaceMutationErrors.delete(failedImageId);
       throw storedFailure;
     }

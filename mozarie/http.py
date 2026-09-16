@@ -26,7 +26,7 @@ from .core import (
 )
 from . import state as state_module
 from .state import STATE, StudioState
-from .image_io import _decode_mask, _valid_color, calculate_block_size, inference_device_name, open_image_without_png_text, parse_png_chunks
+from .image_io import IMAGE_DECODE_ERRORS, _decode_mask, _valid_color, calculate_block_size, inference_device_name, open_image_without_png_text, parse_png_chunks
 from .model_downloads import ModelDownloadError, ModelDownloadInProgress
 from .config import SettingsError, validate_output_directory_ready
 
@@ -135,7 +135,7 @@ def _operation_log_spec(method: str, path: str) -> tuple[str, str] | None:
             if path.endswith("/commit"):
                 return "手描きマスク転送確定", "/api/workspace/manual/commit"
             if path.endswith("/cancel"):
-                return "手描きマスク転送取消", "/api/workspace/manual/cancel"
+                return "手描きマスク一時転送を破棄", "/api/workspace/manual/cancel"
         if path.startswith("/api/project/history/"):
             return "プロジェクト履歴", "/api/project/history"
         if path.startswith("/api/workspace/image/"):
@@ -216,14 +216,14 @@ def _read_fluid_color_fill_options(payload: dict[str, Any], settings: dict[str, 
     return enabled, tolerance
 
 
-def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]]) -> dict[str, object]:
+def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]], *, runtime_backend: str = "cpu", runtime_ready: bool = True) -> dict[str, object]:
     """Format health device data without probing a GPU for a CPU selection."""
     if provider != "gpu":
         return {"provider": "cpu", "runtimeBackend": "cpu", "gpuDevice": None, "device": "CPU"}
     selected = next((gpu for gpu in gpus if gpu["id"] == gpu_device), None)
     name = str(selected["name"]) if selected else "unavailable"
-    backend = str(selected.get("backend", "cuda")) if selected else "unavailable"
-    return {"provider": "gpu", "runtimeBackend": backend, "gpuDevice": gpu_device, "gpuName": name, "device": f"GPU {gpu_device}: {name}"}
+    backend = str(selected.get("backend", runtime_backend)) if selected else runtime_backend
+    return {"provider": "gpu", "runtimeBackend": backend, "runtimeReady": runtime_ready, "gpuDevice": gpu_device, "gpuName": name, "device": f"GPU {gpu_device}: {name}"}
 
 
 def _run_native_picker(script: str, environment: dict[str, str], *, failed_message: str, busy_message: str, state: StudioState) -> str | None:
@@ -488,13 +488,18 @@ class MosaicHandler(BaseHTTPRequestHandler):
                 # The state contract always includes gpuDeviceValid. Keeping
                 # absent values neutral lets a minimal status adapter report
                 # model readiness without pretending its GPU is invalid.
-                configured = bool(status.get("gpuDeviceValid", True)) and all(model["valid"] for model in status["models"].values() if model["required"] or model["enabled"])
+                runtime_ready = bool(status.get("runtimeReady", status.get("gpuDeviceValid", True)))
+                configured = (provider != "gpu" or runtime_ready) and bool(status.get("gpuDeviceValid", True)) and all(model["valid"] for model in status["models"].values() if model["required"] or model["enabled"])
                 payload: dict[str, Any] = {
                     "ok": True,
                     "modelsConfigured": configured,
                 }
                 if provider == "gpu":
-                    payload.update(health_device(provider, int(models.get("gpu_device", 0)), status["gpus"]))
+                    payload.update(health_device(
+                        provider, int(models.get("gpu_device", 0)), status["gpus"],
+                        runtime_backend=str(status.get("runtimeBackend", "cpu")),
+                        runtime_ready=bool(status.get("runtimeReady", status.get("gpuDeviceValid", True))),
+                    ))
                 else:
                     payload.update(health_device(provider, 0, []))
                 self._json(payload)
@@ -731,7 +736,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     lambda: STATE.set_root(str(payload.get("path", "")), expected_project_id=expected_project_id,
                                            expected_catalog_generation=expected_catalog_generation)
                 )
-                self._json(snapshot)
+                with STATE.lock:
+                    scan_failures = [dict(failure) for failure in STATE.last_folder_scan_failures]
+                self._json({**snapshot, "importFailures": scan_failures})
             elif path == "/api/projects":
                 project, snapshot = self._catalog_transition_snapshot(
                     lambda: STATE.create_project(payload.get("name"), expected_project_id=expected_project_id,
@@ -1247,7 +1254,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                             raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
                     os.replace(temporary_path, thumbnail_path)
                     temporary_path = None
-                except (MemoryError, OSError) as exc:
+                except ClientError:
+                    raise
+                except IMAGE_DECODE_ERRORS as exc:
                     raise ClientError("サムネイルを作成できませんでした。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
                 finally:
                     if temporary_path is not None:

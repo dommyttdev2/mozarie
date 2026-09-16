@@ -72,6 +72,8 @@ class RuntimeProfileTests(unittest.TestCase):
     def test_preflight_allows_empty_environment_and_rejects_unusable_runtime(self) -> None:
         with patch.object(runtime_profile, "installed_profile", return_value=None):
             runtime_profile.preflight("cuda")
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "selected cuda ONNX Runtime is missing"):
+                runtime_profile.preflight("cuda", require_installed=True)
         with patch.object(runtime_profile, "installed_profile", return_value="cuda"):
             with patch.dict(sys.modules, {"onnxruntime": None}):
                 with self.assertRaisesRegex(runtime_profile.ProfileError, "cannot be imported"):
@@ -81,6 +83,15 @@ class RuntimeProfileTests(unittest.TestCase):
                 patch.dict(sys.modules, {"onnxruntime": ort}):
             with self.assertRaisesRegex(runtime_profile.ProfileError, "does not expose"):
                 runtime_profile.preflight("cuda")
+
+    def test_required_cuda_preflight_recovers_after_the_conflicting_cpu_runtime_is_removed(self) -> None:
+        cuda = type("Ort", (), {"get_available_providers": staticmethod(lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"])})
+        with patch.object(runtime_profile, "installed_profile", return_value="cpu"):
+            with self.assertRaisesRegex(runtime_profile.ProfileError, "selected cuda"):
+                runtime_profile.preflight("cuda", require_installed=True)
+        with patch.object(runtime_profile, "installed_profile", return_value="cuda"), \
+                patch.dict(sys.modules, {"onnxruntime": cuda}):
+            runtime_profile.preflight("cuda", require_installed=True)
 
     def test_show_returns_no_profile_for_missing_or_unsupported_marker_schema(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -153,7 +164,7 @@ class RuntimeProfileTests(unittest.TestCase):
         with patch.object(sys, "argv", ["runtime_profile.py", "preflight", "cpu"]), \
                 patch.object(runtime_profile, "preflight") as preflight:
             self.assertEqual(runtime_profile.main(), 0)
-        preflight.assert_called_once_with("cpu")
+        preflight.assert_called_once_with("cpu", require_installed=False)
 
         stderr = io.StringIO()
         with patch.object(sys, "argv", ["runtime_profile.py", "preflight"]), redirect_stderr(stderr):

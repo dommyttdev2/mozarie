@@ -66,7 +66,7 @@
 | SV-060 | GPU検出をキャンセル後に再実行 | GPU処理が残り続けず、次の検出を開始できる |
 | SV-061 | CPU検出を完了後に再実行 | 既存モデルを再利用し、毎回同じモデルの準備を繰り返さない |
 | SV-062 | PRの自動テストと静的確認が成功していることを確認 | バックエンド・フロントエンドの全テストと静的確認が成功している。失敗・skip・対象外のテストを残していない |
-| SV-063 | リリースのVERSION・タグ・ZIPを確認 | タグとZIP内VERSIONが一致し、`server.py`、`mozarie`、`static`、`config/defaults.json`、`run.bat`、`setup.bat`、`update.bat`、`VERSION`、`README.md`、`LICENSE`を含む。`AGENTS.md`、`.gitignore`、`.gitattributes`、`docs`は含まない |
+| SV-063 | リリースのVERSION・タグ・ZIPを確認 | タグとZIP内VERSIONが一致し、`server.py`、`mozarie`、`static`、`config/defaults.json`、`run.bat`、`setup.bat`、`update.bat`、`VERSION`、`README.md`、`LICENSE`、`.gitignore`、`.gitattributes`を含む。`AGENTS.md`、`docs`は含まない |
 | SV-064 | 新規展開したリリースでsetup→run | セットアップが完了し、新しい版の画面を開ける |
 | SV-065 | update.batで更新 | 更新後のVERSIONがリリースと一致し、設定とPJデータを保持する |
 | SV-066 | PRとリリースを開く | PRと説明は日本語、リリース名はバージョンだけ。説明は変更内容を簡潔に記載する |
@@ -91,3 +91,4 @@
 | SV-085 | 確定済み保存の応答を切断し、ackのjournal削除直後またはWorkspace receipt削除直前に終了する | 出力を巻き戻さず、再試行で両方の記録を完了する。 |
 | SV-086 | browser source のコピー後削除で、削除前読出しを拒否し、別ケースで削除後commitを4xx拒否する | 読出し不能時は元画像を削除せず出力を保持する。4xx後は永続化snapshotから復元し、復元不能時は成功表示しない。 |
 | SV-087 | browser単体の上書き・コピー後削除・背景一括上書きで、Workspace receipt確定後に保存journalの確定・完了・回復・ackを一時的に失敗させ、同じ操作を再送または再起動する | 確定済みの元画像・出力・一覧を巻き戻さず成功を表示する。未回収のreceiptだけを保持し、journal復旧後のackまたは起動時回復で後処理を完了する。確定前のjournal失敗では出力予約を解放して失敗を表示する。 |
+| SV-088 | 依存関係更新後に本体反映またはランタイム確認を失敗させ、同じReleaseで`update.bat`を再実行する | 更新途中の状態を保持し、同じVERSIONでも更新を再試行する。成功後は更新途中の印を消し、設定・モデル・作業データを保持する。 |

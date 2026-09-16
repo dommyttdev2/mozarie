@@ -69,6 +69,42 @@ def _fill_metadata_fluid_roi(search: np.ndarray, left: float, top: float, right:
     search[max(0, round(top)):min(height, round(bottom)), max(0, round(left)):min(width, round(right))] = 1
 
 
+def _inference_pixels(image: Image.Image) -> tuple[np.ndarray, np.ndarray | None]:
+    """Return detector pixels and the visible-image mask in edit coordinates."""
+    has_alpha = "A" in image.getbands() or (image.mode == "P" and "transparency" in image.info)
+    if not has_alpha:
+        return np.asarray(image.convert("RGB")).copy(), None
+    rgba = image.convert("RGBA")
+    alpha = np.asarray(rgba)[:, :, 3].copy()
+    background = Image.new("RGBA", image.size, (0, 0, 0, 255))
+    background.alpha_composite(rgba)
+    return np.asarray(background.convert("RGB")).copy(), alpha
+
+
+def _clip_detection_masks_to_alpha(segments: list[dict[str, Any]], alpha: np.ndarray | None) -> None:
+    """Keep published APPLY and EXCLUDE masks inside visible source pixels."""
+    if alpha is None:
+        return
+    visible = alpha > 0
+    clipped: dict[int, np.ndarray] = {}
+
+    def clip(mask: Any) -> np.ndarray:
+        value = np.asarray(mask)
+        key = id(value)
+        if key not in clipped:
+            clipped[key] = np.where(visible, value, 0)
+        return clipped[key]
+
+    for segment in segments:
+        for key in ("mask", "_detector_mask", "_apply_mask", "_confirmed_hand"):
+            if key in segment:
+                segment[key] = clip(segment[key])
+        for key in ("image_exclusions", "metadata_exclusions", "exclusions"):
+            masks = segment.get(key)
+            if isinstance(masks, dict):
+                segment[key] = {name: clip(mask) for name, mask in masks.items()}
+
+
 def TargetSegmenter(*args: Any, **kwargs: Any) -> Any:
     from .inference.yolo_segment import TargetSegmenter as implementation
     return implementation(*args, **kwargs)
@@ -486,7 +522,12 @@ class DetectionMixin:
     @staticmethod
     def _hand_boxes_over_apply(boxes: list[tuple[int, int, int, int]], masks: list[np.ndarray]) -> list[tuple[int, int, int, int]]:
         """Limit expensive hand segmentation to the final target envelope."""
-        coordinates = np.argwhere(np.any(np.asarray(masks) > 0, axis=0)) if masks else np.empty((0, 2), dtype=int)
+        if not masks:
+            return []
+        combined = np.zeros_like(np.asarray(masks[0]), dtype=bool)
+        for mask in masks:
+            np.logical_or(combined, np.asarray(mask) > 0, out=combined)
+        coordinates = np.argwhere(combined)
         if not len(coordinates):
             return []
         top, left = coordinates.min(axis=0); bottom, right = coordinates.max(axis=0) + 1
@@ -803,15 +844,16 @@ class DetectionMixin:
             self._assert_record_stat_matches(record)
             image, _source, info = canonical_image(record)
             scene_fluid_tags = _scene_fluid_tags(info)
-            rgb = np.asarray(image.convert("RGB")).copy()
-            has_alpha = "A" in image.getbands() or (image.mode == "P" and "transparency" in image.info)
-            alpha = np.asarray(image.convert("RGBA"))[:, :, 3].copy() if has_alpha else None
+            rgb, alpha = _inference_pixels(image)
         if fluid_exclusion_enabled is None:
             fluid_exclusion_enabled = bool(self.settings["detection"]["fluid_exclusion_enabled"])
         if not fluid_exclusion_enabled:
             scene_fluid_tags = frozenset()
         segments = self._detect_arbitrated_segments(models, rgb, confidence, target_classes or TARGET_CLASSES, scene_fluid_tags)
+        _clip_detection_masks_to_alpha(segments, alpha)
         detected, hand_mask, _ = self._hand_refinement_context(models, record, rgb, segments)
+        if alpha is not None:
+            hand_mask = np.where(alpha > 0, hand_mask, 0)
         needs_high_precision = mode == "high_precision" and bool(detected)
         if needs_high_precision:
             with self.sam_lock:
@@ -828,6 +870,7 @@ class DetectionMixin:
             fluid_exclusion_enabled=fluid_exclusion_enabled,
             fluid_color_fill=fluid_color_fill,
         )
+        _clip_detection_masks_to_alpha(segments, alpha)
         candidates: list[Candidate] = []
         destination = self.cache_dir / record.image_id
         destination.mkdir(parents=True, exist_ok=True)
@@ -934,7 +977,7 @@ class DetectionMixin:
             self._assert_record_stat_matches(record)
             try:
                 image, _source, _info = canonical_image(record)
-                rgb = np.asarray(image.convert("RGB")).copy()
+                rgb, alpha = _inference_pixels(image)
             except (MemoryError, OSError) as exc:
                 raise ClientError("境界候補用の画像を読み込めません。使用可能なメモリを確認してください。", "image_read_failed") from exc
         with self.inference_lock:
@@ -957,6 +1000,8 @@ class DetectionMixin:
             clipped = clip_mask_to_roi(mask, roi)
             if polygon_mask is not None:
                 clipped = np.where(polygon_mask > 0, clipped, 0).astype(np.uint8)
+            if alpha is not None:
+                clipped = np.where(alpha > 0, clipped, 0).astype(np.uint8)
             if not np.any(clipped):
                 raise ClientError("境界を検出できませんでした。別の位置をクリックしてください。", "outline_not_found")
         except (MemoryError, OSError) as exc:
@@ -1001,6 +1046,7 @@ class DetectionMixin:
                 if np.any(hand_mask):
                     boundary_segment["image_exclusions"] = {"hand": hand_mask}
                 boundary_segment = self._finalize_exclusions(rgb, [boundary_segment])[0]
+                _clip_detection_masks_to_alpha([boundary_segment], alpha)
                 candidate_id = uuid.uuid4().hex
                 default_padding = min(int(self.settings["detection"]["default_candidate_padding_px"]), int(np.ceil(np.hypot(record.width - 1, record.height - 1))))
                 default_exclude_padding = min(int(self.settings["detection"]["default_exclude_candidate_padding_px"]), int(np.ceil(np.hypot(record.width - 1, record.height - 1))))

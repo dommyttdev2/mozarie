@@ -46,11 +46,9 @@ function runNodeCoverage() {
       MOZARIE_JS_COVERAGE: "1",
       MOZARIE_BROWSER_COVERAGE_FILE: browserCoverageFile,
     },
-    encoding: "utf8",
+    stdio: "inherit",
   });
   if (result.error) throw result.error;
-  process.stdout.write(result.stdout || "");
-  process.stderr.write(result.stderr || "");
   assert.equal(result.status, 0, "the existing frontend and browser tests must pass before coverage is evaluated");
 }
 

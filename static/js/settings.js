@@ -28,8 +28,9 @@ function renderModelStatus() {
       }[key];
       return labelKey && model.reasonCode ? `${t(labelKey)}: ${t(`settings.modelStatus.${model.reasonCode}`)}` : "";
     }).filter(Boolean).join("\n");
-  const gpuMessage = state.settingsStatus?.gpuDeviceReasonCode
-    ? `${t("settings.gpu")}: ${t("settings.gpuUnsupported")}` : "";
+  const gpuReason = state.settingsStatus?.gpuDeviceReasonCode;
+  const gpuMessage = gpuReason
+    ? `${t("settings.gpu")}: ${t(gpuReason === "gpu_runtime_unavailable" ? "settings.gpuRuntimeUnavailable" : "settings.gpuUnsupported")}` : "";
   $("#settingsModelStatus").textContent = [modelMessage, gpuMessage].filter(Boolean).join("\n");
   renderSamVariantStatuses();
 }

@@ -256,7 +256,11 @@ function invalidatePendingImage() {
 async function restoreDeletionSelection(snapshot, imageIds) {
   const availableIds = new Set(state.images.map((image) => image.id));
   const removedIds = new Set([...imageIds].filter((imageId) => !availableIds.has(imageId)));
-  const target = snapshot.removesSelection && removedIds.size
+  // A batch can partially fail.  Only change the editor selection when the
+  // image that was actually current (or loading) was removed; deleting a
+  // different selected image must leave its canvas in place.
+  const removesSelection = removedIds.has(snapshot.currentImageId) || removedIds.has(snapshot.pendingImageId);
+  const target = removesSelection
     ? nextVisibleImage(snapshot.visibleImages, snapshot.anchorImageId, { excludedImageIds: removedIds, fallback: true })
     : null;
   const imageId = [target?.id, snapshot.pendingImageId, snapshot.currentImageId].find((id) => availableIds.has(id));
@@ -533,7 +537,7 @@ async function permanentlyDeleteImages(images, visibleImages) {
     if (state.project?.id && removed.size) await forgetProjectImageSources(state.project.id, [...removed]);
     loadReviewedPaths(); pruneSourceAccess();
     if (!state.images.length) { state.batchMode = false; clearBatchSelection(); }
-    if (selection.removesSelection) clearCurrentImageSelection();
+    if (removed.has(selection.currentImageId) || removed.has(selection.pendingImageId)) clearCurrentImageSelection();
     renderCatalogViews(); updateSelectionActionBar();
     await restoreDeletionSelection(selection, imageIds);
     const failed = [...new Map([...local.failed, ...(prepared.failed || []), ...browser.failed, ...(data.failed || [])]
@@ -609,6 +613,36 @@ function newClientKey() {
   return crypto.randomUUID();
 }
 
+function importFailure(entry, error) {
+  const relativePath = String(entry?.relativePath || entry?.file?.name || entry?.fileHandle?.name || "");
+  const unavailable = ["NotFoundError", "NotReadableError", "SecurityError"].includes(error?.name);
+  return { relativePath, reason: unavailable ? "file_unavailable" : (error?.code || "image_read_failed") };
+}
+
+function isFileLocalImportFailure(error) {
+  return ["image_read_failed", "image_format_unsupported"].includes(error?.code)
+    || ["NotFoundError", "NotReadableError", "SecurityError"].includes(error?.name);
+}
+
+function showImportFailures(failures, loaded, invoker = document.activeElement) {
+  if (!Array.isArray(failures) || !failures.length) return;
+  const normalized = failures
+    .filter((failure) => failure && typeof failure.relativePath === "string" && failure.relativePath)
+    .map((failure) => ({ relativePath: failure.relativePath, reason: typeof failure.reason === "string" ? failure.reason : "image_read_failed" }))
+    .sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  if (!normalized.length) return;
+  $("#importFailuresTitle").textContent = t("importFailures.title");
+  $("#importFailuresSummary").textContent = t("importFailures.summary", { loaded, failed: normalized.length });
+  const list = $("#importFailuresList"); list.textContent = "";
+  for (const failure of normalized) {
+    const item = document.createElement("li");
+    const reason = t(`importFailures.reason.${failure.reason}`) || t("importFailures.reason.image_read_failed");
+    item.textContent = `${failure.relativePath}: ${reason}`;
+    list.append(item);
+  }
+  showModalFromInvoker($("#importFailuresDialog"), invoker);
+}
+
 function pruneSourceAccess() {
   const imageIds = new Set(state.images.map((image) => image.id));
   for (const imageId of state.sourceAccess.keys()) if (!imageIds.has(imageId)) state.sourceAccess.delete(imageId);
@@ -647,7 +681,7 @@ async function importFiles(files) {
     await flushAllImageMutations();
     await flushAllWorkspaceMutations();
     await startImportServerSession(session);
-    session.total = supportedFiles.length; session.completed = 0; session.paused = false; session.cancelled = false;
+    session.total = supportedFiles.length; session.completed = 0; session.successes = 0; session.failures = []; session.paused = false; session.cancelled = false;
     showProcessing({ kind: "import", state: "running", total: session.total, completed: 0, current: "" });
     session.requestedParallelism = importParallelism();
     const workerCount = Math.min(supportedFiles.length, session.requestedParallelism);
@@ -669,6 +703,12 @@ async function importFiles(files) {
             showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: descriptor.relativePath || descriptor.fileHandle.name });
             continue;
           }
+          if (isFileLocalImportFailure(error)) {
+            session.failures.push(importFailure(descriptor, error));
+            session.completed += 1;
+            showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: descriptor.relativePath || descriptor.fileHandle?.name || "" });
+            continue;
+          }
           throw error;
         }
         if (session.cancelled || state.importSession !== session) return;
@@ -683,6 +723,12 @@ async function importFiles(files) {
           if (stagedSource && Number.isInteger(error?.status) && error.status >= 400 && error.status < 500) {
             await forgetPendingProjectSource(session.catalogId, session.sourceId, clientKey);
           }
+          if (isFileLocalImportFailure(error)) {
+            session.failures.push(importFailure(entry, error));
+            session.completed += 1;
+            showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
+            continue;
+          }
           throw error;
         }
         if (!session.catalogId && data.catalogId) session.catalogId = data.catalogId;
@@ -691,6 +737,7 @@ async function importFiles(files) {
         // cancellation or an unrelated upload failure.
         await rememberImportedSource(result, session);
         session.completed += 1;
+        session.successes += 1;
         showProcessing({ kind: "import", state: "running", total: session.total, completed: session.completed, current: entry.relativePath });
       }
     };
@@ -713,7 +760,9 @@ async function importFiles(files) {
     state.images = latest.images;
     loadReviewedPaths();
     if (session.missingFileHandles) showUserError({ code: "project_source_unavailable" });
-    pruneSourceAccess(); renderCatalogViews(); setStatusKey("gallery.imported", { count: supportedFiles.length });
+    pruneSourceAccess(); renderCatalogViews(); setStatusKey("gallery.imported", { count: session.successes });
+    showImportFailures(session.failures, session.successes);
+    session.failed = session.failures.length > 0;
     return !session.missingFileHandles;
   } catch (error) {
     session.failed = true;

@@ -28,6 +28,10 @@ from .save_journal import SaveJournal
 _IMAGE_OPEN_LOCK = threading.RLock()
 _IMAGE_OPEN_DEPTH = 0
 _IMAGE_OPEN_PREVIOUS_LIMIT: int | None = None
+IMAGE_DECODE_ERRORS = (
+    MemoryError, OSError, RuntimeError, ValueError, SyntaxError,
+    UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning,
+)
 
 
 @contextmanager
@@ -307,21 +311,27 @@ def open_image_without_png_text(path: Path, raw: bytes | None = None):
 
 
 def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
-    """Validate an input image without decoding its complete pixel payload."""
+    """Validate an input image completely before publishing it to the catalogue."""
     try:
         with open_image_without_png_text(path) as image:
             _assert_image_suffix_matches_format(expected_suffix, image.format)
             size = oriented_image_size(image)
         with open_image_without_png_text(path) as image:
             image.verify()
+        with open_image_without_png_text(path) as image:
+            _assert_image_suffix_matches_format(expected_suffix, image.format)
+            image.load()
+            if oriented_image_size(image) != size:
+                raise OSError("image dimensions changed while decoding")
         if expected_suffix.lower() in {".jpg", ".jpeg"}:
             with path.open("rb") as source:
                 source.seek(-2, os.SEEK_END)
                 if source.read() != b"\xff\xd9":
                     raise OSError("truncated JPEG")
         return size
-    except (MemoryError, OSError, RuntimeError, ValueError, SyntaxError, UnidentifiedImageError,
-            Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+    except ClientError:
+        raise
+    except IMAGE_DECODE_ERRORS as exc:
         raise ClientError("追加画像を読み込めません。", "image_read_failed") from exc
 
 
@@ -479,13 +489,20 @@ def _apply_mosaic_to_image(image: Image.Image, mask: np.ndarray, block_size: int
     return Image.fromarray(output)
 
 
-def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:
-    if not isinstance(data_url, str) or not data_url.startswith("data:image/png;base64,"):
-        raise ClientError("PNG形式の編集マスクが必要です。", "input_invalid")
-    try:
-        raw = base64.b64decode(data_url.split(",", 1)[1], validate=True)
-    except (IndexError, binascii.Error) as exc:
-        raise ClientError("編集マスクを読み込めません。", "input_invalid") from exc
+def _decode_mask(data: str | bytes, width: int, height: int) -> np.ndarray:
+    """Decode a browser data URL or a staged, trusted PNG layer.
+
+    Both paths pass through the same PNG, dimensions, and channel validation.
+    """
+    if isinstance(data, bytes):
+        raw = data
+    else:
+        if not isinstance(data, str) or not data.startswith("data:image/png;base64,"):
+            raise ClientError("PNG形式の編集マスクが必要です。", "input_invalid")
+        try:
+            raw = base64.b64decode(data.split(",", 1)[1], validate=True)
+        except (IndexError, binascii.Error) as exc:
+            raise ClientError("編集マスクを読み込めません。", "input_invalid") from exc
     try:
         with open_image(io.BytesIO(raw)) as image:
             if image.format != "PNG":
@@ -512,9 +529,9 @@ def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndar
     exclusion = raw_draft.get("exclusion") if raw_draft.get("manualExclusionEnabled", True) is not False else None
     exclusion_erase = raw_draft.get("exclusionErase") if raw_draft.get("manualExclusionEraseEnabled", True) is not False else None
     return (
-        _decode_mask(str(add), width, height) if add else None,
-        _decode_mask(str(exclusion), width, height) if exclusion else None,
-        _decode_mask(str(exclusion_erase), width, height) if exclusion_erase else None,
+        _decode_mask(add, width, height) if add else None,
+        _decode_mask(exclusion, width, height) if exclusion else None,
+        _decode_mask(exclusion_erase, width, height) if exclusion_erase else None,
     )
 
 
@@ -579,7 +596,9 @@ def canonical_image(record: ImageRecord, source: bytes | None = None) -> tuple[I
             image.load()
             normalized = ImageOps.exif_transpose(image)
             info = dict(image.info)
-    except (MemoryError, OSError) as exc:
+    except ClientError:
+        raise
+    except IMAGE_DECODE_ERRORS as exc:
         raise ClientError("元画像を読み込めません。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
     if "exif" in info:
         info["exif"] = _normalized_exif_bytes(raw)

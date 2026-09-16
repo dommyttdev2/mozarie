@@ -1101,12 +1101,14 @@ class MozarieTests(unittest.TestCase):
         ])
         state = self.new_state()
         state.settings["models"].update({"provider": "gpu", "gpu_device": 1})
-        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
             status = state.settings_status()
         self.assertFalse(status["gpuDeviceValid"])
         self.assertEqual(status["gpuDeviceReasonCode"], "gpu_unsupported")
         state.settings["models"]["provider"] = "cpu"
-        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
             self.assertTrue(state.settings_status()["gpuDeviceValid"])
 
     def test_cuda_status_treats_an_empty_pytorch_arch_list_as_unchecked(self):
@@ -1124,14 +1126,16 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         no_cuda = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))
         state.settings["models"].update({"provider": "gpu", "gpu_device": 0})
-        with patch.object(state_module, "torch_module", return_value=no_cuda):
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=no_cuda):
             missing = state.settings_status()
         self.assertEqual(missing["gpus"], [])
         self.assertFalse(missing["gpuDeviceValid"])
         self.assertEqual(missing["gpuDeviceReasonCode"], "gpu_unsupported")
 
         state.settings["models"]["provider"] = "cpu"
-        with patch.object(state_module, "torch_module", return_value=no_cuda):
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=no_cuda):
             cpu = state.settings_status()
         self.assertEqual(cpu["gpus"], [])
         self.assertTrue(cpu["gpuDeviceValid"])
@@ -1152,7 +1156,8 @@ class MozarieTests(unittest.TestCase):
             with self.subTest(gpu_device=gpu_device):
                 update = copy.deepcopy(state.settings)
                 update["models"].update({"provider": "gpu", "gpu_device": gpu_device})
-                with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+                with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+                     patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
                      patch.object(state.settings_store, "save") as save, \
                      self.assertRaisesRegex(ClientError, "選択したGPU") as raised:
                     state.update_settings(update)
@@ -1161,7 +1166,8 @@ class MozarieTests(unittest.TestCase):
 
         update = copy.deepcopy(state.settings)
         update["models"].update({"provider": "gpu", "gpu_device": 0})
-        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
              patch.object(state.settings_store, "save", return_value=update) as save:
             state.update_settings(update)
         save.assert_called_once_with(update)
@@ -1169,12 +1175,29 @@ class MozarieTests(unittest.TestCase):
         unchanged_invalid = copy.deepcopy(state.settings)
         unchanged_invalid["models"].update({"provider": "gpu", "gpu_device": 1})
         state.settings = unchanged_invalid
-        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
              patch.object(state.settings_store, "save") as save, \
              self.assertRaisesRegex(ClientError, "選択したGPU") as raised:
             state.update_settings(unchanged_invalid)
         self.assertEqual(raised.exception.error_code, "gpu_unsupported")
         save.assert_not_called()
+
+    def test_settings_status_rejects_a_gpu_when_onnx_exports_only_cpu(self):
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True, get_arch_list=lambda: ["sm_89"], device_count=lambda: 1,
+            get_device_capability=lambda _index: (8, 9), get_device_name=lambda _index: "RTX Test",
+            get_device_properties=lambda _index: types.SimpleNamespace(total_memory=16 * 1024 ** 3),
+        )
+        state = self.new_state()
+        state.settings["models"].update({"provider": "gpu", "gpu_device": 0})
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", False)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+            status = state.settings_status()
+        self.assertEqual(status["runtimeBackend"], "cuda")
+        self.assertFalse(status["runtimeReady"])
+        self.assertFalse(status["gpuDeviceValid"])
+        self.assertEqual(status["gpuDeviceReasonCode"], "gpu_runtime_unavailable")
 
     def test_detection_rejects_an_unsupported_gpu_before_loading_models(self):
         state = self.new_state()
@@ -1187,7 +1210,8 @@ class MozarieTests(unittest.TestCase):
             get_device_name=lambda index: ["RTX Test", "Legacy Test"][index],
             get_device_properties=lambda index: types.SimpleNamespace(total_memory=[16, 3][index] * 1024 ** 3),
         )
-        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
              patch.object(state, "_start_job") as start:
             with self.assertRaisesRegex(ClientError, "選択したGPU") as raised:
                 state.start_detection([])
@@ -1896,6 +1920,110 @@ class MozarieTests(unittest.TestCase):
             self.assertFalse(mask_path.exists())
             self.assertEqual(state.list_candidates(image_id), [])
             self.assertFalse(state.delete_candidate(image_id, "candidate"))
+
+    def test_candidate_delete_keeps_the_durable_revision_when_cache_unlink_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            initial_revision = self.commit_candidates(state, image_id)
+            with state.workspace_store._connect() as db:
+                history_before = db.execute("SELECT COUNT(*) FROM history_entries WHERE image_id=?", (image_id,)).fetchone()[0]
+            unlink = Path.unlink
+
+            def locked_unlink(target, *args, **kwargs):
+                if target == mask_path:
+                    raise PermissionError("preview holds candidate cache")
+                return unlink(target, *args, **kwargs)
+
+            with patch.object(Path, "unlink", autospec=True, side_effect=locked_unlink):
+                self.assertTrue(state.delete_candidate(image_id, "candidate"))
+
+            self.assertEqual(state._candidate_revision(image_id), initial_revision + 1)
+            self.assertEqual(state.list_candidates(image_id), [])
+            with state.workspace_store._connect() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM history_entries WHERE image_id=?", (image_id,)).fetchone()[0], history_before + 1)
+
+    def test_candidate_delete_commits_one_revision_and_history_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            mask_path = state.cache_dir / image_id / "candidate.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
+            initial_revision = self.commit_candidates(state, image_id)
+            with state.workspace_store._connect() as db:
+                history_before = db.execute("SELECT COUNT(*) FROM history_entries WHERE image_id=?", (image_id,)).fetchone()[0]
+
+            self.assertTrue(state.delete_candidate(image_id, "candidate"))
+
+            self.assertFalse(mask_path.exists())
+            self.assertEqual(state._candidate_revision(image_id), initial_revision + 1)
+            with state.workspace_store._connect() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM history_entries WHERE image_id=?", (image_id,)).fetchone()[0], history_before + 1)
+
+    def test_batch_candidate_delete_keeps_one_durable_history_when_cache_unlink_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            candidates = []
+            for candidate_id in ("first", "second"):
+                mask_path = state.cache_dir / image_id / f"{candidate_id}.png"
+                mask_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(self._mask(16, 16)).save(mask_path)
+                candidates.append(Candidate(candidate_id, "penis", 0.9, mask_path))
+            state.candidates[image_id] = candidates
+            initial_revision = self.commit_candidates(state, image_id)
+            with state.workspace_store._connect() as db:
+                history_before = db.execute("SELECT COUNT(*) FROM history_entries WHERE image_id=?", (image_id,)).fetchone()[0]
+            unlink = Path.unlink
+
+            def locked_unlink(target, *args, **kwargs):
+                if target in {candidate.mask_path for candidate in candidates}:
+                    raise PermissionError("preview holds candidate cache")
+                return unlink(target, *args, **kwargs)
+
+            with patch.object(Path, "unlink", autospec=True, side_effect=locked_unlink):
+                revision = state.batch_update_candidates(image_id, {"role": "apply", "operation": "delete"})
+
+            self.assertEqual(revision, initial_revision + 1)
+            self.assertEqual(state.list_candidates(image_id), [])
+            with state.workspace_store._connect() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM history_entries WHERE image_id=?", (image_id,)).fetchone()[0], history_before + 1)
+
+    def test_batch_candidate_delete_commits_one_revision_and_history_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(path)
+            state = self.new_state()
+            image_id = state.set_root(directory)[0]["id"]
+            candidates = []
+            for candidate_id in ("first", "second"):
+                mask_path = state.cache_dir / image_id / f"{candidate_id}.png"
+                mask_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(self._mask(16, 16)).save(mask_path)
+                candidates.append(Candidate(candidate_id, "penis", 0.9, mask_path))
+            state.candidates[image_id] = candidates
+            initial_revision = self.commit_candidates(state, image_id)
+            with state.workspace_store._connect() as db:
+                history_before = db.execute("SELECT COUNT(*) FROM history_entries WHERE image_id=?", (image_id,)).fetchone()[0]
+
+            revision = state.batch_update_candidates(image_id, {"role": "apply", "operation": "delete"})
+
+            self.assertEqual(revision, initial_revision + 1)
+            self.assertTrue(all(not candidate.mask_path.exists() for candidate in candidates))
+            with state.workspace_store._connect() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM history_entries WHERE image_id=?", (image_id,)).fetchone()[0], history_before + 1)
 
     def test_image_listing_reports_enabled_candidates_for_gallery_filtering(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3568,16 +3696,23 @@ class MozarieTests(unittest.TestCase):
                 connection.request("GET", "/api/health")
                 response = connection.getresponse(); payload = json.loads(response.read())
                 connection.close()
-            return payload["modelsConfigured"]
+            return payload
 
         try:
             for provider in ("cpu", "gpu"):
                 state.settings["models"]["provider"] = provider
-                self.assertTrue(health(status))
+                payload = health(status)
+                self.assertTrue(payload["modelsConfigured"])
+                if provider == "gpu":
+                    self.assertTrue(payload["runtimeReady"])
+                    runtime_missing = copy.deepcopy(status)
+                    runtime_missing["runtimeReady"] = False
+                    runtime_missing["gpuDeviceValid"] = False
+                    self.assertFalse(health(runtime_missing)["modelsConfigured"])
                 handseg_missing = copy.deepcopy(status); handseg_missing["models"]["hand_segmentation"] = {"required": False, "enabled": True, "valid": False}
-                self.assertFalse(health(handseg_missing))
+                self.assertFalse(health(handseg_missing)["modelsConfigured"])
                 high_precision_missing_sam = copy.deepcopy(status); high_precision_missing_sam["models"]["sam_checkpoint"] = {"required": True, "enabled": True, "valid": False}
-                self.assertFalse(health(high_precision_missing_sam))
+                self.assertFalse(health(high_precision_missing_sam)["modelsConfigured"])
         finally:
             httpd.shutdown(); httpd.server_close()
 
@@ -5996,6 +6131,83 @@ class MozarieTests(unittest.TestCase):
             records = state.list_images()
             self.assertEqual(records[0]["id"], imported[0]["imageId"])
             self.assertEqual(records[0]["relativePath"], "nested/first.png")
+
+    def test_browser_reimport_rolls_back_a_source_transform_reset_when_hydration_fails(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (4, 4), "white").save(root / "native.png")
+            state = self.new_state()
+            state.set_root(directory)
+            first_raw = io.BytesIO()
+            Image.new("RGB", (8, 8), "white").save(first_raw, format="PNG")
+            first_stage = root / "first.upload"
+            first_stage.write_bytes(first_raw.getvalue())
+            _images, imported = state.import_image_file_for_api(
+                first_stage, name="reload.png", relative_path="reload.png", client_key="first",
+                include_images=False, source_identity="browser-reload", source_kind="browser-directory",
+                intent="add", mtime_ns=1, size_bytes=len(first_raw.getvalue()),
+            )
+            image_id = imported[0]["imageId"]
+            state.workspace_store.set_image_transform(image_id, True, False)
+            with state.workspace_store._connect() as db:
+                db.execute("UPDATE image_transforms SET source_flip_horizontal=1,source_flip_vertical=0,revision=37 WHERE image_id=?", (image_id,))
+
+            replacement_raw = io.BytesIO()
+            Image.new("RGB", (10, 8), "white").save(replacement_raw, format="PNG")
+            replacement_stage = root / "replacement.upload"
+            replacement_stage.write_bytes(replacement_raw.getvalue())
+            with patch.object(state.workspace_store, "hydrate_candidates", side_effect=ValueError("injected hydrate failure")):
+                with self.assertRaisesRegex(ValueError, "injected hydrate failure"):
+                    state.import_image_file_for_api(
+                        replacement_stage, name="reload.png", relative_path="reload.png", client_key="replacement",
+                        include_images=False, source_identity="browser-reload", source_kind="browser-directory",
+                        intent="add", mtime_ns=2, size_bytes=len(replacement_raw.getvalue()),
+                    )
+
+            self.assertEqual(state.workspace_store.image_transform(image_id), {
+                "flipHorizontal": True, "flipVertical": False,
+                "sourceFlipHorizontal": True, "sourceFlipVertical": False,
+                "transformRevision": 37,
+            })
+            self.assertEqual(state.image_for_id(image_id).width, 8)
+
+    def test_browser_reimport_commits_an_external_source_transform_reset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (4, 4), "white").save(root / "native.png")
+            state = self.new_state()
+            state.set_root(directory)
+            first_raw = io.BytesIO()
+            Image.new("RGB", (8, 8), "white").save(first_raw, format="PNG")
+            first_stage = root / "first.upload"
+            first_stage.write_bytes(first_raw.getvalue())
+            _images, imported = state.import_image_file_for_api(
+                first_stage, name="reload.png", relative_path="reload.png", client_key="first",
+                include_images=False, source_identity="browser-reload", source_kind="browser-directory",
+                intent="add", mtime_ns=1, size_bytes=len(first_raw.getvalue()),
+            )
+            image_id = imported[0]["imageId"]
+            state.workspace_store.set_image_transform(image_id, True, False)
+            with state.workspace_store._connect() as db:
+                db.execute("UPDATE image_transforms SET source_flip_horizontal=1,source_flip_vertical=0,revision=37 WHERE image_id=?", (image_id,))
+
+            replacement_raw = io.BytesIO()
+            Image.new("RGB", (10, 8), "white").save(replacement_raw, format="PNG")
+            replacement_stage = root / "replacement.upload"
+            replacement_stage.write_bytes(replacement_raw.getvalue())
+            _images, replacement = state.import_image_file_for_api(
+                replacement_stage, name="reload.png", relative_path="reload.png", client_key="replacement",
+                include_images=False, source_identity="browser-reload", source_kind="browser-directory",
+                intent="add", mtime_ns=2, size_bytes=len(replacement_raw.getvalue()),
+            )
+
+            self.assertEqual(replacement[0]["imageId"], image_id)
+            self.assertEqual(state.workspace_store.image_transform(image_id), {
+                "flipHorizontal": True, "flipVertical": False,
+                "sourceFlipHorizontal": False, "sourceFlipVertical": False,
+                "transformRevision": 38,
+            })
+            self.assertEqual(state.image_for_id(image_id).width, 10)
     def test_detect_endpoint_forwards_validated_parallelism(self):
         from http.server import ThreadingHTTPServer
 
@@ -7526,6 +7738,172 @@ class MozarieTests(unittest.TestCase):
             self.assertLessEqual(peak, 3)
             self.assertGreaterEqual(peak, 2)
             self.assertEqual([record["relativePath"] for record in records], ["a.png", "B.png", "c.png", "nested/d.png"])
+
+    def test_folder_scan_loads_every_normal_file_in_deterministic_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = []
+            for index in range(80):
+                relative = Path(f"part-{index % 5}") / f"image-{79 - index:03}.png"
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (8, 8), "white").save(path)
+                expected.append(relative.as_posix())
+            state = self.new_state()
+            state.settings["importing"]["parallelism"] = 4
+
+            records = state.set_root(str(root))
+
+            self.assertEqual(len(records), len(expected))
+            self.assertEqual([record["relativePath"] for record in records], sorted(expected, key=lambda value: (value.casefold(), value)))
+
+    def test_folder_scan_starts_inspection_before_tree_enumeration_finishes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("first.png", "second.png"):
+                Image.new("RGB", (8, 8), "white").save(root / name)
+            state = self.new_state()
+            inspection_started = threading.Event()
+            enumeration_finished = threading.Event()
+            original_inspect = catalog_module.inspect_import_image
+
+            def staged_rglob(path, pattern):
+                self.assertTrue(path.samefile(root))
+                self.assertEqual(pattern, "*")
+                yield root / "first.png"
+                self.assertTrue(inspection_started.wait(1), "inspection must begin while enumeration is blocked")
+                yield root / "second.png"
+                enumeration_finished.set()
+
+            def tracked_inspect(path, suffix):
+                inspection_started.set()
+                return original_inspect(path, suffix)
+
+            with patch.object(Path, "rglob", autospec=True, side_effect=staged_rglob), \
+                    patch.object(catalog_module, "inspect_import_image", side_effect=tracked_inspect):
+                records = state.set_root(str(root))
+
+            self.assertTrue(enumeration_finished.is_set())
+            self.assertEqual([record["relativePath"] for record in records], ["first.png", "second.png"])
+
+    def test_folder_scan_does_not_hold_the_import_lock_during_image_io(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(root / "first.png")
+            state = self.new_state()
+            entered = threading.Event()
+            release = threading.Event()
+            finished = threading.Event()
+            original_inspect = catalog_module.inspect_import_image
+
+            def blocked_inspect(path, suffix):
+                entered.set()
+                self.assertTrue(release.wait(1), "scan test must release its controlled image read")
+                return original_inspect(path, suffix)
+
+            def load_root():
+                try:
+                    state.set_root(str(root))
+                finally:
+                    finished.set()
+
+            with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
+                loader = threading.Thread(target=load_root)
+                loader.start()
+                self.assertTrue(entered.wait(1))
+                self.assertTrue(state.import_lock.acquire(blocking=False))
+                state.import_lock.release()
+                release.set()
+                self.assertTrue(finished.wait(1))
+                loader.join()
+
+    def test_folder_scan_rejects_a_catalogue_change_after_releasing_the_import_lock(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(root / "first.png")
+            state = self.new_state()
+            entered = threading.Event()
+            release = threading.Event()
+            result = []
+            original_inspect = catalog_module.inspect_import_image
+
+            def blocked_inspect(path, suffix):
+                entered.set()
+                self.assertTrue(release.wait(1), "scan test must release its controlled image read")
+                return original_inspect(path, suffix)
+
+            def load_root():
+                try:
+                    state.set_root(str(root))
+                except ClientError as exc:
+                    result.append(exc)
+
+            with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
+                loader = threading.Thread(target=load_root)
+                loader.start()
+                self.assertTrue(entered.wait(1))
+                with state.lock:
+                    state.catalog_generation += 1
+                release.set()
+                loader.join()
+
+            self.assertEqual(len(result), 1)
+            self.assertEqual(result[0].error_code, "stale_catalog")
+            self.assertEqual(state.list_images(), [])
+
+    def test_folder_scan_restores_the_callers_import_lock_after_worker_failure(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (8, 8), "white").save(root / "first.png")
+            state = self.new_state()
+            state.import_lock.acquire()
+            try:
+                with patch.object(catalog_module, "inspect_import_image", side_effect=RuntimeError("injected scan failure")):
+                    with self.assertRaisesRegex(RuntimeError, "injected scan failure"):
+                        state._set_root(str(root))
+
+                acquired_elsewhere = []
+
+                def try_acquire():
+                    acquired_elsewhere.append(state.import_lock.acquire(blocking=False))
+                    if acquired_elsewhere[-1]:
+                        state.import_lock.release()
+
+                contender = threading.Thread(target=try_acquire)
+                contender.start()
+                contender.join()
+                self.assertEqual(acquired_elsewhere, [False])
+            finally:
+                state.import_lock.release()
+
+    def test_folder_scan_stops_enumerating_when_shutdown_begins(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            names = [f"{index:02}.png" for index in range(20)]
+            for name in names:
+                Image.new("RGB", (8, 8), "white").save(root / name)
+            state = self.new_state()
+            enumerated = []
+            original_inspect = catalog_module.inspect_import_image
+
+            def tracked_rglob(path, pattern):
+                self.assertTrue(path.samefile(root))
+                for name in names:
+                    enumerated.append(name)
+                    yield root / name
+
+            def stop_during_first_inspection(path, suffix):
+                state.shutdown_requested.set()
+                return original_inspect(path, suffix)
+
+            with patch.object(Path, "rglob", autospec=True, side_effect=tracked_rglob), \
+                    patch.object(catalog_module, "inspect_import_image", side_effect=stop_during_first_inspection):
+                with self.assertRaises(ClientError) as cancelled:
+                    state.set_root(str(root))
+
+            self.assertEqual(cancelled.exception.error_code, "operation_cancelled")
+            self.assertLess(len(enumerated), len(names))
+            self.assertEqual(state.list_images(), [])
 
     def test_browser_render_uses_one_source_read(self):
         with tempfile.TemporaryDirectory() as directory:

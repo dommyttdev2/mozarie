@@ -10,7 +10,7 @@ test("project Ctrl+Z flushes the durable edit and keeps browser history canvases
   try {
     context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     page = await context.newPage();
-    await page.goto(fixture.url, { waitUntil: "networkidle" });
+    await page.goto(fixture.url, { waitUntil: "domcontentloaded" });
     await page.locator('.gallery-item[data-id="sample"]').click();
     await page.waitForFunction(() => state.currentId === "sample" && state.currentImage);
     await page.evaluate(() => {

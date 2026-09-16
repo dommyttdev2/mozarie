@@ -1221,19 +1221,19 @@ async function runSaveKeepsCatalogueAndEditorStateCase() {
   runtime.state.candidateImages = new Map([["candidate", {}]]);
   runtime.state.drafts = new Map([[first.id, { add: "manual", exclusion: "exclude", hasEffectiveMask: true }], [second.id, { add: "manual-2", hasEffectiveMask: true }]]);
   runtime.state.maskStatus = new Map([[first.id, true], [second.id, true]]);
-  runtime.state.reviewedPaths = new Set([first.relativePath, second.relativePath]);
-  runtime.state.hiddenPaths = new Set([second.relativePath]);
+  runtime.state.reviewedImageIds = new Set([first.id, second.id]);
+  runtime.state.hiddenImageIds = new Set([second.id]);
 
-  assert.deepEqual(Array.from(runtime.saveTargets()), [first.id, second.id], "the normal batch target is every image in the list");
-  await runtime.runBrowserSave([first.id, second.id], "_censored", false, "copy");
-  await runtime.runBrowserSave([first.id, second.id], "_censored", false, "copy");
+  assert.deepEqual(Array.from(runtime.saveTargets()), [first.id], "the normal batch target excludes hidden images");
+  await runtime.runBrowserSave([first.id], "_censored", false, "copy");
+  await runtime.runBrowserSave([first.id], "_censored", false, "copy");
 
   assert.deepEqual(runtime.state.images, [first, second], "two consecutive saves keep every catalogue image");
   assert.equal(runtime.state.drafts.get(first.id).add, "manual", "saving retains manual masks");
   assert.equal(runtime.state.drafts.get(first.id).exclusion, "exclude", "saving retains exclusions");
   assert.equal(runtime.state.candidates.length, 1, "saving retains current candidates");
-  assert.deepEqual(Array.from(runtime.state.reviewedPaths), [first.relativePath, second.relativePath], "saving does not change reviewed state");
-  assert.deepEqual(Array.from(runtime.state.hiddenPaths), [second.relativePath], "saving does not change hidden state");
+  assert.deepEqual(Array.from(runtime.state.reviewedImageIds), [first.id, second.id], "saving does not change reviewed state");
+  assert.deepEqual(Array.from(runtime.state.hiddenImageIds), [second.id], "saving does not change hidden state");
   assert.equal(runtime.requests.some((request) => request.path === "/api/catalog/remove"), false, "saving never removes list entries");
 }
 

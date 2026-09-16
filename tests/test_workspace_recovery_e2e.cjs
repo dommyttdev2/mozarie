@@ -59,7 +59,7 @@ test("workspace recovery page loads translations once and recreates once before 
   page.on("request", (request) => requests.push(new URL(request.url()).pathname));
   await page.addInitScript(() => { window.confirm = () => true; });
 
-  await page.goto(fixture.origin, { waitUntil: "networkidle" });
+  await page.goto(fixture.origin, { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => document.querySelector("#recreate")?.textContent?.trim());
   assert.equal(pageErrors.length, 0, `recovery page must not throw: ${pageErrors.join("\n")}`);
   assert.equal(requests.filter((pathname) => /^\/i18n\/(?:ja|en)\.json$/.test(pathname)).length, 1, "translations are requested once");
@@ -67,7 +67,7 @@ test("workspace recovery page loads translations once and recreates once before 
   const englishContext = await browser.newContext();
   const englishPage = await englishContext.newPage();
   await englishPage.addInitScript(() => localStorage.setItem("mozarie-language", "en"));
-  await englishPage.goto(`${fixture.origin}/index.html`, { waitUntil: "networkidle" });
+  await englishPage.goto(`${fixture.origin}/index.html`, { waitUntil: "domcontentloaded" });
   assert.match(await englishPage.locator("#recreate").innerText(), /recreate/i, "the canonical English recovery page is translated");
   await englishContext.close();
 
