@@ -4038,9 +4038,12 @@ async function main() {
     assert.equal(selectionMenu.right, selectionMenu.buttonRight, "selection menu right edge anchors to its button");
     assert.ok(selectionMenu.top >= selectionMenu.buttonBottom && selectionMenu.right <= selectionMenu.viewportWidth && selectionMenu.bottom <= selectionMenu.viewportHeight, `selection menu is visibly anchored below its button: ${JSON.stringify(selectionMenu)}`);
     const batchDetectRequest = page.waitForRequest((request) => new URL(request.url()).pathname === "/api/detect" && request.method() === "POST");
+    const batchDetectResponse = page.waitForResponse((response) => new URL(response.url()).pathname === "/api/detect" && response.request().method() === "POST");
     await page.locator('[data-selection-action="detect"]').click();
     await page.locator("#detectStartButton").click();
     const postedDetectRequest = await batchDetectRequest;
+    const postedDetectResponse = await batchDetectResponse;
+    assert.equal(postedDetectResponse.ok(), true, "batch auto detect completes before its server-side request ledger is inspected");
     assert.deepEqual(postedDetectRequest.postDataJSON().imageIds.sort(), ["sample", "sample-two"], "batch auto detect posts exactly the selected gallery ids");
     assert.equal(detectRequests.length, batchDetectBefore + 1, "batch auto detect sends exactly one request");
     assert.deepEqual(detectRequests.at(-1).imageIds.sort(), ["sample", "sample-two"], "batch auto detect receives exactly the selected gallery ids");

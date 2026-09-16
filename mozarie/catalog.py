@@ -131,11 +131,13 @@ class CatalogMixin:
         ]
         if not stale_ids:
             return
-        for image_id in stale_ids:
-            shutil.rmtree(self.cache_dir / image_id, ignore_errors=True)
         hydrated = self.workspace_store.hydrate_candidates_bulk(
             stale_ids, self.cache_dir, self._candidate_from_workspace,
         )
+        # Validate every durable row before discarding the still-usable live
+        # cache. A broken workspace row must not damage the current view.
+        for image_id in stale_ids:
+            shutil.rmtree(self.cache_dir / image_id, ignore_errors=True)
         for image_id in stale_ids:
             revision, candidates = hydrated[image_id]
             self.candidates[image_id] = candidates

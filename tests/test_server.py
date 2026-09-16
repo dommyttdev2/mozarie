@@ -2405,6 +2405,28 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.job.error_code, "catalog_changed")
             self.assertFalse(pending_path.exists())
 
+    def test_detection_resync_failure_keeps_the_existing_candidate_cache(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (16, 16), "white").save(root / "source.png")
+            state = self.new_state()
+            image_id = state.set_root(str(root))[0]["id"]
+            mask_path = state.cache_dir / image_id / "existing.png"
+            mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            existing = Candidate("existing", "penis", .8, mask_path)
+            state.candidates[image_id] = [existing]
+            state.workspace_store.commit_candidate_state(image_id, 1, [], False, replace=True)
+
+            with patch.object(state, "_require_supported_gpu"), \
+                    patch.object(state.workspace_store, "hydrate_candidates_bulk", side_effect=ValueError("broken durable candidate")):
+                with self.assertRaisesRegex(ValueError, "broken durable candidate"):
+                    state.start_detection([image_id])
+
+            self.assertEqual(state._candidate_revision(image_id), 0)
+            self.assertEqual(state.candidates[image_id], [existing])
+            self.assertTrue(mask_path.is_file())
+
     def test_detect_persistence_failure_removes_final_new_masks(self):
         """A failed candidate transaction must not leave a visible orphan mask."""
         with tempfile.TemporaryDirectory() as directory:

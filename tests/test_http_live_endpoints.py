@@ -480,6 +480,9 @@ class LiveHttpEndpointTests(unittest.TestCase):
         output_dir.mkdir()
         self.state.settings["saving"]["default_output_directory"] = str(output_dir.resolve())
 
+        status, _headers, body = self.request("POST", "/api/projects", {"name": "Detect edit save"}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        project_id = json.loads(body)["project"]["id"]
         status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
         self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
         image_id = json.loads(body)["images"][0]["id"]
@@ -502,6 +505,30 @@ class LiveHttpEndpointTests(unittest.TestCase):
         self.assertEqual(self.state.job.state, "complete")
         revision = self.state._candidate_revision(image_id)
         self.assertEqual(revision, 1)
+
+        manual = io.BytesIO()
+        manual_mask = Image.new("L", (12, 8), 0)
+        manual_mask.putpixel((1, 1), 255)
+        manual_mask.save(manual, format="PNG")
+        manual_session = "00000000-0000-4000-8000-000000000022"
+        status, _headers, body = self.request("POST", f"/api/workspace/manual/{image_id}/begin", {
+            "sessionId": manual_session, "dirtyLayers": ["add"],
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        status, _headers, body = self.raw_request(
+            "POST", f"/api/workspace/manual/{image_id}/layer/{manual_session}/add", manual.getvalue(),
+            {"Origin": self.origin, "X-Mozarie-Token": self.state.session_token, "Content-Type": "application/octet-stream"},
+        )
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        status, _headers, body = self.request("POST", f"/api/workspace/manual/{image_id}/commit", {
+            "sessionId": manual_session, "emptyLayers": [], "manualEnabled": True,
+            "manualExclusionEnabled": True, "manualExclusionEraseEnabled": True,
+            "manualExclusionForced": True, "removedCandidateIds": [],
+            "candidateRevision": revision, "hasEffectiveMask": True,
+            "dirtyRois": {"add": {"left": 0, "top": 0, "right": 3, "bottom": 3}},
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        self.assertTrue(self.state.manual_workspace(image_id)["add"].startswith("data:image/png;base64,"))
 
         client_token = "00000000-0000-4000-8000-000000000021"
         save_options = {
@@ -531,6 +558,18 @@ class LiveHttpEndpointTests(unittest.TestCase):
         self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
         self.assertTrue(json.loads(body)["acknowledged"])
         self.assertEqual((self.source_dir / "source.png").exists(), True)
+
+        reopened = StudioState(self.state.cache_dir, self.state.session_base_dir)
+        try:
+            reopened.open_project(project_id)
+            reopened_candidates = reopened.candidates.get(image_id, [])
+            self.assertEqual([candidate.candidate_id for candidate in reopened_candidates], ["detected"])
+            self.assertEqual(reopened._candidate_revision(image_id), revision)
+            reopened_manual = reopened.manual_workspace(image_id)
+            self.assertIsNotNone(reopened_manual)
+            self.assertTrue(reopened_manual["add"].startswith("data:image/png;base64,"))
+        finally:
+            reopened.shutdown()
 
     def test_flag_write_keeps_catalogue_state_consistent_across_a_sqlite_wait(self) -> None:
         _status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
