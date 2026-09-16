@@ -553,7 +553,9 @@ class LiveHttpEndpointTests(unittest.TestCase):
         self.assertTrue(output_path.is_file())
         with patch.object(PngImagePlugin, "MAX_TEXT_CHUNK", 2_000_000), Image.open(output_path) as saved:
             self.assertEqual(saved.info["workflow"], "w" * 1_200_000)
-            self.assertNotEqual(saved.getpixel((5, 4)), (255, 255, 255))
+            self.assertNotEqual(saved.getpixel((5, 4)), source.getpixel((5, 4)), "the detected candidate changes its covered pixel")
+            self.assertNotEqual(saved.getpixel((1, 1)), source.getpixel((1, 1)), "the uploaded manual mask changes its manual-only pixel")
+            self.assertEqual(saved.getpixel((11, 0)), source.getpixel((11, 0)), "pixels outside both masks remain unchanged")
         status, _headers, body = self.request("POST", "/api/save/ack", {"saveToken": save_token}, authorized=True)
         self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
         self.assertTrue(json.loads(body)["acknowledged"])
