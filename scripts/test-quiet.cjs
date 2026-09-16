@@ -270,8 +270,8 @@ async function runBackend(temporaryRoot, artifacts) {
   const directory = artifactDirectory(temporaryRoot, artifacts, "backend");
   const coverageFile = path.join(directory, ".coverage");
   const coverageXml = path.join(directory, "coverage.xml");
+  const python = testPythonExecutable();
   const env = backendEnvironment(temporaryRoot, coverageFile);
-  const python = testPythonExecutable(env);
   const tests = await requiredCommand("backend tests", python, ["-m", "coverage", "run", "-m", "unittest", "discover", "-s", "tests", "-t", "."], { env, artifactDirectory: directory });
   assertNoSkippedUnittestTests(tests);
   await requiredCommand("backend coverage", python, ["-m", "coverage", "report"], { env, artifactDirectory: directory });
