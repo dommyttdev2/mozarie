@@ -6340,7 +6340,7 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(result, {"status": 200, "body": expected_body})
             self.assertTrue(writer_done.is_set())
 
-    def test_thumbnail_generation_limits_distinct_images_to_four(self):
+    def test_thumbnail_generation_serves_five_distinct_images_without_fixed_limit(self):
         from http.server import ThreadingHTTPServer
 
         with tempfile.TemporaryDirectory() as directory:
@@ -6351,7 +6351,7 @@ class MozarieTests(unittest.TestCase):
             images = state.set_root(directory)
             versions = {item["id"]: item["assetVersion"] for item in state.list_images()}
             source_paths = {record.path for record in state.images.values()}
-            first_four = threading.Event()
+            all_five = threading.Event()
             release = threading.Event()
             entered: set[Path] = set()
             entered_lock = threading.Lock()
@@ -6362,8 +6362,8 @@ class MozarieTests(unittest.TestCase):
                 if path in source_paths:
                     with entered_lock:
                         entered.add(path)
-                        if len(entered) == 4:
-                            first_four.set()
+                        if len(entered) == 5:
+                            all_five.set()
                     self.assertTrue(release.wait(2))
                 return original_open(path, *args, **kwargs)
 
@@ -6385,16 +6385,18 @@ class MozarieTests(unittest.TestCase):
                         connection.close()
 
                 workers = [threading.Thread(target=request_thumbnail, args=(image,)) for image in images]
-                for worker in workers:
-                    worker.start()
-                self.assertTrue(first_four.wait(2))
-                with entered_lock:
-                    self.assertEqual(len(entered), 4)
-                release.set()
-                for worker in workers:
-                    worker.join(3)
-                httpd.shutdown()
-                httpd.server_close()
+                try:
+                    for worker in workers:
+                        worker.start()
+                    self.assertTrue(all_five.wait(2))
+                    with entered_lock:
+                        self.assertEqual(len(entered), 5)
+                finally:
+                    release.set()
+                    for worker in workers:
+                        worker.join(3)
+                    httpd.shutdown()
+                    httpd.server_close()
             self.assertEqual(sorted(statuses), [200] * 5)
 
     def test_browser_save_overwrite_updates_state_when_timestamp_restore_fails(self):
