@@ -16,6 +16,49 @@ function isTerminalApply(job) {
 function selectedSaveMode() { return document.querySelector('input[name="batchSaveMode"]:checked').value; }
 function selectedApplyOutputFormat() { return $("#applyOutputFormat").value; }
 function selectedSingleOutputFormat() { return $("#singleSaveOutputFormat").value; }
+function preserveDirectoryStructure() { return state.settings?.saving?.preserve_directory_structure !== false; }
+function mergeSavingSettings(response, fields) {
+  const saving = response?.settings?.saving;
+  if (!saving || !state.settings?.saving) return;
+  for (const field of fields) {
+    if (Object.prototype.hasOwnProperty.call(saving, field)) state.settings.saving[field] = saving[field];
+  }
+}
+function renderDirectoryStructurePreference() {
+  const preserve = preserveDirectoryStructure();
+  $("#applyPreserveDirectoryStructure").checked = preserve;
+  $("#singleSavePreserveDirectoryStructure").checked = preserve;
+}
+let directoryStructurePreferenceMutation = Promise.resolve();
+let directoryStructurePreferenceVersion = 0;
+async function saveDirectoryStructurePreference(input) {
+  const preserve = Boolean(input.checked); const previous = preserveDirectoryStructure(); const version = ++directoryStructurePreferenceVersion;
+  $("#applyPreserveDirectoryStructure").checked = preserve;
+  $("#singleSavePreserveDirectoryStructure").checked = preserve;
+  if (previous === preserve) return true;
+  state.settings.saving.preserve_directory_structure = preserve;
+  const save = directoryStructurePreferenceMutation.catch(() => {}).then(() => api("/api/settings?status=0", {
+    method: "POST", body: JSON.stringify({ saving: { preserve_directory_structure: preserve } }),
+  }));
+  directoryStructurePreferenceMutation = save;
+  try {
+    const response = await save;
+    if (version === directoryStructurePreferenceVersion) {
+      mergeSavingSettings(response, ["preserve_directory_structure"]); renderDirectoryStructurePreference();
+    }
+    return true;
+  }
+  catch (error) {
+    if (version === directoryStructurePreferenceVersion) {
+      state.settings.saving.preserve_directory_structure = previous;
+      renderDirectoryStructurePreference(); showUserError(error, input);
+    }
+    return false;
+  }
+}
+async function ensureDirectoryStructurePreference(input) {
+  return input.checked === preserveDirectoryStructure() ? directoryStructurePreferenceMutation.then(() => true, () => false) : saveDirectoryStructurePreference(input);
+}
 function syncApplyOutputOptions() {
   const format = selectedApplyOutputFormat();
   const metadata = $("#applyKeepMetadata"); const note = $("#applyFormatNote");
@@ -70,12 +113,14 @@ function syncApplyMode() {
   $("#applySuffixRow").hidden = !copying;
   $("#deleteOriginalRow").hidden = !copying;
   $("#applyOutputDirectoryRow").hidden = !copying;
+  $("#applyPreserveDirectoryStructureRow").hidden = !copying;
   const outputDirectoryPending = state.outputDirectoryPicking || state.outputDirectoryCommitPending;
   $("#applySuffix").disabled = state.applyRunning || state.outputDirectoryPicking;
   $("#applyTargetMode").disabled = state.applyRunning || state.saveStarting || state.outputDirectoryPicking;
   $("#chooseOutputDirectoryButton").disabled = outputDirectoryPending || state.applyRunning || state.saveStarting;
   $("#applyOutputDirectoryStatus").disabled = outputDirectoryPending || state.applyRunning || state.saveStarting;
   $("#applyRemoveSaved").disabled = state.outputDirectoryPicking || state.applyRunning || state.saveStarting;
+  $("#applyPreserveDirectoryStructure").disabled = state.outputDirectoryPicking || state.applyRunning || state.saveStarting;
   $("#deleteOriginal").disabled = !canDelete || state.applyRunning;
   if (!canDelete) $("#deleteOriginal").checked = false;
   $("#applyOverwriteMode").disabled = !canOverwrite || state.applyRunning;
@@ -114,6 +159,7 @@ async function openApplyDialog(options = {}) {
     $("#applyOutputFormat").value = "original";
     $("#applyKeepMetadata").checked = true;
     $("#applyRemoveSaved").checked = false;
+    renderDirectoryStructurePreference();
   }
   updateBlockSizeDisplay();
   $("#applyProgressPanel").hidden = true;
@@ -122,7 +168,7 @@ async function openApplyDialog(options = {}) {
   $("#applyPauseButton").hidden = true;
   $("#applyCancelButton").hidden = true;
   $("#applySettings").disabled = false;
-  setApplyResult(""); renderOutputDirectory(); syncApplyMode();
+  setApplyResult(""); renderOutputDirectory(); renderDirectoryStructurePreference(); syncApplyMode();
   showModalFromInvoker($("#applyDialog"), invoker);
   state.applyDialogInitialized = true;
 }
@@ -140,6 +186,7 @@ function syncSingleSaveMode() {
   $("#singleSaveSuffixRow").hidden = !copying;
   $("#singleSaveDeleteOriginalRow").hidden = !copying;
   $("#singleSaveOutputDirectoryRow").hidden = !copying;
+  $("#singleSavePreserveDirectoryStructureRow").hidden = !copying;
   $("#singleSaveOverwriteMode").disabled = !canOverwrite || state.saving || state.saveStarting;
   $("#singleSaveOverwriteRow").classList.toggle("muted", !canOverwrite);
   $("#singleSaveDeleteOriginal").disabled = !canDelete || state.saving || state.saveStarting;
@@ -148,6 +195,7 @@ function syncSingleSaveMode() {
   $("#singleSaveChooseOutputDirectoryButton").disabled = outputDirectoryPending || state.saving || state.saveStarting;
   $("#singleSaveOutputDirectoryStatus").disabled = outputDirectoryPending || state.saving || state.saveStarting;
   $("#singleSaveRemoveSaved").disabled = state.outputDirectoryPicking || state.saving || state.saveStarting;
+  $("#singleSavePreserveDirectoryStructure").disabled = state.outputDirectoryPicking || state.saving || state.saveStarting;
   $("#singleSaveStartButton").disabled = outputDirectoryPending || state.saving || state.saveStarting || !isProcessableImage(image) || (copying && !state.settings?.saving?.default_output_directory) || (!copying && !canOverwrite);
   $("#singleSaveSettings").disabled = state.outputDirectoryPicking || state.saving || state.saveStarting;
   syncSingleOutputOptions();
@@ -171,9 +219,10 @@ async function openSingleSaveDialog(imageId = state.currentId) {
     $("#singleSaveOutputFormat").value = "original";
     $("#singleSaveKeepMetadata").checked = true;
     $("#singleSaveRemoveSaved").checked = false;
+    renderDirectoryStructurePreference();
   }
   setSingleSaveResult("");
-  renderOutputDirectory();
+  renderOutputDirectory(); renderDirectoryStructurePreference();
   syncSingleSaveMode();
   showModalFromInvoker($("#singleSaveDialog"), invoker);
   state.singleSaveDialogInitialized = true;
@@ -341,15 +390,16 @@ async function startSingleSave(event) {
   syncSingleSaveMode();
   try {
     if (copying) await ensureSaveSources([save.imageId], "copy", deleteOriginal);
+    if (copying && !await ensureDirectoryStructurePreference($("#singleSavePreserveDirectoryStructure"))) return;
     if (!copying && !await confirmAction(t("confirm.overwriteSource.title"), t("confirm.overwriteSource.message"), "overwriteSource")) return;
     if (deleteOriginal && !await confirmAction(t("confirm.deleteSourceAfterCopy.title"), t("confirm.deleteSourceAfterCopy.message"), "deleteSourceAfterCopy")) return;
     state.saving = true; updateActionButtons(); syncSingleSaveMode(); setSingleSaveResult("");
     let entry; let saveToken = ""; let output = null; let sourceSnapshot = null; let sourceRename = null; let cleanupIntent = null; let browserSourceDelete = null;
     const cleanupProjectId = state.project?.id || null;
     try {
-    await flushWorkspaceDraft(save.imageId);
-    const prepared = await api("/api/save/prepare", { method: "POST", body: JSON.stringify({ imageIds: [save.imageId], divisor: save.divisor, suffix, deleteOriginal: false, format, keepMetadata }) });
+    const prepared = await api("/api/save/prepare", { method: "POST", body: JSON.stringify({ imageIds: [save.imageId], divisor: save.divisor, suffix, deleteOriginal: false, copyToDefault: copying, format, keepMetadata }) });
     entry = prepared.entries?.[0]; if (!entry) throw Object.assign(new Error("save_state_changed"), { code: "save_state_changed" });
+    await flushWorkspaceDraft(save.imageId);
     const access = sourceAccessFor(save.imageId);
     if (!copying) await ensureSaveSources([save.imageId], "overwrite", false);
     const rendered = copying
@@ -489,7 +539,7 @@ async function commitOutputDirectory(input) {
   syncApplyMode(); if (state.singleSave) syncSingleSaveMode(); updateActionButtons();
   try {
     const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify({ saving: { default_output_directory: directory } }) });
-    state.settings = data.settings;
+    mergeSavingSettings(data, ["default_output_directory"]);
     renderOutputDirectory();
     return true;
   } catch (error) {
@@ -530,7 +580,7 @@ async function pickOutputDirectory() {
       method: "POST", body: JSON.stringify({ currentPath: state.settings?.saving?.default_output_directory || "" }),
     }).then((data) => {
         if (data.cancelled) return null;
-        state.settings = data.settings;
+        mergeSavingSettings(data, ["default_output_directory"]);
         // The picker persists only the output directory.  Re-rendering the
         // whole settings form here would discard edits the user has not saved.
         renderOutputDirectory();
@@ -558,6 +608,7 @@ async function waitForBrowserSave(save) {
 }
 
 function showBrowserSaveProgress(save, entry) {
+  $("#applyPauseButton").disabled = false;
   state.job = { kind: "apply", state: save.paused ? "paused" : "running", total: save.entries.length, completed: save.completed, current: entry?.relativePath || "" };
   $("#applyProgress").max = Math.max(1, save.entries.length);
   $("#applyProgress").value = save.completed;
@@ -851,7 +902,7 @@ async function restoreCopiedBrowserSourcesAfterRejectedDelete(pending) {
   }
 }
 
-async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", removeSaved = false) {
+async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", removeSaved = false, prepared = null) {
   const inputs = {
     imageIds: [...imageIds],
     divisor: Number($("#applyDivisor").value),
@@ -869,9 +920,9 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
       access: sourceAccessFor(imageId) ? { ...sourceAccessFor(imageId) } : null,
     }])),
   };
-  const result = await api("/api/save/prepare", {
+  const result = prepared || await api("/api/save/prepare", {
     method: "POST",
-    body: JSON.stringify({ imageIds: inputs.imageIds, divisor: inputs.divisor, suffix: inputs.suffix, deleteOriginal: false, format: inputs.format, keepMetadata: inputs.keepMetadata }),
+    body: JSON.stringify({ imageIds: inputs.imageIds, divisor: inputs.divisor, suffix: inputs.suffix, deleteOriginal: false, copyToDefault: mode === "copy", format: inputs.format, keepMetadata: inputs.keepMetadata }),
   });
   const save = {
     entries: result.entries, completed: 0, stale: 0, paused: false, cancelled: false, failed: false,
@@ -879,6 +930,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
     removalSelection: removeSaved ? deletionSelectionSnapshot(new Set(imageIds), galleryFilteredImages()) : null,
   };
   state.browserSave = save;
+  $("#applyPauseButton").disabled = false;
   state.saving = true;
   state.applyRunning = true;
   $("#applySettings").disabled = true;
@@ -1098,6 +1150,7 @@ async function runBrowserSave(imageIds, suffix, deleteOriginal, mode = "copy", r
       state.browserSave = null;
       state.job = { kind: "idle", state: "idle" };
       $("#applyPauseButton").hidden = true;
+      $("#applyPauseButton").disabled = false;
       $("#applyCancelButton").hidden = true;
       $("#applyCloseButton").hidden = false;
       renderCandidates(); updateActionButtons();
@@ -1174,11 +1227,13 @@ async function startApplyFromDialog(event) {
     state.applyCatalogSnapshot = { order: state.images.map((image) => image.id), recordsById: new Map(state.images.map((image) => [image.id, image])) };
     updateActionButtons();
     await ensureSaveSources(imageIds, mode, copy && $("#deleteOriginal").checked);
+    if (copy && !await ensureDirectoryStructurePreference($("#applyPreserveDirectoryStructure"))) return;
     if (state.candidateUpdateChains.size) await waitForCandidateMutations();
     if (state.importing) return;
+    const prepared = await api("/api/save/prepare", { method: "POST", body: JSON.stringify({ imageIds, divisor: Number($("#applyDivisor").value), suffix, deleteOriginal: false, copyToDefault: copy, format: selectedApplyOutputFormat(), keepMetadata: $("#applyKeepMetadata").checked }) });
     await Promise.all(imageIds.map((imageId) => flushWorkspaceDraft(imageId)));
     state.saveStarting = false;
-    await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, removeSaved);
+    await runBrowserSave(imageIds, suffix, copy && $("#deleteOriginal").checked, mode, removeSaved, prepared);
   } catch (error) {
     showApplyError(error);
     if (!state.saveStarting) {
@@ -1264,6 +1319,7 @@ async function finishApplyJob(job) {
     state.saving = false;
     state.applyRunning = false;
     $("#applyPauseButton").hidden = true;
+    $("#applyPauseButton").disabled = false;
     $("#applyCancelButton").hidden = true;
     $("#applyCloseButton").hidden = false;
     if (job.state === "complete") setApplyResult(t("apply.complete", { completed: job.completed }));

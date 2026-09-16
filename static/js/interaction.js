@@ -87,14 +87,14 @@ function updateBlockSizeDisplay() {
 }
 
 function confirmAction(title, message, key = null, onConfirm = null) {
-  const alwaysConfirm = key === "sourceDelete";
-  if (alwaysConfirm) key = null;
   const newConfirmation = new Set(["candidateDelete", "candidateRoleDelete", "overwriteSource", "deleteSourceAfterCopy"]);
-  if (key && (newConfirmation.has(key) ? state.settings?.confirmations?.[key] !== true : state.settings?.confirmations?.[key] === false)) return Promise.resolve(true);
+  const accept = () => { try { onConfirm?.(); } catch { /* The caller turns a failed preflight into a normal per-image failure. */ } };
+  if (key && (newConfirmation.has(key) ? state.settings?.confirmations?.[key] !== true : state.settings?.confirmations?.[key] === false)) {
+    accept(); return Promise.resolve(true);
+  }
   const dialog = $("#confirmDialog");
   $("#confirmTitle").textContent = title;
   $("#confirmMessage").textContent = message;
-  $("#confirmNeverShow").closest("label").hidden = alwaysConfirm;
   return new Promise((resolve) => {
     const finish = () => {
       $("#confirmAccept").removeEventListener("click", accept);
@@ -105,9 +105,8 @@ function confirmAction(title, message, key = null, onConfirm = null) {
           state.settings = data.settings;
         }).catch(() => {});
       }
-      $("#confirmNeverShow").checked = false; $("#confirmNeverShow").closest("label").hidden = false; resolve(accepted);
+      $("#confirmNeverShow").checked = false; resolve(accepted);
     };
-    const accept = () => { try { onConfirm?.(); } catch { /* The caller turns a failed preflight into a normal per-image failure. */ } };
     $("#confirmAccept").addEventListener("click", accept, { once: true });
     dialog.addEventListener("close", finish, { once: true });
     showModalFromInvoker(dialog);
@@ -203,9 +202,13 @@ function openCatalogContextMenu(event, imageId) {
   event.preventDefault();
   state.contextMenuImageId = imageId;
   const keyboardEvent = event.type === "keydown";
-  state.contextMenuOrigin = keyboardEvent ? event.currentTarget : document.activeElement;
+  state.contextMenuOrigin = event.currentTarget || document.activeElement;
   state.contextMenuScroll = { gallery: $("#gallery").scrollTop, overview: $("#overviewGrid").scrollTop };
   $("#toggleReviewMenuItem").textContent = t(isReviewed(image) ? "context.unreview" : "context.review");
+  const rename = $("#renameImageMenuItem"); const renameAvailable = canRenameCatalogImage(image);
+  rename.disabled = !renameAvailable;
+  rename.textContent = t("context.rename");
+  rename.title = renameAvailable ? "" : t("context.renameUnavailableHelp");
   $("#copyImagePathMenuItem").hidden = !image.sourcePath;
   $("#removeImageMenuItem").textContent = t(isHidden(image) ? "editor.show" : "editor.hide");
   const menu = $("#catalogContextMenu");
@@ -217,6 +220,74 @@ function openCatalogContextMenu(event, imageId) {
   menu.showPopover?.();
   positionCatalogContextMenu(menu, clientX, clientY);
   if (keyboardEvent) focusElement($("#toggleReviewMenuItem"));
+}
+
+function canRenameCatalogImage(image) {
+  if (!image || isBusy() || state.importing || state.projectReadOnly || state.renamePending || currentImageActionPending() || catalogStagingEditsActive()) return false;
+  if (image.sourceKind === "filesystem") return true;
+  const access = sourceAccessFor(image.id);
+  return Boolean(access?.fileHandle && access?.parentHandle && typeof access.fileHandle.move === "function");
+}
+
+function openRenameImageDialog(imageId = state.contextMenuImageId || state.currentId) {
+  const image = state.images.find((entry) => entry.id === imageId); const invoker = state.contextMenuOrigin || document.activeElement;
+  closeCatalogContextMenu({ restoreFocus: false });
+  if (!canRenameCatalogImage(image)) { showUserError({ code: "source_action_unavailable" }, invoker); return; }
+  state.renameImage = { imageId: image.id, invoker };
+  const input = $("#renameImageFilename"); input.value = String(image.relativePath || "").split(/[\\/]/).pop() || "";
+  $("#renameImageResult").textContent = ""; $("#renameImageResult").classList.remove("error");
+  showModalFromInvoker($("#renameImageDialog"), invoker); requestAnimationFrame(() => { input.focus(); input.select(); });
+}
+
+async function submitRenameImage(event) {
+  event.preventDefault(); const rename = state.renameImage; const image = state.images.find((entry) => entry.id === rename?.imageId);
+  const input = $("#renameImageFilename"); const filename = input.value.trim(); const access = sourceAccessFor(image?.id); let previousName = "";
+  if (!rename || state.renamePending || !canRenameCatalogImage(image)) return;
+  const originalName = String(image.relativePath || "").split(/[\\/]/).pop() || "";
+  if (originalName.slice(originalName.lastIndexOf(".")).toLocaleLowerCase() !== filename.slice(filename.lastIndexOf(".")).toLocaleLowerCase()) {
+    const error = { code: "rename_extension_unsupported" };
+    $("#renameImageResult").textContent = t(`errorCode.${error.code}`); $("#renameImageResult").classList.add("error"); showUserError(error, input); return;
+  }
+  state.renamePending = true;
+  $("#renameImageFilename").disabled = true; $("#renameImageCancel").disabled = true; $("#renameImageConfirm").disabled = true;
+  updateActionButtons();
+  let durable = false;
+  try {
+    if (image.sourceKind !== "filesystem") {
+      await ensureHandlePermission(access, true); previousName = access.fileHandle.name || access.name;
+      await access.fileHandle.move(access.parentHandle, filename); const file = await access.fileHandle.getFile();
+      access.name = file.name; access.size = file.size; access.lastModified = file.lastModified;
+    }
+    await flushWorkspaceDraft(image.id);
+    const result = await catalogApi("/api/catalog/rename", { imageId: image.id, filename, browserRenamed: image.sourceKind !== "filesystem" }, { method: "POST" });
+    durable = true;
+    state.images = result.images || state.images; state.serverCatalogGeneration = result.catalogGeneration ?? state.serverCatalogGeneration;
+    try { renderCatalogViews(); } catch (error) { console.warn("名前変更後の画面更新に失敗しました", error); }
+    try { $("#renameImageDialog").close(); } catch (error) { console.warn("名前変更後のダイアログ終了に失敗しました", error); }
+  } catch (error) {
+    let rollbackKnown = false;
+    if (!durable && previousName) {
+      const authoritative = await api("/api/images", { resyncOnStale: false }).catch(() => null);
+      const current = authoritative?.images?.find((entry) => entry.id === image.id);
+      durable = Boolean(current && String(current.relativePath || "").split(/[\\/]/).pop() === filename);
+      rollbackKnown = Boolean(current && String(current.relativePath || "").split(/[\\/]/).pop() === previousName);
+      if (durable) {
+        state.images = authoritative.images; state.serverCatalogGeneration = authoritative.catalogGeneration ?? state.serverCatalogGeneration;
+        try { renderCatalogViews(); } catch (renderError) { console.warn("名前変更後の画面更新に失敗しました", renderError); }
+        try { $("#renameImageDialog").close(); } catch (closeError) { console.warn("名前変更後のダイアログ終了に失敗しました", closeError); }
+        return;
+      }
+    }
+    if (!durable && rollbackKnown && previousName && access?.fileHandle?.move) try {
+      await access.fileHandle.move(access.parentHandle, previousName); const file = await access.fileHandle.getFile();
+      access.name = file.name; access.size = file.size; access.lastModified = file.lastModified;
+    } catch {}
+    $("#renameImageResult").textContent = t(`errorCode.${userErrorCode(error)}`); $("#renameImageResult").classList.add("error"); showUserError(error, input);
+  } finally {
+    state.renamePending = false;
+    $("#renameImageFilename").disabled = false; $("#renameImageCancel").disabled = false; $("#renameImageConfirm").disabled = false;
+    updateActionButtons();
+  }
 }
 
 async function copyContextMenuImagePath() {
@@ -483,7 +554,7 @@ async function permanentlyDeleteImages(images, visibleImages) {
   const title = ids.length === 1 ? t("confirm.removeImage.title") : t("confirm.removeImages.title");
   const message = ids.length === 1 ? t("confirm.removeImage.message") : t("confirm.removeImages.message", { count: ids.length });
   let resolveBrowserPermissions = null;
-  if (!await confirmAction(title, message, "sourceDelete", () => { resolveBrowserPermissions = beginBrowserDeletePermissionRequests(images); })) return;
+  if (!await confirmAction(title, message, "removeImage", () => { resolveBrowserPermissions = beginBrowserDeletePermissionRequests(images); })) return;
   const imageIds = new Set(ids);
   const selection = deletionSelectionSnapshot(imageIds, visibleImages);
   const token = crypto.randomUUID();
@@ -1031,12 +1102,17 @@ function handleEditorKeydown(event) {
 function navigationShortcutAction(event) {
   if (isBusy() || state.importing || isGestureActive() || !state.navigationShortcutsEnabled || hasOpenDialog()) return null;
   const binding = shortcutFromEvent(event);
-  const bindings = state.settings?.shortcuts?.bindings || { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", reviewAndNext: "Enter", removeImage: "Delete", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" };
+  const bindings = state.settings?.shortcuts?.bindings || { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", reviewAndNext: "Enter", removeImage: "Delete", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z", renameImage: "F2" };
   const actionForBinding = Object.entries(bindings).find(([, value]) => value === binding)?.[0];
   if (!actionForBinding || state.settings?.shortcuts?.actions?.[actionForBinding] === false) return null;
   const currentGalleryItem = document.activeElement?.matches("button.gallery-item.current") && document.activeElement.dataset.id === state.currentId;
-  if (isEditableTarget(document.activeElement) && !(actionForBinding === "removeImage" && currentGalleryItem)) return null;
+  const focusedCatalogItem = document.activeElement?.matches("button.gallery-item, button.overview-item");
+  if (isEditableTarget(document.activeElement) && !(actionForBinding === "removeImage" && currentGalleryItem) && !(actionForBinding === "renameImage" && focusedCatalogItem)) return null;
   if (actionForBinding === "toggleOverview") return "toggleOverview";
+  if (actionForBinding === "renameImage") {
+    const focusedId = document.activeElement?.matches("button.gallery-item, button.overview-item") ? document.activeElement.dataset.id : state.currentId;
+    return canRenameCatalogImage(state.images.find((image) => image.id === focusedId)) ? { action: "renameImage", imageId: focusedId } : null;
+  }
   if (state.viewMode !== "edit") return null;
   if (actionForBinding === "removeImage" && event.repeat) return "removeImageRepeat";
   if (actionForBinding === "removeImage" && !canRemoveCurrentImage()) return null;
@@ -1047,10 +1123,12 @@ function navigationShortcutAction(event) {
 }
 
 function handleNavigationKeydown(event) {
-  const action = navigationShortcutAction(event);
-  if (!action) return false;
+  const result = navigationShortcutAction(event);
+  if (!result) return false;
+  const action = typeof result === "string" ? result : result.action;
   event.preventDefault();
   if (action === "toggleOverview") setViewMode(state.viewMode === "overview" ? "edit" : "overview");
+  else if (action === "renameImage") openRenameImageDialog(result.imageId);
   else if (action === "previous") moveCurrentBy(-1);
   else if (action === "next") moveCurrentBy(1);
   else if (action === "previousVisible") moveCurrentBy(-1);

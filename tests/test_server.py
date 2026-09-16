@@ -39,6 +39,7 @@ import mozarie.state as state_module  # noqa: E402
 import mozarie.catalog as catalog_module  # noqa: E402
 import mozarie.detection as detection_module  # noqa: E402
 import mozarie.jobs as jobs_module  # noqa: E402
+import mozarie.save_journal as save_journal_module  # noqa: E402
 import mozarie.saving as saving_module  # noqa: E402
 import updater  # noqa: E402
 from mozarie.core import (  # noqa: E402
@@ -55,10 +56,30 @@ from mozarie.image_io import (  # noqa: E402
     calculate_block_size, save_with_mask, _apply_mosaic_to_image, _decode_mask,
     _default_output_destination, render_with_mask,
 )
+
 from mozarie.http import MosaicHandler, _read_mosaic_divisor, _read_detection_parallelism, _read_save_suffix  # noqa: E402
 from mozarie.save_journal import SaveJournal  # noqa: E402
 from mozarie.state import DetectionModels, StudioState  # noqa: E402
 from server import _open_browser, _schedule_browser_open  # noqa: E402
+
+THREAD_TIMEOUT = 30
+
+
+def join_thread(thread: threading.Thread) -> None:
+    if thread.ident is None:
+        return
+    thread.join(THREAD_TIMEOUT)
+    if thread.is_alive():
+        raise AssertionError(f"thread did not finish: {thread.name}")
+
+
+def join_threads(*threads: threading.Thread) -> None:
+    started = [thread for thread in threads if thread.ident is not None]
+    for thread in started:
+        thread.join(THREAD_TIMEOUT)
+    alive = [thread.name for thread in started if thread.is_alive()]
+    if alive:
+        raise AssertionError(f"threads did not finish: {', '.join(alive)}")
 
 
 class _MetaDevice:
@@ -301,13 +322,18 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc: errors.append(exc)
             with patch.object(state.workspace_store, "prepare_candidate_state", side_effect=delayed_prepare), \
                  patch.object(state, "_effective_mask_for_draft", return_value=True):
-                worker = threading.Thread(target=commit); worker.start()
-                self.assertTrue(entered.wait(2))
-                started = time.perf_counter(); snapshot = state.catalog_snapshot(); elapsed = time.perf_counter() - started
-                self.assertEqual(snapshot["images"][0]["id"], image_id)
-                self.assertLess(elapsed, .25, f"catalog poll was blocked for {elapsed:.3f}s")
-                release.set(); worker.join(5)
-            self.assertFalse(worker.is_alive()); self.assertEqual(errors, [])
+                worker = threading.Thread(target=commit)
+                try:
+                    worker.start()
+                    self.assertTrue(entered.wait(THREAD_TIMEOUT))
+                    started = time.perf_counter(); snapshot = state.catalog_snapshot(); elapsed = time.perf_counter() - started
+                    self.assertEqual(snapshot["images"][0]["id"], image_id)
+                    self.assertLess(elapsed, .25, f"catalog poll was blocked for {elapsed:.3f}s")
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(worker)
+            self.assertEqual(errors, [])
 
     def test_flag_change_does_not_publish_after_the_catalog_changes_during_a_write(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -665,22 +691,59 @@ class MozarieTests(unittest.TestCase):
             state.candidates[image_id] = [Candidate("candidate", "penis", 0.9, mask_path)]
             self.commit_candidates(state, image_id)
             entered = threading.Event(); release = threading.Event()
+            factory_reached = threading.Event(); allow_factory = threading.Event()
+            toggle_attempted = threading.Event(); failures: list[BaseException] = []
             original_save = state.workspace_store.save_manual
+            underlying_lock = state.image_io_lock(image_id)
+
+            class ObservedImageLock:
+                def __enter__(self):
+                    if not underlying_lock.acquire(blocking=False):
+                        toggle_attempted.set()
+                        underlying_lock.acquire()
+                    return self
+
+                def __exit__(self, *_args):
+                    underlying_lock.release()
+
+            def image_lock(requested_id: str):
+                if threading.current_thread() is toggle:
+                    factory_reached.set()
+                    self.assertTrue(allow_factory.wait(THREAD_TIMEOUT))
+                return ObservedImageLock()
 
             def delayed_save(*args, **kwargs):
                 entered.set()
-                self.assertTrue(release.wait(2))
+                self.assertTrue(release.wait(THREAD_TIMEOUT))
                 return original_save(*args, **kwargs)
 
+            def save_manual() -> None:
+                try:
+                    state.save_manual_workspace(image_id, draft)
+                except BaseException as exc:
+                    failures.append(exc)
+
+            def toggle_candidate() -> None:
+                try:
+                    state.set_candidate_state(image_id, "candidate", {"enabled": False})
+                except BaseException as exc:
+                    failures.append(exc)
+
             draft = {"add": "", "exclusion": "", "exclusionErase": "", "removedCandidateIds": [], "candidateRevision": 1, "hasEffectiveMask": False}
-            with patch.object(state.workspace_store, "save_manual", side_effect=delayed_save):
-                manual = threading.Thread(target=lambda: state.save_manual_workspace(image_id, draft))
-                manual.start(); self.assertTrue(entered.wait(2))
-                toggle = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
-                toggle.start(); time.sleep(0.05)
-                self.assertTrue(toggle.is_alive())
-                release.set(); manual.join(2); toggle.join(2)
-            self.assertFalse(manual.is_alive()); self.assertFalse(toggle.is_alive())
+            with patch.object(state.workspace_store, "save_manual", side_effect=delayed_save), \
+                 patch.object(state, "image_io_lock", side_effect=image_lock):
+                manual = threading.Thread(target=save_manual)
+                toggle = threading.Thread(target=toggle_candidate)
+                try:
+                    toggle.start(); self.assertTrue(factory_reached.wait(THREAD_TIMEOUT))
+                    manual.start(); self.assertTrue(entered.wait(THREAD_TIMEOUT))
+                    allow_factory.set(); self.assertTrue(toggle_attempted.wait(THREAD_TIMEOUT))
+                    self.assertTrue(toggle.is_alive())
+                    release.set()
+                finally:
+                    release.set(); allow_factory.set()
+                    join_threads(manual, toggle)
+            self.assertEqual(failures, [])
             revision = state._candidate_revision(image_id)
             self.assertEqual(revision, 2)
             self.assertEqual(state.workspace_store.manual_mask_statuses([image_id])[image_id], (False, revision))
@@ -931,7 +994,7 @@ class MozarieTests(unittest.TestCase):
             image_id = state.set_root(str(source_dir))[0]["id"]
             self.assertTrue(state.start_apply([image_id], 100, {image_id: self._mask(16, 16)}, copy_to_default=True))
             assert state.worker_thread is not None
-            state.worker_thread.join(2)
+            join_thread(state.worker_thread)
 
             self.assertEqual(state.job.state, "complete")
             self.assertTrue((app_dir / "output" / "source_censored.png").is_file())
@@ -948,7 +1011,7 @@ class MozarieTests(unittest.TestCase):
 
             self.assertTrue(state.start_apply([image_id], 100, {image_id: self._mask(16, 16)}))
             assert state.worker_thread is not None
-            state.worker_thread.join(2)
+            join_thread(state.worker_thread)
 
             self.assertFalse(state.worker_thread.is_alive())
             self.assertEqual(state.job.state, "complete")
@@ -974,8 +1037,9 @@ class MozarieTests(unittest.TestCase):
             picker_kwargs = popen.call_args.kwargs
             command = popen.call_args.args[0]
             script = base64.b64decode(command[-1]).decode("utf-16le")
-            self.assertIn("FolderBrowserDialog", script)
-            self.assertIn("ShowDialog($owner)", script)
+            self.assertIn("NativeFolderPicker", script)
+            self.assertIn("FOS_PICKFOLDERS", script)
+            self.assertIn("PickFolder($owner.Handle, $initial)", script)
             self.assertFalse(picker_kwargs["shell"])
             self.assertEqual(picker_kwargs["env"]["MOZARIE_OUTPUT_INITIAL_DIRECTORY"], str(selected.resolve()))
             self.assertTrue(state.native_picker_lock.acquire(blocking=False)); state.native_picker_lock.release()
@@ -1017,6 +1081,7 @@ class MozarieTests(unittest.TestCase):
                     http_module._pick_model_file("sam_checkpoint", state)
             script = base64.b64decode(command[-1]).decode("utf-16le")
             self.assertIn("OpenFileDialog", script)
+            self.assertIn("AutoUpgradeEnabled = $true", script)
             self.assertIn("RestoreDirectory", script)
             self.assertIn("FormStartPosition]::CenterScreen", script)
             self.assertIn("ShowDialog($owner)", script)
@@ -1306,7 +1371,7 @@ class MozarieTests(unittest.TestCase):
 
         def read_body(_handler, _content_length):
             entered.set()
-            self.assertTrue(release.wait(3))
+            self.assertTrue(release.wait(THREAD_TIMEOUT))
             staged.write_bytes(b"x")
             return staged
 
@@ -1330,33 +1395,37 @@ class MozarieTests(unittest.TestCase):
                  patch.object(MosaicHandler, "_read_binary_body_to_file", read_body), \
                  patch.object(state, "import_image_file_for_api", return_value=([], [])):
                 upload_thread = threading.Thread(target=upload)
-                upload_thread.start()
-                self.assertTrue(entered.wait(3))
-                self.assertEqual(state.active_import_count, 1)
-                mutations = [
+                try:
+                    upload_thread.start()
+                    self.assertTrue(entered.wait(THREAD_TIMEOUT))
+                    self.assertEqual(state.active_import_count, 1)
+                    mutations = [
                     ("/api/catalog/clear", {}),
                     ("/api/folder", {"path": str(source.parent)}),
                     ("/api/settings", state.settings),
                     ("/api/detect", {"imageIds": [record.image_id], "confidence": 0.5, "parallelism": 1}),
                 ]
-                for path, payload in mutations:
-                    mutation = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
-                    try:
-                        mutation.request("POST", path, json.dumps({**payload, "expectedProjectId": None, "expectedCatalogGeneration": state.catalog_generation}).encode("utf-8"), {
-                            "Content-Type": "application/json", "X-Mozarie-Token": state.session_token, "Origin": origin,
-                        })
-                        response = mutation.getresponse(); response.read()
-                        self.assertEqual(response.status, 400, path)
-                    finally:
-                        mutation.close()
-                release.set(); upload_thread.join(5)
-                self.assertFalse(upload_thread.is_alive())
+                    for path, payload in mutations:
+                        mutation = http.client.HTTPConnection("127.0.0.1", httpd.server_port, timeout=5)
+                        try:
+                            mutation.request("POST", path, json.dumps({**payload, "expectedProjectId": None, "expectedCatalogGeneration": state.catalog_generation}).encode("utf-8"), {
+                                "Content-Type": "application/json", "X-Mozarie-Token": state.session_token, "Origin": origin,
+                            })
+                            response = mutation.getresponse(); response.read()
+                            self.assertEqual(response.status, 400, path)
+                        finally:
+                            mutation.close()
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(upload_thread)
                 self.assertEqual(result["status"], 200)
                 self.assertEqual(state.active_import_count, 0)
                 self.assertFalse(staged.exists())
         finally:
             release.set()
             httpd.shutdown(); httpd.server_close()
+            join_threads(thread)
 
     def test_rejected_import_transfer_closes_the_unread_request_connection(self):
         from http.server import ThreadingHTTPServer
@@ -1471,7 +1540,8 @@ class MozarieTests(unittest.TestCase):
                 shape = (height, width, channels) if channels > 1 else (height, width)
                 pixels = random.integers(0, 256, size=shape, dtype=np.uint8)
                 mask = random.integers(0, 2, size=(height, width), dtype=np.uint8) * 255
-                image = Image.fromarray(pixels, mode=mode)
+                image = Image.fromarray(pixels)
+                self.assertEqual(image.mode, mode)
                 expected = reference_apply_mosaic(image, mask, block_size)
                 actual = np.asarray(image_io_module._apply_mosaic_to_image(image, mask, block_size))
                 self.assertTrue(np.array_equal(actual, expected), (mode, width, height, block_size))
@@ -2443,7 +2513,8 @@ class MozarieTests(unittest.TestCase):
                     patch.object(state, "_ensure_models", return_value=DetectionModels(target=object())), \
                     patch.object(state, "_detect_image", side_effect=fresh_detection):
                 state.start_detection([image_id])
-                state.worker_thread.join(3)
+                assert state.worker_thread is not None
+                join_thread(state.worker_thread)
 
             self.assertFalse(state.worker_thread.is_alive())
             self.assertEqual(state.job.state, "complete")
@@ -2627,7 +2698,7 @@ class MozarieTests(unittest.TestCase):
             def block_old_cleanup(path, *args, **kwargs):
                 if path == old_path:
                     cleanup_started.set()
-                    self.assertTrue(allow_cleanup.wait(2))
+                    self.assertTrue(allow_cleanup.wait(THREAD_TIMEOUT))
                 return original_unlink(path, *args, **kwargs)
 
             worker = threading.Thread(
@@ -2638,16 +2709,17 @@ class MozarieTests(unittest.TestCase):
             with patch.object(state, "_ensure_models", return_value=object()), \
                     patch.object(state, "_detect_image", side_effect=detect_image), \
                     patch.object(Path, "unlink", new=block_old_cleanup):
-                worker.start()
-                self.assertTrue(cleanup_started.wait(2))
-                with self.assertRaisesRegex(ClientError, "キャンセルできる処理"):
-                    state.request_cancel()
-                self.assertFalse(control.cancel_requested.is_set())
-                self.assertFalse(state.job.cancel_requested)
-                allow_cleanup.set()
-                worker.join(2)
-
-            self.assertFalse(worker.is_alive())
+                try:
+                    worker.start()
+                    self.assertTrue(cleanup_started.wait(THREAD_TIMEOUT))
+                    with self.assertRaisesRegex(ClientError, "キャンセルできる処理"):
+                        state.request_cancel()
+                    self.assertFalse(control.cancel_requested.is_set())
+                    self.assertFalse(state.job.cancel_requested)
+                    allow_cleanup.set()
+                finally:
+                    allow_cleanup.set()
+                    join_threads(worker)
             self.assertEqual(state.job.state, "complete")
             self.assertFalse(state.job.publication_started)
             self.assertEqual([candidate.candidate_id for candidate in state.candidates[image_id]], ["new"])
@@ -2671,12 +2743,13 @@ class MozarieTests(unittest.TestCase):
 
             worker = threading.Thread(target=state._detect_worker, args=(records, DEFAULT_DETECTION_CONFIDENCE, 2), kwargs={"control": control})
             with patch.object(state, "_ensure_models", side_effect=load_first_slot), patch.object(state, "_detect_image", return_value=[]):
-                worker.start()
-                self.assertTrue(first_loaded.wait(2))
-                control.pause_requested.clear()
-                worker.join(2)
-
-            self.assertFalse(worker.is_alive())
+                try:
+                    worker.start()
+                    self.assertTrue(first_loaded.wait(THREAD_TIMEOUT))
+                    control.pause_requested.clear()
+                finally:
+                    control.pause_requested.clear()
+                    join_threads(worker)
             self.assertEqual(state.job.state, "complete")
 
     def test_parallel_detection_progress_never_moves_backward(self):
@@ -2813,9 +2886,9 @@ class MozarieTests(unittest.TestCase):
                 Image.fromarray(self._mask(16, 16)).save(mask_path)
                 if record is records[0]:
                     started.set()
-                    self.assertTrue(release.wait(2))
+                    self.assertTrue(release.wait(THREAD_TIMEOUT))
                 else:
-                    self.assertTrue(started.wait(2))
+                    self.assertTrue(started.wait(THREAD_TIMEOUT))
                     control.cancel_requested.set()
                     release.set()
                 return [Candidate(record.image_id, "penis", 0.9, mask_path)]
@@ -2894,7 +2967,7 @@ class MozarieTests(unittest.TestCase):
                         first_entered.set()
                     if record.image_id == second_id:
                         second_entered.set()
-                self.assertTrue(release.wait(2))
+                self.assertTrue(release.wait(THREAD_TIMEOUT))
                 return original_save(record, mask, block_size, *_args, **_kwargs)
 
             worker = threading.Thread(
@@ -2903,15 +2976,16 @@ class MozarieTests(unittest.TestCase):
                 kwargs={"saving_parallelism": 3},
             )
             with patch.object(saving_module, "render_output", side_effect=delayed_save):
-                worker.start()
-                self.assertTrue(first_entered.wait(2))
-                self.assertTrue(second_entered.wait(2))
-                with started_lock:
-                    self.assertEqual(started.count(first_id), 1)
-                release.set()
-                worker.join(3)
-
-            self.assertFalse(worker.is_alive())
+                try:
+                    worker.start()
+                    self.assertTrue(first_entered.wait(THREAD_TIMEOUT))
+                    self.assertTrue(second_entered.wait(THREAD_TIMEOUT))
+                    with started_lock:
+                        self.assertEqual(started.count(first_id), 1)
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(worker)
             self.assertEqual(started.count(first_id), 2)
 
     def test_queued_overwrite_preserves_externally_changed_source(self):
@@ -2933,7 +3007,7 @@ class MozarieTests(unittest.TestCase):
             def hold_first_source_check(record, *args):
                 if record.image_id == first_id:
                     first_entered.set()
-                    self.assertTrue(release_first.wait(2))
+                    self.assertTrue(release_first.wait(THREAD_TIMEOUT))
                 return original_source_check(record, *args)
 
             worker = threading.Thread(
@@ -2942,16 +3016,17 @@ class MozarieTests(unittest.TestCase):
                 kwargs={"saving_parallelism": 1},
             )
             with patch.object(image_io_module, "_assert_source_stat_matches", side_effect=hold_first_source_check):
-                worker.start()
-                self.assertTrue(first_entered.wait(2))
-                previous_stat = second_path.stat()
-                Image.new("RGB", (16, 16), "green").save(second_path)
-                os.utime(second_path, ns=(previous_stat.st_atime_ns, previous_stat.st_mtime_ns + 1_000_000_000))
-                external_contents = second_path.read_bytes()
-                release_first.set()
-                worker.join(3)
-
-            self.assertFalse(worker.is_alive())
+                try:
+                    worker.start()
+                    self.assertTrue(first_entered.wait(THREAD_TIMEOUT))
+                    previous_stat = second_path.stat()
+                    Image.new("RGB", (16, 16), "green").save(second_path)
+                    os.utime(second_path, ns=(previous_stat.st_atime_ns, previous_stat.st_mtime_ns + 1_000_000_000))
+                    external_contents = second_path.read_bytes()
+                    release_first.set()
+                finally:
+                    release_first.set()
+                    join_threads(worker)
             self.assertEqual(state.job.state, "error")
             self.assertEqual(state.job.completed_image_ids, (first_id,))
             self.assertEqual(second_path.read_bytes(), external_contents)
@@ -2969,6 +3044,7 @@ class MozarieTests(unittest.TestCase):
             rendezvous = threading.Barrier(2)
             two_workers_started = threading.Event()
             release = threading.Event()
+            worker_done = threading.Event()
             non_first_finished = threading.Event()
             started: list[int] = []
             completion_order: list[int] = []
@@ -2984,11 +3060,11 @@ class MozarieTests(unittest.TestCase):
                     if len(started) == 2:
                         two_workers_started.set()
                 if index in (0, 1):
-                    rendezvous.wait(timeout=2)
-                    if not release.wait(2):
+                    rendezvous.wait(timeout=10)
+                    if not release.wait(10):
                         raise RuntimeError("test did not release both workers")
                 if index == 0:
-                    if not non_first_finished.wait(2):
+                    if not non_first_finished.wait(10):
                         raise RuntimeError("later records did not finish")
                 else:
                     with completion_lock:
@@ -3003,28 +3079,38 @@ class MozarieTests(unittest.TestCase):
             def output_destination(record, _suffix, _reserved):
                 return output_paths[record.image_id]
 
-            thread = threading.Thread(
-                target=state._apply_worker,
-                args=(records, 100, masks),
-                kwargs={"copy_to_default": True, "saving_parallelism": 2},
-            )
-            with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory: output_destination(record, suffix, state.reserved_output_paths)), \
-                 patch.object(saving_module, "render_output", side_effect=render_in_inverse_order):
-                thread.start()
-                self.assertTrue(two_workers_started.wait(2))
-                self.assertEqual(set(started), {0, 1})
-                self.assertEqual(state.job.completed_image_ids, ())
-                self.assertEqual(state.job.outputs, [])
-                release.set()
-                thread.join(2)
+            def run_apply():
+                try:
+                    state._apply_worker(records, 100, masks, copy_to_default=True, saving_parallelism=2)
+                finally:
+                    worker_done.set()
 
-            self.assertFalse(thread.is_alive())
+            thread = threading.Thread(
+                target=run_apply,
+            )
+            with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory, *_args: output_destination(record, suffix, state.reserved_output_paths)), \
+                 patch.object(saving_module, "render_output", side_effect=render_in_inverse_order):
+                try:
+                    thread.start()
+                    self.assertTrue(two_workers_started.wait(10))
+                    self.assertEqual(set(started), {0, 1})
+                    self.assertEqual(state.job.completed_image_ids, ())
+                    self.assertEqual(state.job.outputs, [])
+                    release.set()
+                    self.assertTrue(worker_done.wait(10), "parallel apply worker did not finish")
+                finally:
+                    release.set()
+                    rendezvous.abort()
+                    thread.join(10)
+                self.assertFalse(thread.is_alive())
             self.assertEqual(completion_order, [1, 2, 3, 0])
             self.assertEqual(state.job.state, "complete")
             self.assertEqual(state.job.completed_image_ids, image_ids)
             self.assertEqual(state.job.outputs, [str(output_paths[record.image_id]) for record in records])
             self.assertEqual({Path(path) for path in state.job.outputs}, set(output_paths.values()))
             self.assertTrue(all(path.is_file() for path in output_paths.values()))
+            for index, record in enumerate(records):
+                self.assertEqual(output_paths[record.image_id].read_bytes(), f"rendered-{index}".encode("ascii"))
 
     def test_parallel_apply_failure_stops_workers_from_claiming_more_records(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3049,14 +3135,14 @@ class MozarieTests(unittest.TestCase):
                 with claimed_lock:
                     claimed.append(index)
                 if index == 0:
-                    if not second_started.wait(2):
+                    if not second_started.wait(THREAD_TIMEOUT):
                         raise RuntimeError("second worker did not start")
                     first_failed.set()
                     raise RuntimeError("first record failed")
                 if index != 1:
                     raise RuntimeError(f"unexpected record claimed after failure: {index}")
                 second_started.set()
-                if not release_second.wait(2):
+                if not release_second.wait(THREAD_TIMEOUT):
                     raise RuntimeError("test did not release the second worker")
                 return b"rendered-second", ".png", "image/png"
 
@@ -3068,16 +3154,17 @@ class MozarieTests(unittest.TestCase):
                 args=(records, 100, masks),
                 kwargs={"copy_to_default": True, "saving_parallelism": 2},
             )
-            with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory: output_destination(record, suffix, state.reserved_output_paths)), \
+            with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory, *_args: output_destination(record, suffix, state.reserved_output_paths)), \
                  patch.object(saving_module, "render_output", side_effect=fail_first_render), \
                  patch.object(saving_module, "write_rendered_copy"):
-                thread.start()
-                self.assertTrue(second_started.wait(2))
-                self.assertTrue(first_failed.wait(2))
-                release_second.set()
-                thread.join(2)
-
-            self.assertFalse(thread.is_alive())
+                try:
+                    thread.start()
+                    self.assertTrue(second_started.wait(THREAD_TIMEOUT))
+                    self.assertTrue(first_failed.wait(THREAD_TIMEOUT))
+                    release_second.set()
+                finally:
+                    release_second.set()
+                    join_threads(thread)
             self.assertEqual(set(claimed), {0, 1})
             self.assertEqual(state.job.state, "error")
             self.assertEqual(state.job.completed_image_ids, (image_ids[1],))
@@ -3111,13 +3198,13 @@ class MozarieTests(unittest.TestCase):
             with claimed_lock:
                 claimed.append(index)
             if index < 2:
-                started.wait(timeout=2)
+                started.wait(timeout=THREAD_TIMEOUT)
                 release = release_first if index == 0 else release_second
-                if not release.wait(2):
+                if not release.wait(THREAD_TIMEOUT):
                     raise RuntimeError("test did not release an in-flight record")
             else:
                 third_started.set()
-                if not release_third.wait(2):
+                if not release_third.wait(THREAD_TIMEOUT):
                     raise RuntimeError("test did not release the resumed record")
 
         thread = threading.Thread(
@@ -3125,31 +3212,34 @@ class MozarieTests(unittest.TestCase):
             args=(records, 2, process, control, None, None),
         )
         with patch.object(state, "_finish_claimed_task", side_effect=finish_claimed):
-            thread.start()
-            started.wait(timeout=2)
-            self.assertEqual(state.job.active_count, 2)
-            state.request_pause()
-            self.assertEqual(state.job.state, "pausing")
-            self.assertEqual(set(claimed), {0, 1})
+            try:
+                thread.start()
+                started.wait(timeout=THREAD_TIMEOUT)
+                self.assertEqual(state.job.active_count, 2)
+                state.request_pause()
+                self.assertEqual(state.job.state, "pausing")
+                self.assertEqual(set(claimed), {0, 1})
 
-            release_first.set()
-            self.assertTrue(first_settled.wait(2))
-            self.assertEqual(state.job.state, "pausing")
-            self.assertEqual(state.job.active_count, 1)
-            self.assertEqual(set(claimed), {0, 1})
+                release_first.set()
+                self.assertTrue(first_settled.wait(THREAD_TIMEOUT))
+                self.assertEqual(state.job.state, "pausing")
+                self.assertEqual(state.job.active_count, 1)
+                self.assertEqual(set(claimed), {0, 1})
 
-            release_second.set()
-            self.assertTrue(paused.wait(2))
-            self.assertEqual(state.job.active_count, 0)
-            self.assertEqual(set(claimed), {0, 1})
+                release_second.set()
+                self.assertTrue(paused.wait(THREAD_TIMEOUT))
+                self.assertEqual(state.job.active_count, 0)
+                self.assertEqual(set(claimed), {0, 1})
 
-            state.resume_job()
-            self.assertEqual(state.job.state, "running")
-            self.assertTrue(third_started.wait(2))
-            release_third.set()
-            thread.join(2)
-
-        self.assertFalse(thread.is_alive())
+                state.resume_job()
+                self.assertEqual(state.job.state, "running")
+                self.assertTrue(third_started.wait(THREAD_TIMEOUT))
+                release_third.set()
+            finally:
+                release_first.set(); release_second.set(); release_third.set()
+                started.abort()
+                control.pause_requested.clear()
+                join_threads(thread)
         self.assertEqual(state.job.active_count, 0)
 
     def test_pause_request_during_the_final_completion_does_not_leave_the_job_paused(self):
@@ -3162,22 +3252,26 @@ class MozarieTests(unittest.TestCase):
         release = threading.Event()
 
         def process(index, current):
-            started.wait(timeout=2)
-            self.assertTrue(release.wait(2))
+            started.wait(timeout=THREAD_TIMEOUT)
+            self.assertTrue(release.wait(THREAD_TIMEOUT))
             state._record_job_success(index, current.image_id, None)
 
         thread = threading.Thread(target=state._run_fixed_workers, args=([record], 1, process, control, None, None))
-        thread.start()
-        started.wait(timeout=2)
-        state.request_pause()
-        self.assertEqual(state.job.state, "pausing")
-        release.set()
-        thread.join(2)
-
-        self.assertFalse(thread.is_alive())
-        self.assertEqual(state.job.completed, state.job.total)
-        self.assertNotEqual(state.job.state, "paused")
-        self.assertFalse(control.pause_requested.is_set())
+        try:
+            thread.start()
+            started.wait(timeout=THREAD_TIMEOUT)
+            state.request_pause()
+            self.assertEqual(state.job.state, "pausing")
+            release.set()
+            join_threads(thread)
+            self.assertEqual(state.job.completed, state.job.total)
+            self.assertNotEqual(state.job.state, "paused")
+            self.assertFalse(control.pause_requested.is_set())
+        finally:
+            release.set()
+            started.abort()
+            join_threads(thread)
+            control.pause_requested.clear()
         state._finish_job()
         self.assertEqual(state.job.state, "complete")
 
@@ -3189,16 +3283,17 @@ class MozarieTests(unittest.TestCase):
         def hold_gate():
             with gate:
                 entered.set()
-                self.assertTrue(release.wait(2))
+                self.assertTrue(release.wait(THREAD_TIMEOUT))
 
         thread = threading.Thread(target=hold_gate)
-        thread.start()
-        self.assertTrue(entered.wait(2))
-        self.assertTrue(gate.locked())
-        release.set()
-        thread.join(2)
-
-        self.assertFalse(thread.is_alive())
+        try:
+            thread.start()
+            self.assertTrue(entered.wait(THREAD_TIMEOUT))
+            self.assertTrue(gate.locked())
+            release.set()
+        finally:
+            release.set()
+            join_threads(thread)
         self.assertFalse(gate.locked())
 
     def test_combined_mask_includes_draft_add_and_exclusion(self):
@@ -5005,7 +5100,7 @@ class MozarieTests(unittest.TestCase):
             with patch.object(state, "_ensure_models", return_value=[]), patch.object(state, "_detect_image", return_value=[new_auto]):
                 state._start_job("detect", [record], state._detect_worker, DEFAULT_DETECTION_CONFIDENCE, 1)
                 assert state.worker_thread is not None
-                state.worker_thread.join(2)
+                join_thread(state.worker_thread)
 
             self.assertEqual(state.job.state, "complete")
             self.assertEqual(state.candidates[record.image_id], [boundary, boundary_hand, new_auto])
@@ -5333,15 +5428,13 @@ class MozarieTests(unittest.TestCase):
                          patch.object(state, "_detect_image", return_value=[]):
                         state.start_detection([image_id])
                         assert state.worker_thread is not None
-                        state.worker_thread.join(2)
-                        self.assertFalse(state.worker_thread.is_alive())
+                        join_thread(state.worker_thread)
                         self.assertEqual(state.job.state, "complete")
                     with state.workspace_store._connect() as db:
                         self.assertEqual(db.execute("SELECT COUNT(*) FROM history_groups WHERE status='building'").fetchone()[0], 0)
                     continue
                 assert state.worker_thread is not None
-                state.worker_thread.join(2)
-                self.assertFalse(state.worker_thread.is_alive())
+                join_thread(state.worker_thread)
                 self.assertEqual(state.job.state, "complete")
 
     def test_apply_start_rejects_a_catalog_switch_without_touching_old_source(self):
@@ -5387,7 +5480,7 @@ class MozarieTests(unittest.TestCase):
             def blocked_inspect(path, suffix):
                 result = original_inspect(path, suffix)
                 entered.set()
-                self.assertTrue(release.wait(2))
+                self.assertTrue(release.wait(THREAD_TIMEOUT))
                 return result
 
             def import_worker():
@@ -5400,12 +5493,15 @@ class MozarieTests(unittest.TestCase):
 
             with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 importer = threading.Thread(target=import_worker)
-                importer.start()
-                self.assertTrue(entered.wait(2))
-                with self.assertRaises(ClientError):
-                    state.set_root(str(root))
-                release.set()
-                importer.join(2)
+                try:
+                    importer.start()
+                    self.assertTrue(entered.wait(THREAD_TIMEOUT))
+                    with self.assertRaises(ClientError):
+                        state.set_root(str(root))
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(importer)
 
             self.assertEqual(errors, [])
             self.assertTrue(imported.is_set())
@@ -5434,11 +5530,16 @@ class MozarieTests(unittest.TestCase):
 
             first = threading.Thread(target=import_worker)
             second = threading.Thread(target=import_worker)
-            first.start()
-            second.start()
-            barrier.wait()
-            first.join(2)
-            second.join(2)
+            gate_reached = False
+            try:
+                first.start()
+                second.start()
+                barrier.wait(timeout=THREAD_TIMEOUT)
+                gate_reached = True
+            finally:
+                if not gate_reached:
+                    barrier.abort()
+                join_threads(first, second)
 
             self.assertEqual(len(errors), 1)
             self.assertEqual(errors[0].error_code, "catalog_changed")
@@ -5474,7 +5575,7 @@ class MozarieTests(unittest.TestCase):
                     if active >= 2:
                         overlap.set()
                 try:
-                    self.assertTrue(release.wait(2))
+                    self.assertTrue(release.wait(THREAD_TIMEOUT))
                     return original_inspect(path, suffix)
                 finally:
                     with active_lock:
@@ -5490,10 +5591,13 @@ class MozarieTests(unittest.TestCase):
             with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 first = threading.Thread(target=worker, args=("first.png",))
                 second = threading.Thread(target=worker, args=("second.png",))
-                first.start(); second.start()
-                self.assertTrue(overlap.wait(2), "image verification should overlap across import requests")
-                release.set()
-                first.join(2); second.join(2)
+                try:
+                    first.start(); second.start()
+                    self.assertTrue(overlap.wait(THREAD_TIMEOUT), "image verification should overlap across import requests")
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(first, second)
 
             self.assertEqual(len(errors), 1)
             self.assertEqual(errors[0].error_code, "catalog_changed")
@@ -5650,16 +5754,20 @@ class MozarieTests(unittest.TestCase):
 
             def worker(_records, **kwargs):
                 entered.set()
-                self.assertTrue(release.wait(2))
+                self.assertTrue(release.wait(THREAD_TIMEOUT))
                 state._finish_job(kwargs["job_generation"], kwargs["catalog_generation"])
 
             state._start_job("detect", [record], worker)
-            self.assertTrue(entered.wait(2))
-            with self.assertRaisesRegex(ClientError, "処理中は画像を追加できません"):
-                import_image_list_for_test(state, [{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
-            release.set()
-            assert state.worker_thread is not None
-            state.worker_thread.join(2)
+            worker_thread = state.worker_thread
+            assert worker_thread is not None
+            try:
+                self.assertTrue(entered.wait(THREAD_TIMEOUT))
+                with self.assertRaisesRegex(ClientError, "処理中は画像を追加できません"):
+                    import_image_list_for_test(state, [{"name": "imported.png", "data": base64.b64encode(raw_buffer.getvalue()).decode("ascii")}])
+                release.set()
+            finally:
+                release.set()
+                join_threads(worker_thread)
 
     def test_job_start_rejects_while_import_is_still_private(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5679,7 +5787,7 @@ class MozarieTests(unittest.TestCase):
             def blocked_inspect(path, suffix):
                 result = original_inspect(path, suffix)
                 entered.set()
-                self.assertTrue(release.wait(2))
+                self.assertTrue(release.wait(THREAD_TIMEOUT))
                 return result
 
             def import_worker():
@@ -5690,12 +5798,15 @@ class MozarieTests(unittest.TestCase):
 
             with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 importer = threading.Thread(target=import_worker)
-                importer.start()
-                self.assertTrue(entered.wait(2))
-                with self.assertRaises(ClientError):
-                    state._start_job("detect", [record], lambda *_args, **_kwargs: None)
-                release.set()
-                importer.join(2)
+                try:
+                    importer.start()
+                    self.assertTrue(entered.wait(THREAD_TIMEOUT))
+                    with self.assertRaises(ClientError):
+                        state._start_job("detect", [record], lambda *_args, **_kwargs: None)
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(importer)
 
             self.assertEqual(errors, [])
             self.assertFalse((root / ".mozarie_imports").exists())
@@ -5754,7 +5865,7 @@ class MozarieTests(unittest.TestCase):
             def delayed_open(path, *args, **kwargs):
                 if isinstance(path, io.BytesIO):
                     opened.set()
-                    release.wait(2)
+                    self.assertTrue(release.wait(THREAD_TIMEOUT))
                 return original_open(path, *args, **kwargs)
 
             with patch.object(Image, "open", side_effect=delayed_open):
@@ -5766,17 +5877,18 @@ class MozarieTests(unittest.TestCase):
                         outcome["error"] = exc
                 reader = threading.Thread(target=read_mask)
                 clearer = threading.Thread(target=lambda: (state.clear_masks([image_id]), cleared.set()))
-                reader.start()
-                self.assertTrue(opened.wait(2))
-                clearer.start()
-                self.assertTrue(cleared.wait(2))
                 snapshotter = threading.Thread(target=lambda: (state.catalog_snapshot(), snapshot_done.set()))
-                snapshotter.start()
-                self.assertTrue(snapshot_done.wait(2))
-                release.set()
-                reader.join(2)
-                clearer.join(2)
-                snapshotter.join(2)
+                try:
+                    reader.start()
+                    self.assertTrue(opened.wait(THREAD_TIMEOUT))
+                    clearer.start()
+                    self.assertTrue(cleared.wait(THREAD_TIMEOUT))
+                    snapshotter.start()
+                    self.assertTrue(snapshot_done.wait(THREAD_TIMEOUT))
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(reader, clearer, snapshotter)
 
             self.assertTrue(cleared.is_set())
             self.assertFalse(mask_path.exists())
@@ -5820,14 +5932,13 @@ class MozarieTests(unittest.TestCase):
 
             def delayed_read(requested_id, candidate_id, *, expected_revision=None):
                 snapshotted.set()
-                self.assertTrue(release.wait(2))
+                self.assertTrue(release.wait(THREAD_TIMEOUT))
                 return original_read(requested_id, candidate_id, expected_revision=expected_revision)
 
             with patch.object(http_module, "STATE", state), \
                  patch.object(state, "read_candidate_mask_png", side_effect=delayed_read):
                 httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
                 thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-                thread.start()
                 result = {}
 
                 def request_mask():
@@ -5841,13 +5952,18 @@ class MozarieTests(unittest.TestCase):
                         connection.close()
 
                 request = threading.Thread(target=request_mask)
-                request.start()
-                self.assertTrue(snapshotted.wait(2))
-                state.set_candidate_state(image_id, "candidate", {"enabled": False})
-                release.set()
-                request.join(3)
-                httpd.shutdown()
-                httpd.server_close()
+                try:
+                    thread.start()
+                    request.start()
+                    self.assertTrue(snapshotted.wait(THREAD_TIMEOUT))
+                    state.set_candidate_state(image_id, "candidate", {"enabled": False})
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(request)
+                    httpd.shutdown()
+                    httpd.server_close()
+                    join_threads(thread)
 
             self.assertEqual(result["status"], 404)
             self.assertNotEqual(result["body"], mask_path.read_bytes())
@@ -5898,12 +6014,25 @@ class MozarieTests(unittest.TestCase):
             release = threading.Event()
             catalog_done = threading.Event()
             job_done = threading.Event()
+            mutation_attempted = threading.Event()
             outcome = {}
             original_open = jobs_module.Image.open
+            underlying_lock = state.image_io_lock(image_id)
+
+            class ObservedImageLock:
+                def __enter__(self):
+                    if not underlying_lock.acquire(blocking=False):
+                        mutation_attempted.set()
+                        underlying_lock.acquire()
+                    return self
+
+                def __exit__(self, *_args):
+                    underlying_lock.release()
+
             def delayed_open(path, *args, **kwargs):
                 if Path(path) == mask_path:
                     opened.set()
-                    self.assertTrue(release.wait(2))
+                    self.assertTrue(release.wait(THREAD_TIMEOUT))
                 return original_open(path, *args, **kwargs)
 
             def compose():
@@ -5912,29 +6041,38 @@ class MozarieTests(unittest.TestCase):
                 except Exception as exc:
                     outcome["error"] = exc
 
-            with patch.object(jobs_module.Image, "open", side_effect=delayed_open):
+            def mutate() -> None:
+                try:
+                    state.set_candidate_state(image_id, "candidate", {"enabled": False})
+                except Exception as exc:
+                    outcome["mutation_error"] = exc
+
+            with patch.object(jobs_module.Image, "open", side_effect=delayed_open), \
+                 patch.object(state, "image_io_lock", return_value=ObservedImageLock()):
                 worker = threading.Thread(target=compose)
-                worker.start()
-                self.assertTrue(opened.wait(2))
                 catalog_thread = threading.Thread(target=lambda: (state.catalog_snapshot(), catalog_done.set()))
                 job_thread = threading.Thread(target=lambda: (state.job.as_dict(), job_done.set()))
-                catalog_thread.start(); job_thread.start()
-                self.assertTrue(catalog_done.wait(2))
-                self.assertTrue(job_done.wait(2))
-                mutation = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
-                mutation.start()
-                time.sleep(0.05)
-                # Per-image serialization keeps a manual toggle from racing
-                # an in-flight mask composition.  Other catalogue reads above
-                # remain responsive while this image waits.
-                self.assertTrue(mutation.is_alive())
-                self.assertEqual(state._candidate_revision(image_id), 1)
-                release.set()
-                worker.join(2); mutation.join(2); catalog_thread.join(2); job_thread.join(2)
-
-            self.assertFalse(mutation.is_alive())
+                mutation = threading.Thread(target=mutate)
+                try:
+                    worker.start()
+                    self.assertTrue(opened.wait(THREAD_TIMEOUT))
+                    catalog_thread.start(); job_thread.start()
+                    self.assertTrue(catalog_done.wait(THREAD_TIMEOUT))
+                    self.assertTrue(job_done.wait(THREAD_TIMEOUT))
+                    mutation.start()
+                    self.assertTrue(mutation_attempted.wait(THREAD_TIMEOUT))
+                    # Per-image serialization keeps a manual toggle from racing
+                    # an in-flight mask composition. Other catalogue reads above
+                    # remain responsive while this image waits.
+                    self.assertTrue(mutation.is_alive())
+                    self.assertEqual(state._candidate_revision(image_id), 1)
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(worker, mutation, catalog_thread, job_thread)
             self.assertGreater(state._candidate_revision(image_id), 1)
             self.assertNotIn("error", outcome)
+            self.assertNotIn("mutation_error", outcome)
             self.assertIsNotNone(outcome.get("mask"))
 
     def test_list_candidates_prunes_missing_masks_and_advances_revision_once(self):
@@ -6041,7 +6179,7 @@ class MozarieTests(unittest.TestCase):
 
             self.assertTrue(state.start_apply([image_id], 100, {}))
             assert state.worker_thread is not None
-            state.worker_thread.join(2)
+            join_thread(state.worker_thread)
 
             self.assertEqual(state.job.state, "error")
             self.assertEqual(source.read_bytes(), original)
@@ -6123,7 +6261,7 @@ class MozarieTests(unittest.TestCase):
             def colliding_destination(_record, _suffix, reserved):
                 return output if output not in reserved else root / "output_2.png"
 
-            with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory: colliding_destination(record, suffix, state.reserved_output_paths)):
+            with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory, *_args: colliding_destination(record, suffix, state.reserved_output_paths)):
                 state._apply_worker(
                     records, 100, {first_id: np.zeros((16, 16), dtype=np.uint8), second_id: self._mask(16, 16)},
                     copy_to_default=True, saving_parallelism=2,
@@ -6152,9 +6290,7 @@ class MozarieTests(unittest.TestCase):
             with patch.object(state, "_reserve_output_destination", return_value=root / "output.png"), \
                  patch.object(saving_module, "write_rendered_copy"):
                 worker.start()
-                worker.join(2)
-
-            self.assertFalse(worker.is_alive())
+                join_threads(worker)
             self.assertEqual(state.job.state, "error")
 
     def test_copy_save_advances_past_an_out_of_order_empty_mask(self):
@@ -6175,7 +6311,7 @@ class MozarieTests(unittest.TestCase):
             def compose(image_id, _draft, **_kwargs):
                 if image_id == image_ids[0]:
                     first_entered.set()
-                    self.assertTrue(release_first.wait(2))
+                    self.assertTrue(release_first.wait(THREAD_TIMEOUT))
                     return self._mask(16, 16)
                 if image_id == image_ids[1]:
                     empty_done.set()
@@ -6189,17 +6325,18 @@ class MozarieTests(unittest.TestCase):
                 kwargs={"copy_to_default": True, "saving_parallelism": 3},
             )
             with patch.object(state, "combined_candidate_mask", side_effect=compose), \
-                patch.object(state, "_reserve_output_destination", side_effect=lambda record, _suffix, _directory: output_paths[record.image_id]), \
+                patch.object(state, "_reserve_output_destination", side_effect=lambda record, _suffix, _directory, *_args: output_paths[record.image_id]), \
                  patch.object(saving_module, "render_with_mask", return_value=b"rendered"), \
                  patch.object(saving_module, "write_rendered_copy"):
-                worker.start()
-                self.assertTrue(first_entered.wait(2))
-                self.assertTrue(empty_done.wait(2))
-                self.assertTrue(third_ready.wait(2))
-                release_first.set()
-                worker.join(2)
-
-            self.assertFalse(worker.is_alive())
+                try:
+                    worker.start()
+                    self.assertTrue(first_entered.wait(THREAD_TIMEOUT))
+                    self.assertTrue(empty_done.wait(THREAD_TIMEOUT))
+                    self.assertTrue(third_ready.wait(THREAD_TIMEOUT))
+                    release_first.set()
+                finally:
+                    release_first.set()
+                    join_threads(worker)
             self.assertEqual(state.job.state, "complete")
             self.assertEqual(state.job.outputs, [str(output_paths[image_id]) for image_id in image_ids])
 
@@ -6232,16 +6369,20 @@ class MozarieTests(unittest.TestCase):
 
             def worker(_records, **kwargs):
                 entered.set()
-                self.assertTrue(release.wait(2))
+                self.assertTrue(release.wait(THREAD_TIMEOUT))
                 state._finish_job(kwargs["job_generation"], kwargs["catalog_generation"])
 
             state._start_job("detect", [record], worker)
-            self.assertTrue(entered.wait(2))
-            with self.assertRaisesRegex(ClientError, "画像一覧を変更できません"):
-                state.set_root(str(root))
-            release.set()
-            self.assertTrue(state.worker_thread is not None)
-            state.worker_thread.join(2)
+            worker_thread = state.worker_thread
+            assert worker_thread is not None
+            try:
+                self.assertTrue(entered.wait(THREAD_TIMEOUT))
+                with self.assertRaisesRegex(ClientError, "画像一覧を変更できません"):
+                    state.set_root(str(root))
+                release.set()
+            finally:
+                release.set()
+                join_threads(worker_thread)
             state.set_root(str(root))
 
             stale = Candidate("stale", "penis", 0.9, state.cache_dir / image_id / "stale.png")
@@ -6268,20 +6409,25 @@ class MozarieTests(unittest.TestCase):
                 entered.set()
                 while not control.cancel_requested.is_set():
                     time.sleep(0.01)
-                self.assertTrue(release.wait(2))
+                self.assertTrue(release.wait(THREAD_TIMEOUT))
                 state._cancel_job(kwargs["job_generation"], kwargs["catalog_generation"])
 
             state._start_job("apply", [record], worker)
-            self.assertTrue(entered.wait(2))
-            state.request_cancel()
-            with self.assertRaises(ClientError):
-                state._start_job("detect", [record], lambda *_args, **_kwargs: None)
-            release.set()
-            assert state.worker_thread is not None
-            state.worker_thread.join(2)
+            cancelled_thread = state.worker_thread
+            assert cancelled_thread is not None
+            try:
+                self.assertTrue(entered.wait(THREAD_TIMEOUT))
+                state.request_cancel()
+                with self.assertRaises(ClientError):
+                    state._start_job("detect", [record], lambda *_args, **_kwargs: None)
+                release.set()
+            finally:
+                release.set()
+                join_threads(cancelled_thread)
             state._start_job("detect", [record], lambda *_args, **_kwargs: None)
-            assert state.worker_thread is not None
-            state.worker_thread.join(2)
+            next_thread = state.worker_thread
+            assert next_thread is not None
+            join_threads(next_thread)
 
     def test_api_returns_utf8_japanese_client_error(self):
         from http.server import ThreadingHTTPServer
@@ -6728,14 +6874,13 @@ class MozarieTests(unittest.TestCase):
                     with calls_lock:
                         calls += 1
                     started.set()
-                    self.assertTrue(release.wait(2))
+                    self.assertTrue(release.wait(THREAD_TIMEOUT))
                 return original_open(path, *args, **kwargs)
 
             with patch.object(http_module, "STATE", state), \
                  patch.object(http_module.Image, "open", side_effect=delayed_open):
                 httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
                 thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-                thread.start()
                 results = []
 
                 def request_thumbnail():
@@ -6748,16 +6893,20 @@ class MozarieTests(unittest.TestCase):
                         connection.close()
 
                 workers = [threading.Thread(target=request_thumbnail) for _ in range(8)]
-                for worker in workers:
-                    worker.start()
-                self.assertTrue(started.wait(2))
-                with calls_lock:
-                    self.assertEqual(calls, 1)
-                release.set()
-                for worker in workers:
-                    worker.join(3)
-                httpd.shutdown()
-                httpd.server_close()
+                try:
+                    thread.start()
+                    for worker in workers:
+                        worker.start()
+                    self.assertTrue(started.wait(THREAD_TIMEOUT))
+                    with calls_lock:
+                        self.assertEqual(calls, 1)
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(*workers)
+                    httpd.shutdown()
+                    httpd.server_close()
+                    join_threads(thread)
             self.assertEqual(calls, 1)
             self.assertEqual([status for status, _body in results], [200] * 8)
 
@@ -6857,7 +7006,7 @@ class MozarieTests(unittest.TestCase):
             def delayed_stream(handler, handle, record, *args):
                 if record is not None:
                     started.set()
-                    self.assertTrue(release.wait(2))
+                    self.assertTrue(release.wait(THREAD_TIMEOUT))
                 return original_stream(handler, handle, record, *args)
 
             def request_image(port):
@@ -6880,19 +7029,22 @@ class MozarieTests(unittest.TestCase):
                  patch.object(MosaicHandler, "_stream_file", new=delayed_stream):
                 httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
                 server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-                server_thread.start()
                 reader = threading.Thread(target=request_image, args=(httpd.server_port,))
-                reader.start()
-                self.assertTrue(started.wait(2))
                 writer = threading.Thread(target=mutate_source)
-                writer.start()
-                self.assertTrue(writer_attempted.wait(2))
-                self.assertFalse(writer_done.is_set())
-                release.set()
-                reader.join(3)
-                writer.join(3)
-                httpd.shutdown()
-                httpd.server_close()
+                try:
+                    server_thread.start()
+                    reader.start()
+                    self.assertTrue(started.wait(THREAD_TIMEOUT))
+                    writer.start()
+                    self.assertTrue(writer_attempted.wait(THREAD_TIMEOUT))
+                    self.assertFalse(writer_done.is_set())
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(reader, writer)
+                    httpd.shutdown()
+                    httpd.server_close()
+                    join_threads(server_thread)
 
             self.assertEqual(result, {"status": 200, "body": expected_body})
             self.assertTrue(writer_done.is_set())
@@ -6921,14 +7073,13 @@ class MozarieTests(unittest.TestCase):
                         entered.add(path)
                         if len(entered) == 5:
                             all_five.set()
-                    self.assertTrue(release.wait(2))
+                    self.assertTrue(release.wait(THREAD_TIMEOUT))
                 return original_open(path, *args, **kwargs)
 
             with patch.object(http_module, "STATE", state), \
                  patch.object(http_module.Image, "open", side_effect=delayed_open):
                 httpd = ThreadingHTTPServer(("127.0.0.1", 0), MosaicHandler)
                 server_thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-                server_thread.start()
                 statuses = []
 
                 def request_thumbnail(image):
@@ -6943,17 +7094,18 @@ class MozarieTests(unittest.TestCase):
 
                 workers = [threading.Thread(target=request_thumbnail, args=(image,)) for image in images]
                 try:
+                    server_thread.start()
                     for worker in workers:
                         worker.start()
-                    self.assertTrue(all_five.wait(2))
+                    self.assertTrue(all_five.wait(THREAD_TIMEOUT))
                     with entered_lock:
                         self.assertEqual(len(entered), 5)
                 finally:
                     release.set()
-                    for worker in workers:
-                        worker.join(3)
+                    join_threads(*workers)
                     httpd.shutdown()
                     httpd.server_close()
+                    join_threads(server_thread)
             self.assertEqual(sorted(statuses), [200] * 5)
 
     def test_browser_save_overwrite_updates_state_when_timestamp_restore_fails(self):
@@ -7055,33 +7207,68 @@ class MozarieTests(unittest.TestCase):
             _output, _record, rendered_revision, token = state.render_browser_save(image_id, revision, 100, None)
             fingerprint_started = threading.Event()
             release = threading.Event()
+            clear_attempted = threading.Event()
             clear_done = threading.Event()
+            commit_done = threading.Event()
             commit_result = {}
+            clear_result = {}
             original_replace = saving_module._stage_record_replacement
+            original_import_lock = state.import_lock
+            clearer_context = threading.local()
+
+            class ObservedImportLock:
+                def __enter__(self):
+                    if getattr(clearer_context, "active", False): clear_attempted.set()
+                    return original_import_lock.__enter__()
+
+                def __exit__(self, *args):
+                    return original_import_lock.__exit__(*args)
+
+                def __getattr__(self, name):
+                    return getattr(original_import_lock, name)
 
             def delayed_replace(record, rendered_path, fingerprint, backup_ready=None):
                 fingerprint_started.set()
-                self.assertTrue(release.wait(2))
+                self.assertTrue(release.wait(THREAD_TIMEOUT))
                 return original_replace(record, rendered_path, fingerprint, backup_ready)
 
-            with patch.object(saving_module, "_stage_record_replacement", side_effect=delayed_replace):
-                commit = threading.Thread(
-                    target=lambda: commit_result.setdefault(
-                        "value", state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
-                    )
-                )
-                commit.start()
-                self.assertTrue(fingerprint_started.wait(2))
-                clearer = threading.Thread(target=lambda: (state.clear_catalog(), clear_done.set()))
-                clearer.start()
-                self.assertFalse(clear_done.is_set())
-                release.set()
-                commit.join(3)
-                clearer.join(3)
+            def run_commit():
+                try:
+                    commit_result["value"] = state.commit_browser_save(image_id, rendered_revision, token, "overwrite")
+                finally:
+                    commit_done.set()
 
-            self.assertFalse(commit.is_alive())
+            def clear_catalog():
+                clearer_context.active = True
+                try:
+                    clear_result["generation"] = state.clear_catalog()
+                finally:
+                    clear_done.set()
+
+            state.import_lock = ObservedImportLock()
+            try:
+                with patch.object(saving_module, "_stage_record_replacement", side_effect=delayed_replace):
+                    commit = threading.Thread(target=run_commit)
+                    clearer = threading.Thread(target=clear_catalog)
+                    try:
+                        commit.start()
+                        self.assertTrue(fingerprint_started.wait(THREAD_TIMEOUT))
+                        clearer.start()
+                        self.assertTrue(clear_attempted.wait(THREAD_TIMEOUT))
+                        self.assertFalse(clear_done.is_set())
+                        release.set()
+                        self.assertTrue(commit_done.wait(THREAD_TIMEOUT), "browser save commit did not finish")
+                        self.assertTrue(clear_done.wait(THREAD_TIMEOUT), "catalog clear did not finish")
+                    finally:
+                        release.set()
+                        join_thread(commit)
+                        join_thread(clearer)
+            finally:
+                state.import_lock = original_import_lock
+
             self.assertTrue(commit_result["value"]["cleared"])
             self.assertTrue(clear_done.is_set())
+            self.assertEqual(clear_result["generation"], state.catalog_generation)
             self.assertEqual(state.list_images(), [])
 
     def test_browser_save_session_overwrite_synchronizes_the_session_image(self):
@@ -7435,14 +7622,23 @@ class MozarieTests(unittest.TestCase):
             revision = state._touch_candidates(image_id)
 
             output_bytes = 0
-            for _index in range(400):
-                rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_browser=True)
-                output_bytes += len(self.browser_render_bytes(rendered))
-                self.assertIsNone(rendered.output_path)
-                self.assertIsNone(state.browser_save_tokens[rendered.save_token].rendered_path)
-                assert rendered.response_path is not None
-                rendered.response_path.unlink()
-                self.assertTrue(state.commit_browser_save(image_id, revision, rendered.save_token, "keep")["cleared"])
+            original_connect = sqlite3.connect
+
+            def connect_with_test_journal_sync_disabled(database, *args, **kwargs):
+                db = original_connect(database, *args, **kwargs)
+                if database == state.save_journal.path:
+                    db.execute("PRAGMA synchronous=OFF")
+                return db
+
+            with patch.object(save_journal_module.sqlite3, "connect", side_effect=connect_with_test_journal_sync_disabled):
+                for _index in range(400):
+                    rendered = state.render_browser_save(image_id, revision, 100, None, copy_to_browser=True)
+                    output_bytes += len(self.browser_render_bytes(rendered))
+                    self.assertIsNone(rendered.output_path)
+                    self.assertIsNone(state.browser_save_tokens[rendered.save_token].rendered_path)
+                    assert rendered.response_path is not None
+                    rendered.response_path.unlink()
+                    self.assertTrue(state.commit_browser_save(image_id, revision, rendered.save_token, "keep")["cleared"])
 
             self.assertGreater(output_bytes, 0)
             self.assertEqual(list((state.cache_dir / "browser-save").glob("*")), [])
@@ -7597,7 +7793,7 @@ class MozarieTests(unittest.TestCase):
             original_replace = saving_module._stage_record_replacement
 
             def block_after_claim(record, rendered_path, fingerprint, backup_ready=None):
-                claimed.set(); self.assertTrue(release.wait(2)); return original_replace(record, rendered_path, fingerprint, backup_ready)
+                claimed.set(); self.assertTrue(release.wait(THREAD_TIMEOUT)); return original_replace(record, rendered_path, fingerprint, backup_ready)
 
             def commit():
                 try:
@@ -7606,11 +7802,15 @@ class MozarieTests(unittest.TestCase):
                     outcome["error"] = exc
 
             with patch.object(saving_module, "_stage_record_replacement", side_effect=block_after_claim):
-                thread = threading.Thread(target=commit); thread.start()
-                self.assertTrue(claimed.wait(2))
-                state.cleanup_browser_save_files()
-                self.assertTrue(rendered_path.exists())
-                release.set(); thread.join(2)
+                thread = threading.Thread(target=commit)
+                try:
+                    thread.start(); self.assertTrue(claimed.wait(THREAD_TIMEOUT))
+                    state.cleanup_browser_save_files()
+                    self.assertTrue(rendered_path.exists())
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(thread)
 
             self.assertNotIn("error", outcome)
             self.assertTrue(outcome["value"]["cleared"])
@@ -7631,7 +7831,7 @@ class MozarieTests(unittest.TestCase):
             original_assert = state._assert_record_stat_matches
 
             def block_assert(*args, **kwargs):
-                claimed.set(); self.assertTrue(release.wait(2)); return original_assert(*args, **kwargs)
+                claimed.set(); self.assertTrue(release.wait(THREAD_TIMEOUT)); return original_assert(*args, **kwargs)
 
             def commit():
                 try:
@@ -7640,11 +7840,15 @@ class MozarieTests(unittest.TestCase):
                     outcome["error"] = exc
 
             with patch.object(state, "_assert_record_stat_matches", side_effect=block_assert):
-                thread = threading.Thread(target=commit); thread.start()
-                self.assertTrue(claimed.wait(2))
-                state.cleanup_browser_save_files()
-                self.assertTrue(rendered.output_path.exists())
-                release.set(); thread.join(2)
+                thread = threading.Thread(target=commit)
+                try:
+                    thread.start(); self.assertTrue(claimed.wait(THREAD_TIMEOUT))
+                    state.cleanup_browser_save_files()
+                    self.assertTrue(rendered.output_path.exists())
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(thread)
 
             self.assertNotIn("error", outcome)
             self.assertTrue(outcome["value"]["deleted"])
@@ -7666,7 +7870,7 @@ class MozarieTests(unittest.TestCase):
             original_assert = state._assert_record_stat_matches
 
             def block_assert(*args, **kwargs):
-                claimed.set(); self.assertTrue(release.wait(2)); return original_assert(*args, **kwargs)
+                claimed.set(); self.assertTrue(release.wait(THREAD_TIMEOUT)); return original_assert(*args, **kwargs)
 
             def commit():
                 try:
@@ -7675,12 +7879,17 @@ class MozarieTests(unittest.TestCase):
                     outcome["error"] = exc
 
             with patch.object(state, "_assert_record_stat_matches", side_effect=block_assert):
-                commit_thread = threading.Thread(target=commit); commit_thread.start()
-                self.assertTrue(claimed.wait(2))
-                shutdown_thread = threading.Thread(target=lambda: (state.shutdown(), shutdown_done.set())); shutdown_thread.start()
-                self.assertFalse(shutdown_done.wait(.1))
-                self.assertTrue(rendered.output_path.exists())
-                release.set(); commit_thread.join(2); shutdown_thread.join(2)
+                commit_thread = threading.Thread(target=commit)
+                shutdown_thread = threading.Thread(target=lambda: (state.shutdown(), shutdown_done.set()))
+                try:
+                    commit_thread.start(); self.assertTrue(claimed.wait(THREAD_TIMEOUT))
+                    shutdown_thread.start()
+                    self.assertFalse(shutdown_done.wait(.1))
+                    self.assertTrue(rendered.output_path.exists())
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(commit_thread, shutdown_thread)
 
             self.assertNotIn("error", outcome)
             self.assertTrue(outcome["value"]["deleted"])
@@ -7879,7 +8088,7 @@ class MozarieTests(unittest.TestCase):
             def capture_snapshot(_record, snapshot, _divisor, _output_format, _keep_metadata):
                 observed["mask"] = snapshot.copy()
                 render_started.set()
-                self.assertTrue(allow_render_to_finish.wait(2))
+                self.assertTrue(allow_render_to_finish.wait(THREAD_TIMEOUT))
                 return b"rendered", ".png", "image/png"
 
             def run_render():
@@ -7890,16 +8099,15 @@ class MozarieTests(unittest.TestCase):
 
             with patch.object(saving_module, "render_output", side_effect=capture_snapshot):
                 thread = threading.Thread(target=run_render)
-                thread.start()
-                self.assertTrue(render_started.wait(2))
                 mutation = threading.Thread(target=lambda: state.set_candidate_state(image_id, "candidate", {"enabled": False}))
-                mutation.start()
-                allow_render_to_finish.set()
-                thread.join(2)
-                mutation.join(2)
-
-            self.assertFalse(thread.is_alive())
-            self.assertFalse(mutation.is_alive())
+                try:
+                    thread.start()
+                    self.assertTrue(render_started.wait(THREAD_TIMEOUT))
+                    mutation.start()
+                    allow_render_to_finish.set()
+                finally:
+                    allow_render_to_finish.set()
+                    join_threads(thread, mutation)
             self.assertNotIn("error", outcome)
             self.assertTrue(np.any(observed["mask"]))
             rendered = outcome["result"]
@@ -8115,7 +8323,7 @@ class MozarieTests(unittest.TestCase):
             def staged_walk(path, *, onerror):
                 self.assertTrue(path.samefile(root))
                 yield str(root), [], ["first.png"]
-                self.assertTrue(inspection_started.wait(1), "inspection must begin while enumeration is blocked")
+                self.assertTrue(inspection_started.wait(THREAD_TIMEOUT), "inspection must begin while enumeration is blocked")
                 yield str(root), [], ["second.png"]
                 enumeration_finished.set()
 
@@ -8143,7 +8351,7 @@ class MozarieTests(unittest.TestCase):
 
             def blocked_inspect(path, suffix):
                 entered.set()
-                self.assertTrue(release.wait(10), "scan test must release its controlled image read")
+                self.assertTrue(release.wait(THREAD_TIMEOUT), "scan test must release its controlled image read")
                 return original_inspect(path, suffix)
 
             def load_root():
@@ -8156,14 +8364,16 @@ class MozarieTests(unittest.TestCase):
 
             with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 loader = threading.Thread(target=load_root)
-                loader.start()
-                self.assertTrue(entered.wait(10), "folder scan did not reach its controlled inspection")
-                self.assertTrue(state.import_lock.acquire(blocking=False))
-                state.import_lock.release()
-                self.assertFalse(finished.is_set(), "folder reload finished before its controlled inspection was released")
-                release.set()
-                loader.join(10)
-                self.assertFalse(loader.is_alive(), "folder reload did not finish after inspection was released")
+                try:
+                    loader.start()
+                    self.assertTrue(entered.wait(THREAD_TIMEOUT), "folder scan did not reach its controlled inspection")
+                    self.assertTrue(state.import_lock.acquire(blocking=False))
+                    state.import_lock.release()
+                    self.assertFalse(finished.is_set(), "folder reload finished before its controlled inspection was released")
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(loader)
                 self.assertTrue(finished.is_set())
                 self.assertEqual(failures, [])
 
@@ -8179,7 +8389,7 @@ class MozarieTests(unittest.TestCase):
 
             def blocked_inspect(path, suffix):
                 entered.set()
-                self.assertTrue(release.wait(1), "scan test must release its controlled image read")
+                self.assertTrue(release.wait(THREAD_TIMEOUT), "scan test must release its controlled image read")
                 return original_inspect(path, suffix)
 
             def load_root():
@@ -8190,12 +8400,15 @@ class MozarieTests(unittest.TestCase):
 
             with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 loader = threading.Thread(target=load_root)
-                loader.start()
-                self.assertTrue(entered.wait(1))
-                with state.lock:
-                    state.catalog_generation += 1
-                release.set()
-                loader.join()
+                try:
+                    loader.start()
+                    self.assertTrue(entered.wait(THREAD_TIMEOUT))
+                    with state.lock:
+                        state.catalog_generation += 1
+                    release.set()
+                finally:
+                    release.set()
+                    join_threads(loader)
 
             self.assertEqual(len(result), 1)
             self.assertEqual(result[0].error_code, "stale_catalog")
@@ -8221,7 +8434,7 @@ class MozarieTests(unittest.TestCase):
 
                 contender = threading.Thread(target=try_acquire)
                 contender.start()
-                contender.join()
+                join_threads(contender)
                 self.assertEqual(acquired_elsewhere, [False])
             finally:
                 state.import_lock.release()

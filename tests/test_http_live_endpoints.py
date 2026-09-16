@@ -28,6 +28,17 @@ from mozarie.runtime_types import DetectionModels
 from mozarie.http import MosaicHandler
 from mozarie.state import StudioState
 
+THREAD_TIMEOUT = 30
+
+
+def join_threads(*threads: threading.Thread) -> None:
+    started = [thread for thread in threads if thread.ident is not None]
+    for thread in started:
+        thread.join(THREAD_TIMEOUT)
+    for thread in started:
+        if thread.is_alive():
+            raise AssertionError(f"thread did not finish: {thread.name}")
+
 
 class LiveHttpEndpointTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -706,21 +717,28 @@ class LiveHttpEndpointTests(unittest.TestCase):
         entered = threading.Event(); release = threading.Event(); result: dict[str, object] = {}
         original = self.state.workspace_store.set_image_flags
         def delayed(*args, **kwargs):
-            entered.set(); self.assertTrue(release.wait(2)); return original(*args, **kwargs)
+            entered.set(); self.assertTrue(release.wait(THREAD_TIMEOUT)); return original(*args, **kwargs)
         def flag_request() -> None:
-            result["response"] = self.request("POST", f"/api/workspace/image/{image_id}", {"hidden": True}, authorized=True)
+            try:
+                result["response"] = self.request("POST", f"/api/workspace/image/{image_id}", {"hidden": True}, authorized=True)
+            except BaseException as exc:
+                result["error"] = exc
         with patch.object(self.state.workspace_store, "set_image_flags", side_effect=delayed):
-            worker = threading.Thread(target=flag_request); worker.start()
-            self.assertTrue(entered.wait(1))
-            # The write holds the catalogue transition until SQLite confirms it.
-            # Release it before reading state so the test verifies the durable
-            # transition rather than relying on an implementation-specific lock order.
-            release.set()
-            worker.join(2)
-            self.assertFalse(worker.is_alive())
+            worker = threading.Thread(target=flag_request)
+            try:
+                worker.start()
+                self.assertTrue(entered.wait(THREAD_TIMEOUT))
+                # The write holds the catalogue transition until SQLite confirms it.
+                # Release it before reading state so the test verifies the durable
+                # transition rather than relying on an implementation-specific lock order.
+                release.set()
+            finally:
+                release.set()
+                join_threads(worker)
             status, _headers, body = self.request("GET", "/api/job")
             self.assertEqual(status, 200)
             self.assertIn("state", json.loads(body))
+        self.assertNotIn("error", result)
         status, _headers, body = result["response"]  # type: ignore[misc]
         self.assertEqual(status, 200)
         self.assertTrue(json.loads(body)["hidden"])

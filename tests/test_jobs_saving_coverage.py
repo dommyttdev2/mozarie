@@ -19,6 +19,17 @@ import mozarie.jobs as jobs_module
 from mozarie.jobs import JobsMixin
 from mozarie.saving import SavingMixin
 
+THREAD_TIMEOUT = 30
+
+
+def join_threads(*threads: threading.Thread) -> None:
+    started = [thread for thread in threads if thread.ident is not None]
+    for thread in started:
+        thread.join(THREAD_TIMEOUT)
+    for thread in started:
+        if thread.is_alive():
+            raise AssertionError(f"thread did not finish: {thread.name}")
+
 
 class JobsSavingCoverageTests(unittest.TestCase):
     def make_jobs(self) -> JobsMixin:
@@ -247,27 +258,40 @@ class JobsSavingCoverageTests(unittest.TestCase):
         for kind, terminal in (("detect", "complete"), ("apply", "complete"), ("detect", "cancelled"), ("detect", "failed"), ("detect", "oom")):
             with self.subTest(kind=kind, terminal=terminal):
                 state = self.make_jobs()
+                state.job_generation = 0
                 record = SimpleNamespace(image_id="one")
                 retained_tracebacks = []
+                failures: list[BaseException] = []
+                terminal_reached = threading.Event()
+                cleanup_finished = threading.Event()
 
                 def worker(_records, *, control, job_generation, catalog_generation):
-                    if terminal == "complete":
-                        state._finish_job(job_generation, catalog_generation)
-                    elif terminal == "cancelled":
-                        state._cancel_job(job_generation, catalog_generation)
-                    else:
-                        try:
-                            raise RuntimeError("CUDA out of memory" if terminal == "oom" else "failure")
-                        except RuntimeError as exc:
-                            state._fail_job(exc, job_generation, catalog_generation)
-                            retained_tracebacks.append(exc.__traceback__)
-                    release.assert_not_called()
+                    try:
+                        if terminal == "complete":
+                            state._finish_job(job_generation, catalog_generation)
+                        elif terminal == "cancelled":
+                            state._cancel_job(job_generation, catalog_generation)
+                        else:
+                            try:
+                                raise RuntimeError("CUDA out of memory" if terminal == "oom" else "failure")
+                            except RuntimeError as exc:
+                                state._fail_job(exc, job_generation, catalog_generation)
+                                retained_tracebacks.append(exc.__traceback__)
+                        release.assert_not_called()
+                    except BaseException as exc:
+                        failures.append(exc)
+                    finally:
+                        terminal_reached.set()
 
-                with patch.object(state, "_release_gpu_job_memory") as release:
+                with patch.object(state, "_release_gpu_job_memory", side_effect=cleanup_finished.set) as release:
                     state._start_job(kind, [record], worker)
                     assert state.worker_thread is not None
-                    state.worker_thread.join(2)
+                    join_threads(state.worker_thread)
                 release.assert_called_once_with()
+                self.assertTrue(terminal_reached.is_set())
+                self.assertTrue(cleanup_finished.is_set())
+                self.assertEqual(failures, [])
+                self.assertEqual(state.job.state, {"complete": "complete", "cancelled": "cancelled", "failed": "error", "oom": "error"}[terminal])
                 if terminal == "oom":
                     self.assertEqual(retained_tracebacks, [None])
 
@@ -309,6 +333,8 @@ class JobsSavingCoverageTests(unittest.TestCase):
         state = self.make_jobs()
         cleanup_started = threading.Event()
         allow_cleanup = threading.Event()
+        settings_attempted = threading.Event()
+        boundary_attempted = threading.Event()
         settings_entered = threading.Event()
         boundary_entered = threading.Event()
 
@@ -327,31 +353,48 @@ class JobsSavingCoverageTests(unittest.TestCase):
 
         def release_cache(**_kwargs):
             cleanup_started.set()
-            self.assertTrue(allow_cleanup.wait(2))
+            self.assertTrue(allow_cleanup.wait(THREAD_TIMEOUT))
 
-        cleanup = threading.Thread(target=state._release_gpu_job_memory)
+        cleanup_result: dict[str, BaseException] = {}
+
+        def cleanup_memory() -> None:
+            try:
+                state._release_gpu_job_memory()
+                cleanup_result["success"] = True
+            except BaseException as exc:
+                cleanup_result["error"] = exc
+
+        cleanup = threading.Thread(target=cleanup_memory)
 
         def update_settings():
+            settings_attempted.set()
             with state.inference_lock:
                 settings_entered.set()
 
         def run_boundary_inference():
+            boundary_attempted.set()
             with state.inference_lock:
                 boundary_entered.set()
 
+        settings = threading.Thread(target=update_settings)
+        boundary = threading.Thread(target=run_boundary_inference)
         with patch.object(state, "_release_gpu_cache", side_effect=release_cache):
-            cleanup.start()
-            self.assertTrue(cleanup_started.wait(2))
-            settings = threading.Thread(target=update_settings)
-            boundary = threading.Thread(target=run_boundary_inference)
-            settings.start(); boundary.start()
-            self.assertFalse(settings_entered.wait(.1))
-            self.assertFalse(boundary_entered.wait(.1))
-            allow_cleanup.set()
-            cleanup.join(2); settings.join(2); boundary.join(2)
-        self.assertFalse(cleanup.is_alive())
+            try:
+                cleanup.start()
+                self.assertTrue(cleanup_started.wait(THREAD_TIMEOUT))
+                settings.start(); boundary.start()
+                self.assertTrue(settings_attempted.wait(THREAD_TIMEOUT))
+                self.assertTrue(boundary_attempted.wait(THREAD_TIMEOUT))
+                self.assertFalse(settings_entered.wait(.1))
+                self.assertFalse(boundary_entered.wait(.1))
+                allow_cleanup.set()
+            finally:
+                allow_cleanup.set()
+                join_threads(cleanup, settings, boundary)
         self.assertTrue(settings_entered.is_set())
         self.assertTrue(boundary_entered.is_set())
+        self.assertNotIn("error", cleanup_result)
+        self.assertTrue(cleanup_result.get("success"))
 
     def test_job_races_and_remaining_worker_branches(self) -> None:
         state = self.make_jobs()

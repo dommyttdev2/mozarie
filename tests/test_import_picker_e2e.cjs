@@ -108,6 +108,7 @@ function startFixtureServer() {
   const detectRequests = [];
   const applyRequests = [];
   const settingsRequests = [];
+  const settingsPayloads = [];
   const settingsActions = [];
   const settingsStatusRequests = [];
   const settingsStatusWaiters = [];
@@ -143,6 +144,7 @@ function startFixtureServer() {
   let sourceDeleteCommitFailureIds = new Set();
   const pendingSourceDeleteClaims = [];
   const saveRequests = [];
+  const renameRequests = [];
   let holdSaveRender = false;
   const pendingSaveRenders = [];
   const catalogRemoveRequests = [];
@@ -178,7 +180,7 @@ function startFixtureServer() {
     detection: { mode: "standard", fluid_exclusion_enabled: true, exclude_forced_default: true, threshold: 0.5, parallelism: 2, default_candidate_padding_px: 3, targets: ["penis", "pussy"] },
     shortcuts: {
       enabled: true,
-      bindings: { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", reviewAndNext: "Enter", removeImage: "Delete", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" },
+      bindings: { previous: "ArrowLeft", next: "ArrowRight", previousVisible: "ArrowUp", nextVisible: "ArrowDown", first: "Home", last: "End", reviewAndNext: "Enter", removeImage: "Delete", toggleOverview: "G", undo: "Ctrl+Z", redo: "Ctrl+Shift+Z", renameImage: "F2" },
       actions: {},
     }, confirmations: {},
   };
@@ -196,6 +198,7 @@ function startFixtureServer() {
       if (request.method === "POST") {
         let body = ""; for await (const chunk of request) body += chunk;
         const submitted = JSON.parse(body);
+        settingsPayloads.push({ search: requestUrl.search, body: structuredClone(submitted) });
         // The product accepts a focused settings patch for the output-folder
         // picker as well as a complete settings form submission.
         const submittedSettings = {
@@ -372,6 +375,16 @@ function startFixtureServer() {
       const images = catalog.filter((image) => image.id !== imageId);
       response.writeHead(200, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ images, removedImageIds }));
+      return;
+    }
+    if (requestPath === "/api/catalog/rename" && request.method === "POST") {
+      let body = ""; for await (const chunk of request) body += chunk;
+      const payload = JSON.parse(body); const image = catalog.find((entry) => entry.id === payload.imageId);
+      if (!image) { response.writeHead(404, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "image_not_found" })); return; }
+      const prefix = image.relativePath.includes("/") ? `${image.relativePath.split("/").slice(0, -1).join("/")}/` : "";
+      image.relativePath = `${prefix}${payload.filename}`;
+      catalogGeneration += 1; renameRequests.push(payload);
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ images: catalog, catalogGeneration }));
       return;
     }
     if (requestPath === "/api/save/prepare" && request.method === "POST") {
@@ -654,7 +667,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, setFolderImportFailures: (failures) => { folderImportFailures = structuredClone(failures); }, catalogImageIds: () => catalog.map((image) => image.id), sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), setSourceDeleteCommitFailureIds: (imageIds) => { sourceDeleteCommitFailureIds = new Set(imageIds); }, holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests: (count) => settingsStatusRequests.length >= count ? Promise.resolve() : new Promise((resolve) => settingsStatusWaiters.push({ count, resolve })), updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; sourceDeleteCommitFailureIds = new Set(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; folderImportFailures = []; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, setDefaultOutputDirectory: (value) => { settings.saving.default_output_directory = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, renameRequests, catalogRemoveRequests, folderRequests, setFolderImportFailures: (failures) => { folderImportFailures = structuredClone(failures); }, catalogImageIds: () => catalog.map((image) => image.id), sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), setSourceDeleteCommitFailureIds: (imageIds) => { sourceDeleteCommitFailureIds = new Set(imageIds); }, holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsPayloads, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests: (count) => settingsStatusRequests.length >= count ? Promise.resolve() : new Promise((resolve) => settingsStatusWaiters.push({ count, resolve })), updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; sourceDeleteCommitFailureIds = new Set(); saveRequests.length = 0; renameRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; folderImportFailures = []; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, setDefaultOutputDirectory: (value) => { settings.saving.default_output_directory = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -1238,7 +1251,7 @@ async function runExhaustiveCandidateScenarios(browser) {
   await runCandidateBlinkScenario(browser, true);
 }
 
-async function runDynamicProjectAndShortcutScenario(browser, fixtureUrl) {
+async function runDynamicProjectAndShortcutScenario(browser, fixtureUrl, settingsPayloads) {
   const page = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
   const restoredFileRequests = [];
   const sameSourceOpenRequests = [];
@@ -1295,21 +1308,50 @@ async function runDynamicProjectAndShortcutScenario(browser, fixtureUrl) {
 
     await page.locator("#settingsButton").click();
     await page.locator("#settingsTabShortcuts").click();
-    const shortcut = page.locator('[data-shortcut-action="previous"]');
-    const shortcutBefore = await shortcut.inputValue();
-    await shortcut.focus();
-    await page.keyboard.press("Control+K");
-    await page.waitForFunction((previous) => document.querySelector('[data-shortcut-action="previous"]')?.value !== previous, shortcutBefore);
-    assert.equal(await shortcut.inputValue(), "Ctrl+K", "shortcut action records the keyboard binding through its public key handler");
+    const shortcutKeys = ["previous", "next", "previousVisible", "nextVisible", "first", "last", "reviewAndNext", "removeImage", "renameImage", "toggleOverview", "undo", "redo"];
+    const shortcutBindings = Object.fromEntries(shortcutKeys.map((action, index) => [action, `Ctrl+Shift+Alt+${String.fromCharCode(65 + index)}`]));
+    assert.equal(await page.locator("[data-shortcut-action]").count(), shortcutKeys.length, "shortcut settings renders the fixed twelve-action inventory");
+    assert.deepEqual(await page.locator("[data-shortcut-action]").evaluateAll((inputs) => inputs.map((input) => input.dataset.shortcutAction)), shortcutKeys, "shortcut settings exposes every action in its documented order");
+    for (const [index, action] of shortcutKeys.entries()) {
+      const shortcut = page.locator(`[data-shortcut-action="${action}"]`);
+      await shortcut.focus(); await page.keyboard.press(`Control+Shift+Alt+${String.fromCharCode(65 + index)}`);
+      assert.equal(await shortcut.inputValue(), shortcutBindings[action], `${action} records its exact keyboard binding through the public handler`);
+    }
     recordDynamicControl("[data-shortcut-action]");
-
-    const shortcutEnabled = page.locator('[data-shortcut-enabled="previous"]');
-    const enabledBefore = await shortcutEnabled.isChecked();
-    await shortcutEnabled.click();
-    await page.waitForFunction((previous) => document.querySelector('[data-shortcut-enabled="previous"]')?.checked !== previous, enabledBefore);
-    assert.equal(await shortcutEnabled.isChecked(), !enabledBefore, "shortcut enabled control toggles the action availability");
+    const shortcutActions = Object.fromEntries(shortcutKeys.map((action, index) => [action, index % 2 === 0]));
+    assert.equal(await page.locator("[data-shortcut-enabled]").count(), shortcutKeys.length, "shortcut settings renders one enabled control for every action");
+    for (const [index, action] of shortcutKeys.entries()) {
+      const enabled = page.locator(`[data-shortcut-enabled="${action}"]`); const requested = shortcutActions[action];
+      if (await enabled.isChecked() === requested) { await enabled.click(); }
+      if (await enabled.isChecked() !== requested) await enabled.click();
+      assert.equal(await enabled.isChecked(), requested, `${action} stores its alternating enabled state`);
+    }
     recordDynamicControl("[data-shortcut-enabled]");
+    const shortcutSaveStart = settingsPayloads.length;
+    await page.locator("#settingsSaveButton").click();
+    await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "設定を保存しました。");
+    assert.deepEqual(settingsPayloads.slice(shortcutSaveStart).filter((payload) => payload.search === "?status=0").map((payload) => payload.body.shortcuts), [{ enabled: true, bindings: shortcutBindings, actions: shortcutActions }], "saving shortcut settings posts all twelve exact bindings and enabled actions");
+    assert.deepEqual(await page.evaluate(() => state.settings.shortcuts), { enabled: true, bindings: shortcutBindings, actions: shortcutActions }, "saving shortcut settings updates the live twelve-action shortcut state");
     await page.locator("#settingsCloseButton").click();
+    const renameCard = page.locator('.gallery-item[data-id="sample"]');
+    const playwrightShortcut = (shortcut) => shortcut.replace(/^Ctrl\+/, "Control+");
+    await renameCard.focus(); await page.keyboard.press(playwrightShortcut(shortcutBindings.renameImage));
+    await page.waitForFunction(() => document.querySelector("#renameImageDialog").open && state.renameImage?.imageId === "sample");
+    await page.locator("#renameImageCancel").click(); await page.waitForFunction(() => !document.querySelector("#renameImageDialog").open);
+    await page.locator("#settingsButton").click(); await page.locator("#settingsTabShortcuts").click();
+    await page.locator('[data-shortcut-enabled="renameImage"]').uncheck();
+    const renameDisabledSaveStart = settingsPayloads.length;
+    await page.locator("#settingsSaveButton").click(); await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "設定を保存しました。");
+    assert.deepEqual(settingsPayloads.slice(renameDisabledSaveStart).filter((payload) => payload.search === "?status=0").map((payload) => payload.body.shortcuts.actions.renameImage), [false], "saving the disabled rename action posts its exact action state");
+    await page.locator("#settingsCloseButton").click(); await renameCard.focus(); await page.keyboard.press(playwrightShortcut(shortcutBindings.renameImage));
+    assert.equal(await page.locator("#renameImageDialog").evaluate((dialog) => dialog.open), false, "a disabled custom rename shortcut does not open the dialog");
+    await page.locator("#settingsButton").click(); await page.locator("#settingsTabShortcuts").click(); await page.locator('[data-shortcut-enabled="renameImage"]').check();
+    const renameEnabledSaveStart = settingsPayloads.length;
+    await page.locator("#settingsSaveButton").click(); await page.waitForFunction(() => document.querySelector("#settingsResult").textContent === "設定を保存しました。");
+    assert.deepEqual(settingsPayloads.slice(renameEnabledSaveStart).filter((payload) => payload.search === "?status=0").map((payload) => payload.body.shortcuts.actions.renameImage), [true], "saving the re-enabled rename action posts its exact action state");
+    await page.locator("#settingsCloseButton").click(); await renameCard.focus(); await page.keyboard.press(playwrightShortcut(shortcutBindings.renameImage));
+    await page.waitForFunction(() => document.querySelector("#renameImageDialog").open && state.renameImage?.imageId === "sample");
+    await page.locator("#renameImageCancel").click();
 
     // Restore one browser file source through its visible recovery action.
     // The page fixture provides only the File System Access boundary; the
@@ -1882,6 +1924,8 @@ async function runExhaustiveAddedScenarios(page, fixtureUrl, resetScenario) {
   };
   await setupFixture();
   const errorCodes = await page.evaluate(() => Object.keys(USER_ERROR_CODES));
+  const renameErrorCodes = ["output_name_conflict", "rename_conflict", "rename_case_only_unsupported", "rename_extension_unsupported"];
+  assert.deepEqual(await page.evaluate((codes) => Object.fromEntries(codes.map((code) => [code, userErrorCode({ code })])), renameErrorCodes), Object.fromEntries(renameErrorCodes.map((code) => [code, code])), "save and rename conflicts reach their dedicated user-error dialogs");
   for (const language of ["ja", "en"]) {
     await page.evaluate((locale) => loadTranslations(locale), language);
     for (const code of errorCodes) {
@@ -2080,9 +2124,10 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
       state: {
         tool: state.tool, view: state.viewMode, displayMode: state.displayMode, scale: state.view?.scale, history: state.history?.length, historyIndex: state.historyIndex,
         galleryCollapsed: state.galleryCollapsed, inspectorCollapsed: state.inspectorCollapsed, mosaicPreview: state.mosaicPreviewEnabled,
-        current: state.currentId, imageIds: state.images.map((image) => image.id), images: state.images.map((image) => ({ id: image.id, reviewed: image.reviewed, hidden: image.hidden })), selectedImageIds: [...state.selectedImageIds].sort(), batchMode: state.batchMode,
+        current: state.currentId, imageIds: state.images.map((image) => image.id), images: state.images.map((image) => ({ id: image.id, relativePath: image.relativePath, reviewed: image.reviewed, hidden: image.hidden })), selectedImageIds: [...state.selectedImageIds].sort(), batchMode: state.batchMode,
         galleryFilter: state.galleryFilter, overviewFilter: state.overviewFilter, overviewQuery: state.overviewQuery, overviewFolder: state.overviewFolder, hiddenCount: state.hiddenImageIds.size,
         candidateDisplay: [...state.blinkCandidateIds || []].sort(), candidateDisplayModes: [...state.blinkModes || []].sort(),
+        catalogGeneration: state.serverCatalogGeneration, projectId: state.project?.id || null, contextMenuImageId: state.contextMenuImageId, renameImageId: state.renameImage?.imageId || null,
       },
       canvasHash,
       candidateControls: [...document.querySelectorAll("[data-candidate-batch], [data-candidate-display-toggle], [data-candidate-effective-toggle]")]
@@ -2125,6 +2170,22 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
       && new URL(request.url, fixtureUrl).pathname === "/api/settings" && new URL(request.url, fixtureUrl).search === "?status=0");
     assert.equal(requests.length, 1, `${control} sends one settings-only output-directory request`);
     assert.deepEqual(JSON.parse(requests[0].body), { saving: { default_output_directory: expected.value } }, `${control} persists only the entered output directory`);
+  };
+  const assertDirectoryStructurePreference = async (before, control, expected) => {
+    await page.waitForFunction((count) => window.__ledgerApi.slice(count).some((request) => request.method === "POST"
+      && new URL(request.url, location.href).pathname === "/api/settings" && new URL(request.url, location.href).search === "?status=0"), before.api.length);
+    await page.waitForFunction((preserve) => state.settings?.saving?.preserve_directory_structure === preserve
+      && ["#applyPreserveDirectoryStructure", "#singleSavePreserveDirectoryStructure"].every((selector) => document.querySelector(selector)?.checked === preserve), expected.check);
+    const after = await snapshot();
+    const requests = after.api.slice(before.api.length).filter((request) => request.method === "POST"
+      && new URL(request.url, fixtureUrl).pathname === "/api/settings" && new URL(request.url, fixtureUrl).search === "?status=0");
+    assert.equal(requests.length, 1, `${control} sends one settings-only directory-structure request`);
+    assert.deepEqual(JSON.parse(requests[0].body), { saving: { preserve_directory_structure: expected.check } }, `${control} persists only the requested directory-structure preference`);
+    assert.deepEqual(await page.evaluate(() => ({
+      saved: state.settings?.saving?.preserve_directory_structure,
+      apply: $("#applyPreserveDirectoryStructure").checked,
+      single: $("#singleSavePreserveDirectoryStructure").checked,
+    })), { saved: expected.check, apply: expected.check, single: expected.check }, `${control} synchronizes the saved preference and both copy dialogs`);
   };
   const dialog = (id, expected, control) => async (before, after) => {
     if (after.dialogs[id] !== expected) await page.waitForFunction(([dialogId, open]) => document.querySelector(`#${dialogId}`)?.open === open, [id, expected]);
@@ -2238,6 +2299,36 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
     selectionClearButton: (before, after) => assert.equal(after.state.batchMode, false, "selectionClearButton must clear batch mode"),
     toggleReviewMenuItem: (before, after) => assert.equal(after.popovers.catalogContextMenu, false, "toggleReviewMenuItem must complete and close the catalog context menu"),
     copyImagePathMenuItem: (before, after) => assert.ok(after.clipboardWrites > before.clipboardWrites, "copyImagePathMenuItem must write the clipboard"),
+    renameImageMenuItem: async (before) => {
+      await page.waitForFunction((imageId) => document.querySelector("#renameImageDialog").open && state.renameImage?.imageId === imageId, before.state.contextMenuImageId);
+      const settled = await snapshot();
+      assert.equal(settled.dialogs.renameImageDialog, true, "renameImageMenuItem opens the rename dialog");
+      assert.equal(settled.state.renameImageId, before.state.contextMenuImageId, "renameImageMenuItem retains the right-clicked gallery target");
+    },
+    renameImageCancel: async (before) => {
+      await page.waitForFunction(() => !document.querySelector("#renameImageDialog").open && state.renameImage === null);
+      const settled = await snapshot();
+      assert.equal(settled.dialogs.renameImageDialog, false, "renameImageCancel closes the rename dialog");
+      assert.equal(settled.state.renameImageId, null, "renameImageCancel clears the pending rename target");
+      assert.equal(settled.api.slice(before.api.length).filter((request) => new URL(request.url, fixtureUrl).pathname === "/api/catalog/rename").length, 0, "renameImageCancel sends no rename request");
+    },
+    renameImageConfirm: async (before) => {
+      const filename = before.controls.renameImageFilename.value;
+      await page.waitForFunction(([imageId, relativePath]) => !document.querySelector("#renameImageDialog").open
+        && state.images.find((image) => image.id === imageId)?.relativePath === relativePath, [before.state.renameImageId, filename]);
+      const settled = await snapshot();
+      const requests = settled.api.slice(before.api.length).filter((request) => request.method === "POST"
+        && new URL(request.url, fixtureUrl).pathname === "/api/catalog/rename");
+      assert.equal(requests.length, 1, "renameImageConfirm sends one rename request");
+      const payload = JSON.parse(String(requests[0].body));
+      assert.deepEqual(Object.keys(payload).sort(), ["browserRenamed", "expectedCatalogGeneration", "expectedProjectId", "filename", "imageId"], "renameImageConfirm submits exactly the five supported payload fields");
+      assert.equal(payload.imageId, before.state.renameImageId, "renameImageConfirm submits the right-clicked image ID");
+      assert.equal(payload.filename, filename, "renameImageConfirm submits the entered filename");
+      assert.equal(payload.browserRenamed, false, "renameImageConfirm declares that the native source was not pre-moved in the browser");
+      assert.equal(payload.expectedProjectId, before.state.projectId, "renameImageConfirm submits the active project identity");
+      assert.equal(payload.expectedCatalogGeneration, before.state.catalogGeneration, "renameImageConfirm submits the current catalog generation");
+      assert.equal(settled.state.images.find((image) => image.id === before.state.renameImageId)?.relativePath, filename, "renameImageConfirm updates the catalog path after the server commit");
+    },
     removeImageMenuItem: async (before) => { await page.waitForFunction((count) => state.hiddenImageIds.size !== count, before.state.hiddenCount); const settled = await snapshot(); assert.notEqual(settled.state.hiddenCount, before.state.hiddenCount, "removeImageMenuItem must toggle hidden state"); assert.equal(settled.popovers.catalogContextMenu, false, "removeImageMenuItem must close its context menu"); },
     sourceDeleteResume: async () => {
       await page.waitForFunction(() => {
@@ -2278,13 +2369,10 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
   for (const id of ["settingsTabGeneral", "settingsTabModels", "settingsTabDisplay", "settingsTabShortcuts", "settingsTabConfirm", "settingsTabInfo"]) {
     clickPredicates[id] = (before, after) => assert.equal(after.controls[id].selected, "true", `${id} must select its settings tab`);
   }
-  const inputPredicate = (id, before, after, expected) => {
+  const inputPredicate = async (id, before, after, expected) => {
     if (id === "applyOutputDirectoryStatus" || id === "singleSaveOutputDirectoryStatus") return assertManualOutputDirectoryCommit(before, id, expected);
+    if (id === "applyPreserveDirectoryStructure" || id === "singleSavePreserveDirectoryStructure") return assertDirectoryStructurePreference(before, id, expected);
     const beforeValue = before.controls[id]; const afterValue = after.controls[id];
-    if (id === "confirmRemoveImage") {
-      assert.equal(afterValue.disabled && afterValue.checked, true, "confirmRemoveImage remains an always-on source-deletion warning");
-      return;
-    }
     assert.notDeepEqual(afterValue, beforeValue, `${id} must produce an observable value/checked transition`);
     if (expected.check !== undefined) assert.equal(afterValue.checked, expected.check, `${id} must apply the requested checked value`);
     else assert.equal(afterValue.value, expected.value, `${id} must apply the requested value`);
@@ -2598,9 +2686,14 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
   await click("previousImageButton"); await click("nextImageButton");
   for (const id of ["reviewAndNextButton", "hideAndNextButton", "removeCurrentImageButton"]) await click(id);
   await page.locator('.gallery-item[data-id="sample"]').click();
-  for (const id of ["toggleReviewMenuItem", "copyImagePathMenuItem", "removeImageMenuItem"]) {
+  for (const id of ["toggleReviewMenuItem", "copyImagePathMenuItem"]) {
     await page.locator('.gallery-item[data-id="sample"]').click({ button: "right" }); await click(id);
   }
+  await page.locator('.gallery-item[data-id="sample"]').click({ button: "right" }); await click("renameImageMenuItem");
+  await input("renameImageFilename", "sample-ledger.png"); await click("renameImageCancel");
+  await page.locator('.gallery-item[data-id="sample"]').click({ button: "right" }); await click("renameImageMenuItem");
+  await input("renameImageFilename", "sample-ledger.png"); await click("renameImageConfirm");
+  await page.locator('.gallery-item[data-id="sample"]').click({ button: "right" }); await click("removeImageMenuItem");
   await closeDialogs();
   await setupFixture(); await click("removeAndNextButton");
   if (await page.locator("#confirmDialog").evaluate((dialog) => dialog.open)) await click("confirmAccept");
@@ -2646,6 +2739,7 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
   await page.waitForFunction(() => !document.querySelector("#saveButton").disabled);
   await click("saveButton");
   for (const [id, value] of [["singleSaveCopyMode", true], ["singleSaveSuffix", "_ledger"], ["singleSaveDeleteOriginal", true]]) await input(id, value);
+  await input("singleSavePreserveDirectoryStructure", false);
   await input("singleSaveOutputDirectoryStatus", "G:\\manual-single-output");
   await click("singleSaveChooseOutputDirectoryButton");
   await input("singleSaveOverwriteMode", true);
@@ -2662,6 +2756,7 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
   await page.waitForFunction(() => !document.querySelector("#saveAllButton").disabled);
   await click("saveAllButton");
   for (const [id, value] of [["applyTargetMode", "masked"], ["applyCopyMode", true], ["applySuffix", "_ledger"], ["deleteOriginal", true], ["applyDivisor", "102"]]) await input(id, value);
+  await input("applyPreserveDirectoryStructure", true);
   await input("applyOutputDirectoryStatus", "G:\\manual-apply-output");
   await click("chooseOutputDirectoryButton");
   await page.waitForFunction(() => !state.outputDirectoryPicking);
@@ -2820,8 +2915,8 @@ async function main() {
   let server;
   let browser;
   let fixtureUrl;
-  let detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetScenario, setFolderImportFailures, setCatalog, setDefaultOutputDirectory, resetJob, finishCancel, finishApply, setUpdateAvailable;
-  let settingsRequests, waitForSettingsStatusRequests;
+  let detectRequests, applyRequests, saveRequests, renameRequests, catalogRemoveRequests, folderRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetScenario, setFolderImportFailures, setCatalog, setDefaultOutputDirectory, resetJob, finishCancel, finishApply, setUpdateAvailable;
+  let settingsRequests, settingsPayloads, waitForSettingsStatusRequests;
   let settingsActions;
   let settingsStatusRequests;
   let updateRequests;
@@ -2830,7 +2925,7 @@ async function main() {
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, setFolderImportFailures, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, holdSaveRender, releaseSaveRenders, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, setCatalog, setDefaultOutputDirectory, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, renameRequests, catalogRemoveRequests, folderRequests, setFolderImportFailures, settingsRequests, settingsPayloads, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, holdSaveRender, releaseSaveRenders, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, setCatalog, setDefaultOutputDirectory, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
     // A real unsupported-browser bootstrap must stop before any API request or
     // editor binding. This covers the user-visible File System Access contract.
@@ -3471,7 +3566,7 @@ async function main() {
       const rect = button.getBoundingClientRect(); return rect.width === 28 && rect.height === 28;
     })), true, "all model help buttons, including SAM type, share the compact 28px target");
     await page.locator("#settingsTabShortcuts").click();
-    assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 11 && rows.every((row) => {
+    assert.equal(await page.locator("#shortcutBindings > .form-row").evaluateAll((rows) => rows.length === 12 && rows.every((row) => {
       const children = [...row.children];
       return children.length === 3 && children.every((child) => Math.abs((child.getBoundingClientRect().y + child.getBoundingClientRect().height / 2) - (row.getBoundingClientRect().y + row.getBoundingClientRect().height / 2)) < 2);
     })), true, "all shortcut bindings keep one three-column row");
@@ -3687,7 +3782,7 @@ async function main() {
     assert.ok(settingsResultBox && resetBox && resetBox.x - (settingsResultBox.x + settingsResultBox.width) <= 12, "settings result stays beside Reset");
     assert.deepEqual(settingsActions.at(-1), { path: "/api/settings/reset", method: "POST" }, "the compact reset button reaches its dedicated API route");
     const shortcutsAfterReset = await page.locator("[data-shortcut-action]").evaluateAll((inputs) => inputs.map((input) => input.value));
-    assert.equal(shortcutsAfterReset.length, 11, "reset restores every shortcut binding before compact save");
+    assert.equal(shortcutsAfterReset.length, 12, "reset restores every shortcut binding before compact save");
     assert.equal(shortcutsAfterReset.every(Boolean) && new Set(shortcutsAfterReset).size === shortcutsAfterReset.length, true, "reset restores valid unique shortcut bindings before compact save");
     const savesBeforeCompactSave = settingsActions.filter((action) => action.path === "/api/settings" && action.method === "POST").length;
     await page.locator("#settingsSaveButton").click();
@@ -3984,6 +4079,29 @@ async function main() {
     assert.equal(await page.locator("#connectionStatus").textContent(), "パスをコピーしました。", "successful copying reports a localized status");
     assert.equal(await page.evaluate(async () => { await loadTranslations("en"); return t("status.pathCopied"); }), "Path copied.", "copy success has an English status");
     await page.evaluate(() => loadTranslations("ja"));
+    await page.locator('.gallery-item[data-id="sample"]').click({ button: "right" });
+    await page.locator("#renameImageMenuItem").click();
+    await page.waitForFunction(() => document.querySelector("#renameImageDialog").open);
+    await page.locator("#renameImageCancel").click();
+    await page.waitForFunction(() => !document.querySelector("#renameImageDialog").open);
+    const reopenedRename = await page.evaluate(async () => {
+      const dialog = document.querySelector("#renameImageDialog"); const card = document.querySelector('.gallery-item[data-id="sample"]');
+      card.focus(); window.dispatchEvent(new KeyboardEvent("keydown", { key: "F2", bubbles: true, cancelable: true }));
+      await new Promise((resolve) => requestAnimationFrame(resolve));
+      queueMicrotask(() => dialog.dispatchEvent(new Event("close")));
+      await Promise.resolve();
+      return { open: dialog.open, imageId: state.renameImage?.imageId };
+    });
+    assert.deepEqual(reopenedRename, { open: true, imageId: "sample" }, "a queued close from Cancel does not clear the F2 reopened rename target");
+    await page.locator("#renameImageFilename").fill("sample-f2.png");
+    await page.locator("#renameImageConfirm").click();
+    await page.waitForFunction(() => !document.querySelector("#renameImageDialog").open && state.images.find((image) => image.id === "sample")?.relativePath === "sample-f2.png");
+    assert.equal(renameRequests.length, 1, "Cancel then F2 reopen sends one native rename request");
+    assert.equal(renameRequests[0].imageId, "sample"); assert.equal(renameRequests[0].filename, "sample-f2.png");
+    assert.equal(renameRequests[0].browserRenamed, false); assert.equal(renameRequests[0].expectedCatalogGeneration, 1);
+    resetScenario();
+    await page.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await waitForFixtureReady(page);
     await page.locator('.gallery-item[data-id="sample-two"]').click({ button: "right" });
     await page.waitForFunction(() => document.querySelector("#catalogContextMenu").matches(":popover-open"));
     await page.waitForFunction(() => state.contextMenuImageId === "sample-two");
@@ -4112,7 +4230,7 @@ async function main() {
     assert.deepEqual(await page.evaluate(() => [...state.selectedImageIds].sort()), ["sample", "sample-two"], "opening a context menu leaves the batch selection unchanged");
     assert.equal(await page.locator("#copyImagePathMenuItem").isVisible(), true, "filesystem overview cards expose Copy path");
     await page.locator("#copyImagePathMenuItem").click();
-    assert.deepEqual(await page.evaluate(() => window.__copiedPaths), ["G:\\画像 フォルダー\\sample image.png", "G:\\画像 フォルダー\\sample image.png"], "overview copies only the context-menu image");
+    assert.deepEqual(await page.evaluate(() => window.__copiedPaths), ["G:\\画像 フォルダー\\sample image.png"], "overview copies only the context-menu image");
     await page.evaluate(() => { window.__clipboardFail = true; });
     await page.locator('.overview-item[data-id="sample"]').click({ button: "right" });
     await page.locator("#copyImagePathMenuItem").click();
@@ -4928,7 +5046,7 @@ async function main() {
       await stopCoveredPage(browserSavePage, true);
     }
 
-    await runDynamicProjectAndShortcutScenario(browser, fixtureUrl);
+    await runDynamicProjectAndShortcutScenario(browser, fixtureUrl, settingsPayloads);
     await runExhaustiveCandidateScenarios(browser);
     assertDynamicControlEvidence();
     assertAnonymousControlEvidence();

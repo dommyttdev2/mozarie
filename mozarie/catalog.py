@@ -34,6 +34,141 @@ from .save_journal import SaveJournal
 from .workspace import ProjectNameAlreadyExistsError, ProjectSourceNoMatchError, ProjectSourcePathConflictError, ProjectSourceUnavailableError, WorkspaceStore, native_source_identity
 
 class CatalogMixin:
+    @staticmethod
+    def _rename_filename(value: Any) -> str:
+        if not isinstance(value, str):
+            raise ClientError("新しいファイル名が正しくありません。", "input_invalid")
+        name = value.strip()
+        reserved = {"CON", "PRN", "AUX", "NUL", *(f"COM{number}" for number in range(1, 10)), *(f"LPT{number}" for number in range(1, 10))}
+        stem = name.split(".", 1)[0].upper()
+        if (not name or name in {".", ".."} or name.endswith((".", " "))
+                or any(ord(character) < 32 or character in '<>:"/\\|?*' for character in name)
+                or stem in reserved):
+            raise ClientError("Windowsで使えないファイル名です。", "input_invalid")
+        return name
+
+    def rename_catalog_image(self, image_id: str, filename: Any, *, browser_renamed: bool = False) -> dict[str, Any]:
+        """Rename a native source file and its durable aliases without changing IDs."""
+        name = self._rename_filename(filename)
+        with self.import_lock:
+            with self.lock:
+                self._assert_catalog_mutable()
+                if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
+                    raise ClientError("処理中はファイル名を変更できません。", "operation_in_progress")
+                record = self.images.get(image_id)
+                if record is None:
+                    raise ClientError("画像が見つかりません。", "image_not_found")
+                if record.source_kind == "session":
+                    if not browser_renamed or self.workspace_id is None or not record.source_id:
+                        raise ClientError("この画像は再接続した元フォルダーから名前を変更してください。", "source_action_unavailable")
+                    old_relative = safe_import_relative_path(record.relative_path)
+                    new_relative = old_relative.with_name(name).as_posix()
+                    old_path = record.path
+                    new_path = old_path.with_name(name)
+                    source_id = record.source_id; workspace_id = self.workspace_id
+                    matching_ids = [image_id]
+                    kind = "browser"
+                elif record.source_kind != "filesystem" or record.source_root is None:
+                    raise ClientError("この画像は再接続した元フォルダーから名前を変更してください。", "source_action_unavailable")
+                else:
+                    snapshot = replace(record)
+                    old_path = snapshot.path.resolve()
+                    new_path = old_path.with_name(name)
+                    old_relative = None; new_relative = None; source_id = None; workspace_id = None
+                    matching_ids = [candidate.image_id for candidate in self.images.values()
+                                    if candidate.source_kind == "filesystem" and candidate.path.resolve() == old_path]
+                    kind = "native"
+                if str(old_path) == str(new_path):
+                    return {"images": self.list_images(), "catalogGeneration": self.catalog_generation}
+                if old_path.suffix.casefold() != new_path.suffix.casefold():
+                    raise ClientError("拡張子は変更できません。", "rename_extension_unsupported")
+                if os.path.normcase(str(old_path)) == os.path.normcase(str(new_path)):
+                    raise ClientError("大文字小文字だけの変更は、この環境では安全に実行できません。", "rename_case_only_unsupported")
+                if new_path.exists():
+                    raise ClientError("同じ名前のファイルが既にあります。", "rename_conflict")
+                if any(self._has_active_browser_save_for_image_unchecked(candidate_id) for candidate_id in matching_ids):
+                    raise ClientError("保存中の画像は名前を変更できません。", "operation_in_progress")
+            locks = [(candidate_id, self.image_io_lock(candidate_id)) for candidate_id in matching_ids]
+            with ExitStack() as stack:
+                for _candidate_id, image_lock in sorted(locks):
+                    stack.enter_context(image_lock)
+                with self.lock:
+                    if self.images.get(image_id) is not record or record.path.resolve() != old_path:
+                        raise ClientError("画像一覧が更新されました。もう一度操作してください。", "catalog_changed")
+                    if new_path.exists():
+                        raise ClientError("同じ名前のファイルが既にあります。", "rename_conflict")
+                    if any(self._has_active_browser_save_for_image_unchecked(candidate_id) for candidate_id in matching_ids):
+                        raise ClientError("保存中の画像は名前を変更できません。", "operation_in_progress")
+                identity = self.save_journal.file_identity(old_path)
+                if identity is None:
+                    raise ClientError("元画像の確認ができませんでした。", "save_write_failed")
+                token = uuid.uuid4().hex
+                self.save_journal.prepare_rename(
+                    token, kind=kind, image_id=image_id, old_path=old_path, new_path=new_path,
+                    catalog_id=workspace_id, source_id=source_id,
+                    old_relative=old_relative.as_posix() if old_relative else None, new_relative=new_relative, identity=identity,
+                )
+                try:
+                    old_path.rename(new_path)
+                except FileExistsError as exc:
+                    self.save_journal.finish_rename(token)
+                    raise ClientError("同じ名前のファイルが既にあります。", "rename_conflict") from exc
+                except OSError as exc:
+                    self.save_journal.finish_rename(token)
+                    raise ClientError("元画像の名前を変更できませんでした。", "save_write_failed") from exc
+                try:
+                    if kind == "browser":
+                        self.workspace_store.rename_browser_source_record(str(workspace_id), str(source_id), image_id, str(new_relative))
+                        changed = {image_id: str(new_relative)}
+                    else:
+                        changed = self.workspace_store.rename_native_source_records(old_path, new_path)
+                except ValueError as exc:
+                    try:
+                        new_path.rename(old_path)
+                    except OSError:
+                        LOGGER.warning("名前変更した元画像の復元を次回起動時に再試行します: %s", new_path)
+                    else:
+                        self.save_journal.finish_rename(token)
+                    raise ClientError("名前変更後の画像一覧を更新できませんでした。", "rename_conflict") from exc
+                except Exception:
+                    try:
+                        new_path.rename(old_path)
+                    except OSError:
+                        LOGGER.warning("名前変更した元画像の復元を次回起動時に再試行します: %s", new_path)
+                    else:
+                        self.save_journal.finish_rename(token)
+                    raise
+                # The workspace update is now durable.  Never roll back the
+                # source file because a later cache/view update fails.
+                try:
+                    self.save_journal.finish_rename(token)
+                except Exception as exc:
+                    LOGGER.warning("完了した名前変更ジャーナルの整理を保留しました: %s", exc)
+                with self.lock:
+                    for candidate_id, relative_path in changed.items():
+                        live = self.images.get(candidate_id)
+                        if live is None or live.source_kind not in {"filesystem", "session"}:
+                            continue
+                        live.path = new_path
+                        live.relative_path = relative_path
+                        try:
+                            stat = new_path.stat()
+                            live.mtime_ns = stat.st_mtime_ns; live.size_bytes = stat.st_size
+                            live.set_asset_fingerprint(stat.st_mtime_ns, stat.st_size)
+                        except OSError:
+                            pass
+                        live.asset_revision += 1
+                    self.catalog_generation += 1
+                    images = self.list_images()
+                    generation = self.catalog_generation
+                for candidate_id in changed:
+                    for thumbnail_path in (self.cache_dir / "thumbnails").glob(f"{candidate_id}-*.jpg"):
+                        try:
+                            thumbnail_path.unlink(missing_ok=True)
+                        except OSError as exc:
+                            LOGGER.warning("名前変更後のサムネイル削除を保留しました: %s", exc)
+                return {"images": images, "catalogGeneration": generation}
+
     def _assert_catalog_expectation(self, expected_project_id: str | None, expected_catalog_generation: int | None) -> None:
         """Reject a request captured from a different live catalogue."""
         if expected_project_id != self.catalog_id or expected_catalog_generation != self.catalog_generation:
@@ -323,7 +458,7 @@ class CatalogMixin:
                         self.source_mismatches = dict(publish_source_mismatches)
                     # Old unnamed data is removed only after the active pointer
                     # and every live catalog field describe the new workspace.
-                    if discard_workspace_id and discard_workspace_id != publish_active_workspace_id:
+                    if discard_workspace_id and discard_workspace_id != self.workspace_id:
                         self.workspace_store.delete_project(discard_workspace_id)
                 except Exception:
                     for field, value in live_state.items():
@@ -1887,12 +2022,18 @@ class CatalogMixin:
             if fingerprint is not None:
                 try:
                     stat = path.stat()
+                except FileNotFoundError:
+                    SaveJournal._cleanup_staging_parent(path)
+                    continue
                 except OSError:
                     continue
                 if (stat.st_mtime_ns, stat.st_size) != fingerprint:
                     continue
             try:
                 path.unlink(missing_ok=True)
+            except FileNotFoundError:
+                SaveJournal._cleanup_staging_parent(path)
+                continue
             except OSError:
                 continue
             if path.parent.name == ".mozarie-staging":

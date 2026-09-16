@@ -12,6 +12,17 @@ from PIL import Image, PngImagePlugin
 from mozarie.core import ClientError, ImageRecord
 from mozarie.image_io import canonical_image, inspect_import_image, open_image
 
+THREAD_TIMEOUT = 30
+
+
+def join_threads(*threads: threading.Thread) -> None:
+    started = [thread for thread in threads if thread.ident is not None]
+    for thread in started:
+        thread.join(THREAD_TIMEOUT)
+    for thread in started:
+        if thread.is_alive():
+            raise AssertionError(f"thread did not finish: {thread.name}")
+
 
 class InputImageValidationTests(unittest.TestCase):
     def test_truncated_jpeg_is_rejected(self):
@@ -70,20 +81,27 @@ class InputImageValidationTests(unittest.TestCase):
             def worker() -> None:
                 try:
                     with open_image(path):
-                        entered.wait(timeout=2)
-                        release.wait(2)
+                        entered.wait(timeout=THREAD_TIMEOUT)
+                        if not release.wait(THREAD_TIMEOUT):
+                            raise RuntimeError("test did not release image openers")
                 except BaseException as exc:  # test thread failures must be reported by the parent.
                     failures.append(exc)
 
             with mock.patch.object(Image, "MAX_IMAGE_PIXELS", 1):
                 threads = [threading.Thread(target=worker) for _index in range(2)]
-                for thread in threads:
-                    thread.start()
-                entered.wait(timeout=2)
-                self.assertIsNone(Image.MAX_IMAGE_PIXELS)
-                release.set()
-                for thread in threads:
-                    thread.join(2)
+                gate_reached = False
+                try:
+                    for thread in threads:
+                        thread.start()
+                    entered.wait(timeout=THREAD_TIMEOUT)
+                    self.assertIsNone(Image.MAX_IMAGE_PIXELS)
+                    release.set()
+                    gate_reached = True
+                finally:
+                    release.set()
+                    if not gate_reached:
+                        entered.abort()
+                    join_threads(*threads)
                 self.assertEqual(failures, [])
                 self.assertEqual(Image.MAX_IMAGE_PIXELS, 1)
 

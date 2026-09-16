@@ -14,7 +14,7 @@ class Element {
     this.id = id; this.hidden = false; this.value = ""; this.textContent = "";
     this.checked = false; this.returnValue = "confirm"; this.style = {};
     this.listeners = new Map(); this.attributes = new Map(); this.open = false;
-    this.classList = { toggle() {} };
+    this.classList = { toggle() {}, remove() {}, add() {} };
   }
   setAttribute(key, value) { this.attributes.set(key, value); }
   getAttribute(key) { return this.attributes.get(key) || null; }
@@ -39,6 +39,7 @@ const ids = [
   "boundaryModeMenu", "boundaryTool", "brushSize", "brushSizeValue", "blockSizeValue", "applyBlockSize",
   "confirmDialog", "confirmTitle", "confirmMessage", "confirmNeverShow", "bucketToleranceControl",
   "candidateStatus", "catalogContextMenu", "toggleReviewMenuItem", "copyImagePathMenuItem", "removeImageMenuItem",
+  "renameImageMenuItem", "renameImageDialog", "renameImageFilename", "renameImageResult", "renameImageCancel", "renameImageConfirm",
   "pickerMenu", "galleryDropOverlay",
 ];
 for (const id of ids) element(`#${id}`);
@@ -49,8 +50,8 @@ let editable = false;
 let dialogOpen = false;
 let gesture = false;
 let images = [
-  { id: "one", sourcePath: "C:/one.png", candidateCount: 1, enabledCandidateCount: 1 },
-  { id: "two", sourcePath: "C:/two.png", candidateCount: 1, enabledCandidateCount: 1 },
+  { id: "one", sourcePath: "C:/one.png", sourceKind: "filesystem", candidateCount: 1, enabledCandidateCount: 1 },
+  { id: "two", sourcePath: "C:/two.png", sourceKind: "filesystem", candidateCount: 1, enabledCandidateCount: 1 },
 ];
 const state = {
   importing: false, tool: "brush", images, currentId: "one", pendingImageId: null, currentImage: images[0],
@@ -58,7 +59,7 @@ const state = {
   masksClearing: false, catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, candidates: [],
   drafts: new Map(), maskStatus: new Map(), selectedImageIds: new Set(["one"]), sourceAccess: new Map(), projectlessDirectorySources: new Map(), hiddenImageIds: new Set(), reviewedImageIds: new Set(),
   reviewedPaths: new Set(), candidateImages: new Map(), batchMode: false, contextMenuImageId: null,
-  contextMenuOrigin: null, importSession: null, navigationShortcutsEnabled: true, viewMode: "edit",
+  contextMenuOrigin: null, importSession: null, navigationShortcutsEnabled: true, viewMode: "edit", renamePending: false,
   historyIndex: 1, manualMaskPresent: true, manualEnabled: false, manualExclusionEnabled: false,
   manualExclusionEraseEnabled: false, maskDirty: false,
 };
@@ -74,6 +75,7 @@ const document = {
 };
 const context = {
   codedError(code) { const error = new Error(code); error.code = code; return error; },
+  userErrorCode(error) { return error?.code || "internal_error"; },
   responseError(response, payload) { const error = new Error(); error.status = response.status; error.code = typeof payload?.error_code === "string" ? payload.error_code : (response.status === 404 ? "api_not_found" : "internal_error"); error.params = payload?.params || {}; return error; },
   console, Promise, Set, Map, Array, Object, Math, Number, Boolean, String, Error,
   AbortController, DOMException, setTimeout, clearTimeout, encodeURIComponent, crypto: { randomUUID: () => `key-${++unique}` },
@@ -82,6 +84,9 @@ const context = {
   canvas: { style: {} }, addCanvas: { width: 4, height: 4 }, exclusionCanvas: { width: 4, height: 4 }, exclusionEraseCanvas: { width: 4, height: 4 },
   addCtx: { clearRect() {} }, exclusionCtx: { clearRect() {} }, exclusionEraseCtx: { clearRect() {} },
   t: (key, data = {}) => `${key}${data.value ?? data.count ?? ""}`,
+  sourceAccessFor: (imageId) => state.sourceAccess.get(imageId) || null,
+  ensureHandlePermission: async () => {}, flushWorkspaceDraft: async () => {},
+  catalogApi: async () => ({}),
   isBusy: () => busy, catalogStagingEditsActive: () => false, currentImageActionPending: () => Boolean(state.pendingImageId), canRemoveCurrentImage: () => true, isProcessableImage: () => true, processableImages: (records = state.images) => records, galleryFilteredImages: () => state.images, overviewImages: () => state.images, closeBoundaryModeMenu: undefined,
   clearBoundaryInteraction: () => calls.push(["clearBoundaryInteraction"]), clearBoundaryConstruction: () => calls.push(["clearBoundaryConstruction"]),
   updateBoundaryActions: () => calls.push(["boundaryActions"]), updateBrushCursor: () => {}, render: () => calls.push(["render"]), flushRender: () => calls.push(["flushRender"]), flushMaskComposition: () => calls.push(["flushMaskComposition"]), clearCandidateBlink: () => calls.push(["clearCandidateBlink"]), focusCanvas: () => calls.push(["canvas"]), focusElement: (value) => { document.activeElement = value; },
@@ -118,7 +123,7 @@ const context = {
 const interactionPath = path.join(__dirname, "..", "static", "js", "interaction.js");
 const source = fs.readFileSync(interactionPath, "utf8");
 vm.runInNewContext(source, context, { filename: interactionPath });
-vm.runInNewContext("globalThis.interactionTest={setTool,setBoundaryModeMenuOpen,closeBoundaryModeMenu,updateBrushSize,updateBlockSizeDisplay,rememberFillToleranceTrigger,confirmAction,confirmationRequired,resetCurrentDraft,clearMasks,clearCatalog,closeCatalogContextMenu,positionCatalogContextMenu,openCatalogContextMenu,copyContextMenuImagePath,clearReviewForRemovedImage,removeImageFromCatalog,runSelectionAction,droppedFile,directFilesFromDrop,isSupportedImageFile,newClientKey,pruneSourceAccess,rememberImportedSource,importFiles,importSingleFile,beginImportSession,remapImportedImageIds,finishImportSession,waitForImportSession,importHandleEntries,importFileHandles,importDirectoryHandle,importProjectDirectoryHandle,importProjectFileHandles,pickImageFiles,pickImageDirectory,importDroppedFiles,setGalleryDropOverlay,handleEditorKeydown,navigationShortcutAction,handleNavigationKeydown,handleWindowKeydown};", context, { filename: "test-interaction-exports.js" });
+vm.runInNewContext("globalThis.interactionTest={setTool,setBoundaryModeMenuOpen,closeBoundaryModeMenu,updateBrushSize,updateBlockSizeDisplay,rememberFillToleranceTrigger,confirmAction,confirmationRequired,beginBrowserDeletePermissionRequests,preflightBrowserSourceDelete,resetCurrentDraft,clearMasks,clearCatalog,closeCatalogContextMenu,positionCatalogContextMenu,openCatalogContextMenu,submitRenameImage,copyContextMenuImagePath,clearReviewForRemovedImage,removeImageFromCatalog,runSelectionAction,droppedFile,directFilesFromDrop,isSupportedImageFile,newClientKey,pruneSourceAccess,rememberImportedSource,importFiles,importSingleFile,beginImportSession,remapImportedImageIds,finishImportSession,waitForImportSession,importHandleEntries,importFileHandles,importDirectoryHandle,importProjectDirectoryHandle,importProjectFileHandles,pickImageFiles,pickImageDirectory,importDroppedFiles,setGalleryDropOverlay,handleEditorKeydown,navigationShortcutAction,handleNavigationKeydown,handleWindowKeydown};", context, { filename: "test-interaction-exports.js" });
 
 const test = context.interactionTest;
 const event = (binding, type = "keydown") => ({ binding, type, currentTarget: element("#origin"), clientX: 30, clientY: 40, preventDefault() { this.prevented = true; }, stopPropagation() { this.stopped = true; } });
@@ -152,6 +157,24 @@ nodeTest("interaction and catalog mutation controls", async () => {
   element("#confirmNeverShow").checked = true;
   assert.equal(await test.confirmAction("title", "message", "candidateDelete"), true);
   assert.equal(test.confirmationRequired("candidateDelete"), false);
+  let skippedDeletePermissionRequests = 0;
+  state.settings.confirmations.removeImage = false;
+  const skippedDeleteConfirmation = test.confirmAction("title", "message", "removeImage", () => { skippedDeletePermissionRequests += 1; });
+  assert.equal(skippedDeletePermissionRequests, 1, "skipping the source-delete dialog runs its permission callback in the originating turn exactly once");
+  assert.equal(await skippedDeleteConfirmation, true);
+  assert.equal(element("#confirmNeverShow").closest("label").hidden, false, "source deletion retains the shared next-time confirmation choice");
+  let permissionRequests = 0;
+  const browserDeleteImage = { id: "permission-denied", sourceKind: "session", sizeBytes: 1, mtimeNs: 1_000_000 };
+  state.sourceAccess.set(browserDeleteImage.id, {
+    name: "permission-denied.png", fileHandle: { name: "permission-denied.png" },
+    parentHandle: { requestPermission() { permissionRequests += 1; return "denied"; } },
+  });
+  let resolvePermissions;
+  const deniedDeleteConfirmation = test.confirmAction("title", "message", "removeImage", () => { resolvePermissions = test.beginBrowserDeletePermissionRequests([browserDeleteImage]); });
+  assert.equal(permissionRequests, 1, "skipped source deletion requests browser permission once before yielding control");
+  assert.equal(await deniedDeleteConfirmation, true);
+  const denied = await resolvePermissions();
+  assert.deepEqual(JSON.parse(JSON.stringify(denied)), [{ imageId: "permission-denied", reason: "source_permission_denied" }], "a denied skipped-dialog permission keeps the browser source out of the delete preflight");
   state.settings.confirmations.candidateDelete = true; element("#confirmNeverShow").checked = true;
   assert.equal(await test.confirmAction("title", "message", "candidateDelete"), true);
   state.settings.confirmations.candidateDelete = true; element("#confirmNeverShow").checked = false; element("#confirmDialog").returnValue = "";
@@ -164,18 +187,54 @@ nodeTest("interaction and catalog mutation controls", async () => {
   assert.ok(calls.some(([name]) => name === "candidates"), "clearing masks redraws candidate controls after releasing its busy lock");
   await test.clearCatalog();
 
-  images = [{ id: "one", sourcePath: "C:/one.png" }, { id: "two" }]; state.images = images; state.currentId = "one"; state.currentImage = images[0]; state.selectedImageIds = new Set(["one"]);
+  images = [{ id: "one", sourcePath: "C:/one.png", sourceKind: "filesystem" }, { id: "two", sourceKind: "filesystem" }]; state.images = images; state.currentId = "one"; state.currentImage = images[0]; state.selectedImageIds = new Set(["one"]);
   test.positionCatalogContextMenu(element("#catalogContextMenu"), -1, 999);
   const pointerOrigin = element("#pointer-origin"); const pointerTarget = element("#pointer-target"); document.activeElement = pointerOrigin;
   test.openCatalogContextMenu({ ...event("", "contextmenu"), currentTarget: pointerTarget }, "two");
-  assert.equal(state.contextMenuOrigin, pointerOrigin, "a pointer context menu restores the previously focused catalog card");
-  assert.equal(document.activeElement, pointerOrigin, "a pointer context menu does not move focus to its target or menu");
-  test.closeCatalogContextMenu(); assert.equal(document.activeElement, pointerOrigin, "closing a pointer context menu preserves its prior focus");
+  assert.equal(state.contextMenuOrigin, pointerTarget, "a pointer context menu keeps the actual right-clicked catalog card as its rename target");
+  assert.equal(element("#renameImageMenuItem").textContent, "context.rename", "the right-click menu keeps the Rename action visible");
+  assert.equal(element("#catalogContextMenu").style.left, "30px", "the context menu is positioned at the pointer x coordinate");
+  test.closeCatalogContextMenu(); assert.equal(document.activeElement, pointerTarget, "closing a pointer context menu restores focus to its actual target card");
   const keyboardTarget = element("#keyboard-target");
   test.openCatalogContextMenu({ ...event("", "keydown"), currentTarget: keyboardTarget }, "one");
   assert.equal(state.contextMenuOrigin, keyboardTarget, "a keyboard context menu restores its invoking card");
   assert.equal(document.activeElement, element("#toggleReviewMenuItem"), "a keyboard context menu moves focus into its first action");
   test.closeCatalogContextMenu(); assert.equal(document.activeElement, keyboardTarget, "closing a keyboard context menu restores its invoking card");
+  const focusedNoncurrent = element("#gallery-two"); focusedNoncurrent.dataset = { id: "two" }; focusedNoncurrent.matches = (selector) => selector === "button.gallery-item, button.overview-item";
+  document.activeElement = focusedNoncurrent; editable = true;
+  state.settings.shortcuts.bindings = { renameImage: "F2" }; state.settings.shortcuts.actions = { renameImage: true };
+  assert.deepEqual(JSON.parse(JSON.stringify(test.navigationShortcutAction(event("F2")))), { action: "renameImage", imageId: "two" }, "F2 targets the focused noncurrent gallery card even though cards are buttons");
+  editable = false;
+  state.images = [{ id: "browser", sourceKind: "session" }]; images = state.images;
+  test.openCatalogContextMenu({ ...event("", "contextmenu"), currentTarget: pointerTarget }, "browser");
+  assert.equal(element("#renameImageMenuItem").disabled, true, "an FSA source without move support cannot report a pseudo rename success");
+  assert.equal(element("#renameImageMenuItem").textContent, "context.rename", "unsupported FSA sources still present the Rename action");
+  assert.equal(element("#renameImageMenuItem").title, "context.renameUnavailableHelp", "unsupported FSA sources explain the native reconnect path");
+  const originalApiForRename = context.api; const originalCatalogApi = context.catalogApi;
+  async function responseLostRename(authoritativeName) {
+    const browserImage = { id: "browser", relativePath: "source.png", sourceKind: "session" };
+    let handleName = "source.png"; const moves = [];
+    const handle = { get name() { return handleName; }, async move(_parent, next) { moves.push(next); handleName = next; }, async getFile() { return { name: handleName, size: 1, lastModified: 1 }; } };
+    state.images = images = [browserImage]; state.renameImage = { imageId: browserImage.id, invoker: pointerTarget }; state.renamePending = false;
+    state.sourceAccess.set(browserImage.id, { fileHandle: handle, parentHandle: {}, name: handleName, size: 1, lastModified: 1 });
+    element("#renameImageFilename").value = "renamed.png";
+    context.catalogApi = async () => { throw Object.assign(new Error("response lost"), { code: "internal_error" }); };
+    context.api = async (url) => url === "/api/images" ? (authoritativeName === undefined ? null : { images: [{ ...browserImage, relativePath: authoritativeName }] }) : {};
+    await test.submitRenameImage({ preventDefault() {} });
+    return { moves, access: state.sourceAccess.get(browserImage.id), pending: state.renamePending };
+  }
+  const committedRename = await responseLostRename("renamed.png");
+  assert.deepEqual(committedRename.moves, ["renamed.png"], "a lost response with authoritative renamed state never rolls the FSA file back");
+  assert.equal(committedRename.access.name, "renamed.png", "the live FSA access snapshot keeps the authoritative renamed name");
+  const rejectedRename = await responseLostRename("source.png");
+  assert.deepEqual(rejectedRename.moves, ["renamed.png", "source.png"], "a lost response with authoritative old state restores the FSA file");
+  assert.equal(rejectedRename.access.name, "source.png", "the restored FSA access snapshot returns to the old name");
+  const unknownRename = await responseLostRename(undefined);
+  assert.deepEqual(unknownRename.moves, ["renamed.png"], "a lost response without an authoritative image never guesses that the FSA rename should be reversed");
+  assert.equal(unknownRename.access.name, "renamed.png", "an unknown response leaves the physical FSA name available for reconnect recovery");
+  assert.equal(unknownRename.pending, false, "an unknown rename response releases the pending lock for recovery guidance");
+  context.api = originalApiForRename; context.catalogApi = originalCatalogApi;
+  state.images = images = [{ id: "one", sourcePath: "C:/one.png", sourceKind: "filesystem" }, { id: "two", sourceKind: "filesystem" }]; state.currentId = "one"; state.currentImage = images[0];
   test.openCatalogContextMenu(event("", "contextmenu"), "one"); await test.copyContextMenuImagePath();
   context.navigator.clipboard.writeText = async () => { throw new Error("denied"); };
   state.contextMenuImageId = "one"; state.contextMenuOrigin = element("#origin"); await test.copyContextMenuImagePath();
