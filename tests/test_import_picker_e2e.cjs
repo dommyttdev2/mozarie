@@ -3725,9 +3725,11 @@ async function main() {
     assert.ok(keyboardMenu.left >= 0 && keyboardMenu.top >= 0 && keyboardMenu.right <= keyboardMenu.viewportWidth && keyboardMenu.bottom <= keyboardMenu.viewportHeight && keyboardMenu.left >= keyboardMenu.cardLeft && keyboardMenu.top >= keyboardMenu.cardTop, "keyboard menu starts from the card and remains in the viewport");
     await page.keyboard.press("Tab");
     assert.equal(await page.locator("#catalogContextMenu").evaluate((menu) => menu.matches(":popover-open")), false, "Tab closes the catalog context menu without trapping focus");
-    const pointerContextBefore = await page.evaluate(async () => {
+    const pointerImages = Array.from({ length: 96 }, (_, index) => ({ id: `pointer-${index}`, relativePath: `pointer/${index}.png`, sourcePath: `G:/pointer/${index}.png`, width: 80, height: 60 }));
+    setCatalog(pointerImages);
+    const pointerContextBefore = await page.evaluate(async (pointerImages) => {
       window.__pointerContextSaved = { images: state.images, currentId: state.currentId, galleryFilter: state.galleryFilter, overviewFilter: state.overviewFilter, viewMode: state.viewMode, batchMode: state.batchMode, selectedImageIds: state.selectedImageIds, selectionAnchorId: state.selectionAnchorId };
-      state.images = Array.from({ length: 96 }, (_, index) => ({ id: `pointer-${index}`, relativePath: `pointer/${index}.png`, sourcePath: `G:/pointer/${index}.png`, width: 80, height: 60 }));
+      state.images = pointerImages;
       state.currentId = "pointer-0"; state.galleryFilter = new Set(); state.viewMode = "edit"; state.batchMode = false; state.selectedImageIds = new Set(["pointer-0"]); state.selectionAnchorId = "pointer-0";
       renderGallery(true); const gallery = document.querySelector("#gallery"); gallery.scrollTop = 100; resetCatalogWindows(); renderGallery(true);
       const firstCard = document.querySelector('.gallery-item[data-id="pointer-0"]');
@@ -3740,7 +3742,7 @@ async function main() {
       const before = snapshot(); let pointerPrevented = false; target.onpointerdown({ button: 2, preventDefault() { pointerPrevented = true; } });
       target.oncontextmenu({ type: "contextmenu", currentTarget: target, clientX: target.getBoundingClientRect().left + 4, clientY: target.getBoundingClientRect().top + 4, preventDefault() {} });
       return { before, after: snapshot(), pointerPrevented, target: state.contextMenuImageId, contextScroll: state.contextMenuScroll, firstInViewport, firstSelectionTop, visibleSelectionTop };
-    });
+    }, pointerImages);
     assert.deepEqual({ firstInViewport: pointerContextBefore.firstInViewport, firstSelectionTop: pointerContextBefore.firstSelectionTop, visibleSelectionTop: pointerContextBefore.visibleSelectionTop }, { firstInViewport: true, firstSelectionTop: 0, visibleSelectionTop: 0 }, "a replaced catalog starts at its first visible card and selecting another visible card does not move the gallery");
     assert.equal(pointerContextBefore.pointerPrevented, true, "secondary gallery pointerdown prevents focus movement");
     assert.deepEqual(pointerContextBefore.after, pointerContextBefore.before, "right-clicking a visible unselected gallery card leaves logical focus, selection, tab stop, current image, and scroll unchanged");
@@ -3767,7 +3769,8 @@ async function main() {
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(resolve)));
     const overviewPointerAfter = await page.evaluate(() => ({ scrollTop: document.querySelector("#overviewGrid").scrollTop, currentId: state.currentId, selected: [...state.selectedImageIds].sort(), focused: document.activeElement?.dataset.id, tabStops: [...document.querySelectorAll('.overview-item[tabindex="0"]')].map((item) => item.dataset.id) }));
     assert.deepEqual(overviewPointerAfter, overviewPointerBefore.before, "closing an overview pointer menu preserves the prior logical state after rendering");
-    await page.evaluate(() => { const saved = window.__pointerContextSaved; state.images = saved.images; state.currentId = saved.currentId; state.galleryFilter = saved.galleryFilter; state.overviewFilter = saved.overviewFilter; state.batchMode = saved.batchMode; state.selectedImageIds = saved.selectedImageIds; state.selectionAnchorId = saved.selectionAnchorId; setViewMode(saved.viewMode); renderCatalogViews(); delete window.__pointerContextSaved; });
+    const restoredPointerCatalog = await page.evaluate(() => { const saved = window.__pointerContextSaved; state.images = saved.images; state.currentId = saved.currentId; state.galleryFilter = saved.galleryFilter; state.overviewFilter = saved.overviewFilter; state.batchMode = saved.batchMode; state.selectedImageIds = saved.selectedImageIds; state.selectionAnchorId = saved.selectionAnchorId; setViewMode(saved.viewMode); renderCatalogViews(); delete window.__pointerContextSaved; return structuredClone(state.images); });
+    setCatalog(restoredPointerCatalog);
     const gridKeyboard = await page.evaluate(() => {
       const saved = { images: state.images, currentId: state.currentId, galleryFilter: state.galleryFilter, overviewFilter: state.overviewFilter, viewMode: state.viewMode, batchMode: state.batchMode, selectedImageIds: state.selectedImageIds, selectionAnchorId: state.selectionAnchorId };
       const press = (key, modifiers = {}) => {
