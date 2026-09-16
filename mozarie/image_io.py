@@ -489,13 +489,20 @@ def _apply_mosaic_to_image(image: Image.Image, mask: np.ndarray, block_size: int
     return Image.fromarray(output)
 
 
-def _decode_mask(data_url: str, width: int, height: int) -> np.ndarray:
-    if not isinstance(data_url, str) or not data_url.startswith("data:image/png;base64,"):
-        raise ClientError("PNG形式の編集マスクが必要です。", "input_invalid")
-    try:
-        raw = base64.b64decode(data_url.split(",", 1)[1], validate=True)
-    except (IndexError, binascii.Error) as exc:
-        raise ClientError("編集マスクを読み込めません。", "input_invalid") from exc
+def _decode_mask(data: str | bytes, width: int, height: int) -> np.ndarray:
+    """Decode a browser data URL or a staged, trusted PNG layer.
+
+    Both paths pass through the same PNG, dimensions, and channel validation.
+    """
+    if isinstance(data, bytes):
+        raw = data
+    else:
+        if not isinstance(data, str) or not data.startswith("data:image/png;base64,"):
+            raise ClientError("PNG形式の編集マスクが必要です。", "input_invalid")
+        try:
+            raw = base64.b64decode(data.split(",", 1)[1], validate=True)
+        except (IndexError, binascii.Error) as exc:
+            raise ClientError("編集マスクを読み込めません。", "input_invalid") from exc
     try:
         with open_image(io.BytesIO(raw)) as image:
             if image.format != "PNG":
@@ -522,9 +529,9 @@ def decode_draft_masks(raw_draft: Any, width: int, height: int) -> tuple[np.ndar
     exclusion = raw_draft.get("exclusion") if raw_draft.get("manualExclusionEnabled", True) is not False else None
     exclusion_erase = raw_draft.get("exclusionErase") if raw_draft.get("manualExclusionEraseEnabled", True) is not False else None
     return (
-        _decode_mask(str(add), width, height) if add else None,
-        _decode_mask(str(exclusion), width, height) if exclusion else None,
-        _decode_mask(str(exclusion_erase), width, height) if exclusion_erase else None,
+        _decode_mask(add, width, height) if add else None,
+        _decode_mask(exclusion, width, height) if exclusion else None,
+        _decode_mask(exclusion_erase, width, height) if exclusion_erase else None,
     )
 
 

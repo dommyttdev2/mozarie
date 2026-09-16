@@ -261,6 +261,7 @@
   "duration.second": "{count}s",
   "status.saved": "Saved.",
   "status.saving": "Saving...",
+  "status.workspaceUnsaved": "Hand-drawn changes are not saved yet. Mozarie will retry with the next action.",
   "workspace.collapseGallery": "Collapse image list",
   "workspace.gallerySplitter": "Image list width",
   "workspace.inspectorSplitter": "Detected candidates width",

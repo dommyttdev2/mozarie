@@ -135,7 +135,7 @@ def _operation_log_spec(method: str, path: str) -> tuple[str, str] | None:
             if path.endswith("/commit"):
                 return "手描きマスク転送確定", "/api/workspace/manual/commit"
             if path.endswith("/cancel"):
-                return "手描きマスク転送取消", "/api/workspace/manual/cancel"
+                return "手描きマスク一時転送を破棄", "/api/workspace/manual/cancel"
         if path.startswith("/api/project/history/"):
             return "プロジェクト履歴", "/api/project/history"
         if path.startswith("/api/workspace/image/"):

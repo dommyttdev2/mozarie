@@ -619,7 +619,10 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             if not session["writer"].acquire(blocking=False):
                 raise ClientError("手描きマスクを転送中です。完了後にもう一度実行してください。", "operation_in_progress")
             try:
-                self._discard_manual_upload_unchecked(session_id, session, "取消")
+                # This endpoint is used after an automatic save failure.  It
+                # cleans only the private staging files; the visible draft is
+                # retained by the browser for retry.
+                self._discard_manual_upload_unchecked(session_id, session, "確定失敗後の一時転送を破棄")
             finally:
                 self._release_manual_writer(session)
 

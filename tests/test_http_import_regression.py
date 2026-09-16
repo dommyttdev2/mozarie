@@ -291,6 +291,7 @@ class FolderLoadLoggingContractTests(unittest.TestCase):
             ("POST", f"/api/candidate/{secret}/{secret}", "候補変更", "/api/candidate"),
             ("DELETE", f"/api/candidate/{secret}/{secret}", "候補削除", "/api/candidate"),
             ("DELETE", f"/api/workspace/manual/{secret}", "手描き範囲削除", "/api/workspace/manual"),
+            ("POST", f"/api/workspace/manual/{secret}/cancel", "手描きマスク一時転送を破棄", "/api/workspace/manual/cancel"),
             ("POST", "/api/workspace/recreate", "作業データ再作成", "/api/workspace/recreate"),
         ]
         for method, path, label, route in routes:

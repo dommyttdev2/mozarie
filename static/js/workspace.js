@@ -14,7 +14,13 @@ function queueWorkspaceMutation(imageId, send, rememberFailure = true) {
   };
   next.then(clearSettledChain, clearSettledChain);
   if (rememberFailure) next.then(
-    () => {},
+    () => {
+      state.workspaceMutationErrors.delete(imageId);
+      if (state.workspaceUnsavedImageId === imageId) {
+        delete state.workspaceUnsavedImageId;
+        if (state.status?.key === "status.workspaceUnsaved") clearStatus();
+      }
+    },
     (error) => { state.workspaceMutationErrors.set(imageId, error); },
   );
   return next;
@@ -458,7 +464,12 @@ function queueWorkspaceDraft(imageId, immediate = false) {
     });
   };
   if (immediate) return write();
-  const promise = new Promise((resolve) => state.workspaceDraftTimers.set(imageId, setTimeout(() => resolve(write().catch((error) => { showUserError(error); })), 250)));
+  const promise = new Promise((resolve) => state.workspaceDraftTimers.set(imageId, setTimeout(() => resolve(write().catch((error) => {
+    // Retain the bitmap and dirty layers for retry, while making it explicit
+    // that the displayed hand-drawn edit is not durable yet.
+    state.workspaceUnsavedImageId = imageId;
+    setStatusKey("status.workspaceUnsaved", {}, "warning"); showUserError(error);
+  })), 250)));
   return promise;
 }
 
