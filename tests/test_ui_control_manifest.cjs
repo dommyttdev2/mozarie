@@ -1,7 +1,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
-const { controls, dynamicControls, dynamicSurfaceContracts, scenarioContracts } = require("./ui-control-manifest.cjs");
+const { controls, anonymousStaticControls, dynamicControls, dynamicSurfaceContracts, scenarioContracts } = require("./ui-control-manifest.cjs");
 
 const html = fs.readFileSync(path.join(__dirname, "..", "static", "index.html"), "utf8");
 const resultKinds = new Set(["api", "canvas", "dialog", "disabled", "dom", "download", "history", "navigation", "value"]);
@@ -11,6 +11,20 @@ const actual = [...html.matchAll(/<(button|input|select|textarea)\b[^>]*\bid="([
 assert.equal(new Set(actual).size, actual.length, "static controls must not reuse ids");
 assert.equal(new Set(controls.map((control) => control.id)).size, controls.length, "manifest control ids must be unique");
 assert.deepEqual([...new Set(controls.map((control) => control.id))].sort(), [...new Set(actual)].sort(), "every static id-addressable control needs an interaction contract");
+const anonymous = [...html.matchAll(/<(button|input|select|textarea)\b(?![^>]*\bid=)[^>]*>/g)].map((match) => {
+  const tag = match[0];
+  for (const attribute of ["data-project-sort", "data-gallery-filter", "data-candidate-batch", "data-candidate-display-toggle", "data-candidate-effective-toggle", "data-candidate-padding-batch", "data-overview-filter", "data-selection-action", "data-model-download", "data-model-help", "data-model-picker"]) {
+    const value = tag.match(new RegExp(`${attribute}="([^"]+)"`))?.[1];
+    if (value) return `[${attribute}="${value}"]`;
+  }
+  const sam = tag.match(/name="settingsSamVariant"[^>]*value="([^"]+)"/);
+  if (sam) return `input[name="settingsSamVariant"][value="${sam[1]}"]`;
+  if (/class="[^"]*gallery-item/.test(tag)) return ".gallery-item";
+  if (/class="[^"]*overview-item/.test(tag)) return ".overview-item";
+  throw new Error(`anonymous interactive control needs a stable exact selector: ${tag}`);
+});
+assert.equal(new Set(anonymousStaticControls).size, anonymousStaticControls.length, "anonymous static control selectors must be unique");
+assert.deepEqual([...new Set(anonymous)].sort(), [...anonymousStaticControls].sort(), "every anonymous static control variant needs an exact contract");
 for (const control of controls) {
   assert.match(control.action, /^(click|change|keyboard)$/);
   assert.ok(resultKinds.has(control.resultKind), `unknown result kind for ${control.id}`);

@@ -50,3 +50,4 @@
 16. [ブラウザーコピー保存後の元画像削除（SV-077）](manual-verification/save-release.md)：元画像を削除する前に復元用snapshotを取得できない場合、コピーを保持して削除・確定を開始しないことを確認する。
 17. [絶対パスの保存・モデル・フォルダー読込（SD-141〜142、WS-138）](manual-verification/settings-detection.md)：既存設定の一回限りの移行と、新規入力で相対パスを拒否することを確認する。
 18. [更新途中の再試行（SV-088）](manual-verification/save-release.md)：依存関係・本体・ランタイム確認の途中失敗後も、同じReleaseを再実行して完了できることを確認する。
+19. [ブラウザーPNG読込・候補revision再同期・保存完走（DI-259〜260）](manual-verification/data-integrity.md)と[役割別全削除・全操作台帳（ED-131〜132）](manual-verification/editor.md)：大きいPNGメタ情報、検出競合、絶対パス保存、候補と手描きのUndo/Redo、全操作値を確認する。

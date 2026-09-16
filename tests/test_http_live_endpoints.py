@@ -23,7 +23,8 @@ from PIL import Image, PngImagePlugin
 
 import mozarie.http as http_module
 import mozarie.state as state_module
-from mozarie.core import ClientError
+from mozarie.core import Candidate, ClientError, Job
+from mozarie.runtime_types import DetectionModels
 from mozarie.http import MosaicHandler
 from mozarie.state import StudioState
 
@@ -466,6 +467,70 @@ class LiveHttpEndpointTests(unittest.TestCase):
         self.assertTrue(headers.get("X-Mozarie-Save-Token"))
         with Image.open(io.BytesIO(body)) as rendered:
             self.assertEqual((rendered.mode, rendered.size), ("RGB", (12, 8)))
+
+    def test_live_detect_edit_and_copy_save_preserves_png_metadata(self) -> None:
+        metadata = PngImagePlugin.PngInfo()
+        metadata.add_text("workflow", "w" * 1_200_000, zip=True)
+        source = Image.new("RGB", (12, 8), "white")
+        for y in range(8):
+            for x in range(12):
+                source.putpixel((x, y), (x * 20, y * 25, (x + y) * 10))
+        source.save(self.source_dir / "source.png", pnginfo=metadata)
+        output_dir = Path(self._temporary_directory.name) / "saved"
+        output_dir.mkdir()
+        self.state.settings["saving"]["default_output_directory"] = str(output_dir.resolve())
+
+        status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        image_id = json.loads(body)["images"][0]["id"]
+        record = self.state.image_for_id(image_id)
+        self.state.job = Job(started_at=time.time(), kind="detect", state="running", total=1, image_ids=(image_id,))
+        pending_path = self.state.cache_dir / image_id / ".mozarie-pending-detected.png"
+
+        def detect(*_args, **_kwargs):
+            pending_path.parent.mkdir(parents=True, exist_ok=True)
+            pixels = Image.new("L", (12, 8), 0)
+            for y in range(2, 7):
+                for x in range(3, 10):
+                    pixels.putpixel((x, y), 255)
+            pixels.save(pending_path)
+            return [Candidate("detected", "penis", .9, pending_path)]
+
+        with patch.object(self.state, "_ensure_models", return_value=DetectionModels(target=object())), \
+                patch.object(self.state, "_detect_image", side_effect=detect):
+            self.state._detect_worker([record], .5, 1)
+        self.assertEqual(self.state.job.state, "complete")
+        revision = self.state._candidate_revision(image_id)
+        self.assertEqual(revision, 1)
+
+        client_token = "00000000-0000-4000-8000-000000000021"
+        save_options = {
+            "imageId": image_id, "candidateRevision": revision, "clientSaveToken": client_token,
+            "copyToDefault": True, "suffix": "_saved", "format": "original", "keepMetadata": True,
+        }
+        status, _headers, body = self.request("POST", "/api/save/reserve", save_options, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        output_path = Path(json.loads(body)["outputPath"])
+        status, headers, body = self.request("POST", "/api/save/render", {
+            **save_options, "divisor": 4, "draft": None,
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        self.assertEqual(body, b"")
+        save_token = headers["X-Mozarie-Save-Token"]
+        status, _headers, body = self.request("POST", "/api/save/commit", {
+            "imageId": image_id, "candidateRevision": revision,
+            "saveToken": save_token, "sourceAction": "keep",
+        }, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        self.assertTrue(json.loads(body)["cleared"])
+        self.assertTrue(output_path.is_file())
+        with patch.object(PngImagePlugin, "MAX_TEXT_CHUNK", 2_000_000), Image.open(output_path) as saved:
+            self.assertEqual(saved.info["workflow"], "w" * 1_200_000)
+            self.assertNotEqual(saved.getpixel((5, 4)), (255, 255, 255))
+        status, _headers, body = self.request("POST", "/api/save/ack", {"saveToken": save_token}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8") if status != 200 else "")
+        self.assertTrue(json.loads(body)["acknowledged"])
+        self.assertEqual((self.source_dir / "source.png").exists(), True)
 
     def test_flag_write_keeps_catalogue_state_consistent_across_a_sqlite_wait(self) -> None:
         _status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
