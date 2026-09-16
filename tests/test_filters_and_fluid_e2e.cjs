@@ -5,7 +5,7 @@ const test = require("node:test");
 const { chromium } = require("playwright");
 const { closeServer, startFixtureServer } = require("./test_import_picker_e2e.cjs");
 
-async function freshPage(browser, fixture, initScript = null) {
+async function freshPage(browser, fixture, initScript = null, expectedImageCount = 2) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   await context.addInitScript(() => {
     window.showOpenFilePicker = async () => [];
@@ -14,7 +14,11 @@ async function freshPage(browser, fixture, initScript = null) {
   if (initScript) await context.addInitScript(initScript);
   const page = await context.newPage();
   await page.goto(fixture.url, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => state.settings && state.job && state.images.length === 2 && document.querySelectorAll(".gallery-item").length === 2);
+  await page.waitForFunction((expectedCount) => {
+    return Boolean(state.settings) && Boolean(state.job)
+      && state.images.length === expectedCount
+      && document.querySelectorAll(".gallery-item").length === expectedCount;
+  }, expectedImageCount);
   return { context, page };
 }
 
@@ -175,7 +179,7 @@ test("OR filters move from an outside current image to the first match, through 
   ]);
   let context; let page;
   try {
-    ({ context, page } = await freshPage(browser, fixture));
+    ({ context, page } = await freshPage(browser, fixture, null, 3));
     await page.locator('.gallery-item[data-id="outside"]').click();
     await page.waitForFunction(() => state.currentId === "outside" && state.currentImage);
     await page.evaluate(() => {

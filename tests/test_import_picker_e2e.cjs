@@ -637,7 +637,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, setFolderImportFailures: (failures) => { folderImportFailures = structuredClone(failures); }, sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), setSourceDeleteCommitFailureIds: (imageIds) => { sourceDeleteCommitFailureIds = new Set(imageIds); }, holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests: (count) => settingsStatusRequests.length >= count ? Promise.resolve() : new Promise((resolve) => settingsStatusWaiters.push({ count, resolve })), updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; sourceDeleteCommitFailureIds = new Set(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; folderImportFailures = []; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, setDefaultOutputDirectory: (value) => { settings.saving.default_output_directory = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, setFolderImportFailures: (failures) => { folderImportFailures = structuredClone(failures); }, catalogImageIds: () => catalog.map((image) => image.id), sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), setSourceDeleteCommitFailureIds: (imageIds) => { sourceDeleteCommitFailureIds = new Set(imageIds); }, holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests: (count) => settingsStatusRequests.length >= count ? Promise.resolve() : new Promise((resolve) => settingsStatusWaiters.push({ count, resolve })), updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; sourceDeleteCommitFailureIds = new Set(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; folderImportFailures = []; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, setDefaultOutputDirectory: (value) => { settings.saving.default_output_directory = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -2073,6 +2073,7 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
     applyStartButton: async () => { await page.waitForFunction(() => state.applyRunning && state.saving); },
     processingPauseButton: (before, after) => apiChanged(before, after, "processingPauseButton", "/api/job/"),
     processingCancelButton: (before, after) => apiChanged(before, after, "processingCancelButton", "/api/job/cancel"),
+    importFailuresClose: dialog("importFailuresDialog", false, "importFailuresClose"),
     modelHelpCloseButton: dialog("modelHelpDialog", false, "modelHelpCloseButton"),
     modelHelpCopy: (before, after) => assert.ok(after.clipboardWrites > before.clipboardWrites, "modelHelpCopy must write the clipboard"),
     confirmAccept: dialog("confirmDialog", false, "confirmAccept"), errorDialogClose: dialog("errorDialog", false, "errorDialogClose"),
@@ -2175,7 +2176,7 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
     images: ["sample", "sample-two"],
     failures: ["bad/nested.png: 画像を読み込めません", "changed.png: 読み込み中に画像が変更されました"],
   }, "native folder loading keeps normal images and presents every skipped file");
-  await page.locator("#importFailuresClose").click(); setFolderImportFailures([]);
+  await click("importFailuresClose"); setFolderImportFailures([]);
   // Folder loading replaces the thumbnail-backed bitmap; re-enter the same
   // normal-size editor fixture before pointer-only controls continue.
   await setupFixture();
@@ -2681,27 +2682,44 @@ async function main() {
     await stopCoveredPage(settingsFailurePage, true);
     const connectionRecoveryPage = await newCoveredPage(browser);
     await connectionRecoveryPage.addInitScript(() => {
-      window.__connectionOffline = false;
+      window.__jobPollMode = "online";
+      window.__jobPollAttempts = 0;
       const fetchOriginal = window.fetch;
-      window.fetch = (...args) => String(args[0]?.url || args[0]).includes("/api/job") && window.__connectionOffline
-        ? Promise.reject(new Error("fixture offline"))
-        : fetchOriginal(...args);
+      window.fetch = (...args) => {
+        const url = new URL(String(args[0]?.url || args[0]), location.href);
+        if (url.pathname === "/api/job") {
+          window.__jobPollAttempts += 1;
+          if (window.__jobPollMode === "offline") return Promise.reject(new Error("fixture offline"));
+        }
+        return fetchOriginal(...args);
+      };
     });
     await connectionRecoveryPage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
     await waitForFixtureReady(connectionRecoveryPage);
-    await connectionRecoveryPage.evaluate(async () => {
-      window.__connectionOffline = true;
-      state.pollFailures = 2;
-      await pollJob();
+    await connectionRecoveryPage.waitForFunction(() => state.pollInFlight === null);
+    const pollAttemptsBeforeFailures = await connectionRecoveryPage.evaluate(() => {
+      clearTimeout(state.jobPollTimer);
+      window.__fixtureScheduleJobPoll = scheduleJobPoll;
+      scheduleJobPoll = () => {};
+      return window.__jobPollAttempts;
     });
-    await connectionRecoveryPage.waitForFunction(() => !document.querySelector("#connectionStatus").hidden);
+    await connectionRecoveryPage.evaluate(async () => {
+      window.__jobPollMode = "offline";
+      await pollJob(); await pollJob(); await pollJob();
+    });
+    await connectionRecoveryPage.waitForFunction(() => state.pollFailures === 3
+      && state.status?.connectionFailure === true
+      && document.querySelector("#connectionStatus").textContent === "Mozarieに接続できません");
     assert.equal(await connectionRecoveryPage.locator("#connectionStatus").textContent(), "Mozarieに接続できません", "three failed polls show the inline connection status");
+    assert.deepEqual(await connectionRecoveryPage.evaluate((baseline) => ({ attempts: window.__jobPollAttempts - baseline, failures: state.pollFailures }), pollAttemptsBeforeFailures), { attempts: 3, failures: 3 }, "three explicit failed polls reach the connection threshold after bootstrap");
     assert.equal(await connectionRecoveryPage.locator("#errorDialog").evaluate((dialog) => dialog.open), false, "failed polls do not open an error dialog");
     await connectionRecoveryPage.evaluate(async () => {
-      window.__connectionOffline = false;
+      window.__jobPollMode = "online";
       await pollJob();
     });
-    await connectionRecoveryPage.waitForFunction(() => document.querySelector("#connectionStatus").hidden);
+    await connectionRecoveryPage.waitForFunction(() => document.querySelector("#connectionStatus").hidden && state.pollFailures === 0);
+    assert.equal(await connectionRecoveryPage.evaluate((baseline) => window.__jobPollAttempts - baseline, pollAttemptsBeforeFailures), 4, "the next successful poll clears the failure count");
+    await connectionRecoveryPage.evaluate(() => { scheduleJobPoll = window.__fixtureScheduleJobPoll; scheduleJobPoll(); });
     assert.equal(await connectionRecoveryPage.locator("#errorDialog").evaluate((dialog) => dialog.open), false, "a recovered poll clears the inline connection status without a dialog");
     await connectionRecoveryPage.evaluate(async () => {
       try { await api("/missing"); } catch (error) { showUserError(error); }
