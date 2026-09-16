@@ -120,6 +120,7 @@ function startFixtureServer() {
   const sourceDeletes = new Map();
   const sourceDeleteRequests = [];
   let holdSourceDeleteClaim = false;
+  let sourceDeleteCommitFailureIds = new Set();
   const pendingSourceDeleteClaims = [];
   const saveRequests = [];
   let holdSaveRender = false;
@@ -313,10 +314,11 @@ function startFixtureServer() {
       sourceDeleteRequests.push({ path: requestPath, expectedProjectId: payload.expectedProjectId, expectedCatalogGeneration: payload.expectedCatalogGeneration, headerProjectId: request.headers["x-mozarie-expected-project-id"], headerCatalogGeneration: request.headers["x-mozarie-expected-catalog-generation"] });
       if (payload.expectedProjectId !== null || payload.expectedCatalogGeneration !== catalogGeneration) { response.writeHead(409, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "stale_catalog" })); return; }
       const imageIds = operation?.imageIds?.filter((imageId) => payload.imageIds.includes(imageId)) || [];
-      const removedImageIds = catalog.filter((image) => imageIds.includes(image.id)).map((image) => image.id);
+      const removedImageIds = catalog.filter((image) => imageIds.includes(image.id) && !sourceDeleteCommitFailureIds.has(image.id)).map((image) => image.id);
       catalog = catalog.filter((image) => !removedImageIds.includes(image.id));
       if (removedImageIds.length) catalogGeneration += 1;
-      const result = { state: "committed", images: catalog, catalogGeneration, removedImageIds, failed: [], prepareFailures: [], cleanupPendingCount: 0 };
+      const failed = imageIds.filter((imageId) => sourceDeleteCommitFailureIds.has(imageId)).map((imageId) => ({ imageId, reason: "source_changed" }));
+      const result = { state: "committed", images: catalog, catalogGeneration, removedImageIds, failed, prepareFailures: [], cleanupPendingCount: 0 };
       if (operation) Object.assign(operation, result);
       response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(result));
       return;
@@ -470,8 +472,12 @@ function startFixtureServer() {
     }
     if (requestPath.startsWith("/api/workspace/image/") && request.method === "POST") {
       let body = ""; for await (const chunk of request) body += chunk;
-      const flags = JSON.parse(body);
-      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify(flags));
+      const flags = JSON.parse(body); const imageId = decodeURIComponent(requestPath.slice("/api/workspace/image/".length));
+      const image = catalog.find((entry) => entry.id === imageId);
+      if (!image) { response.writeHead(404, { "Content-Type": "application/json" }); response.end(JSON.stringify({ error_code: "image_not_found" })); return; }
+      if (typeof flags.hidden === "boolean") image.hidden = flags.hidden;
+      if (typeof flags.reviewed === "boolean") image.reviewed = flags.reviewed;
+      response.writeHead(200, { "Content-Type": "application/json" }); response.end(JSON.stringify({ hidden: image.hidden, reviewed: image.reviewed }));
       return;
     }
     if (requestPath === "/api/job") {
@@ -626,7 +632,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests: (count) => settingsStatusRequests.length >= count ? Promise.resolve() : new Promise((resolve) => settingsStatusWaiters.push({ count, resolve })), updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, setDefaultOutputDirectory: (value) => { settings.saving.default_output_directory = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), setSourceDeleteCommitFailureIds: (imageIds) => { sourceDeleteCommitFailureIds = new Set(imageIds); }, holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests: (count) => settingsStatusRequests.length >= count ? Promise.resolve() : new Promise((resolve) => settingsStatusWaiters.push({ count, resolve })), updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; sourceDeleteCommitFailureIds = new Set(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, setDefaultOutputDirectory: (value) => { settings.saving.default_output_directory = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }

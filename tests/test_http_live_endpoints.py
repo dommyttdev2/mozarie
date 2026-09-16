@@ -349,6 +349,23 @@ class LiveHttpEndpointTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["error_code"], "workspace_database_error")
         self.assertFalse(self.state.images[image_id].hidden)
 
+    def test_hidden_images_are_rejected_by_explicit_detect_apply_and_browser_save_requests(self) -> None:
+        """A stale client cannot process a hidden image by posting its ID directly."""
+        _status, _headers, body = self.request("POST", "/api/folder", {"path": str(self.source_dir)}, authorized=True)
+        image_id = json.loads(body)["images"][0]["id"]
+        status, _headers, body = self.request("POST", f"/api/workspace/image/{image_id}", {"hidden": True}, authorized=True)
+        self.assertEqual(status, 200, body.decode("utf-8"))
+
+        self.state.settings["models"]["provider"] = "cpu"
+        for path, payload in (
+            ("/api/detect", {"imageIds": [image_id], "confidence": 0.5, "parallelism": 1, "targetClasses": ["penis"]}),
+            ("/api/apply", {"imageIds": [image_id], "divisor": 100, "drafts": {}, "copyToDefault": False, "suffix": "_censored", "format": "original", "keepMetadata": True}),
+            ("/api/save/reserve", {"imageId": image_id, "candidateRevision": 0, "clientSaveToken": "00000000-0000-4000-8000-000000000011", "copyToDefault": False, "suffix": "_censored", "format": "original", "keepMetadata": True}),
+        ):
+            status, _headers, body = self.request("POST", path, payload, authorized=True)
+            self.assertEqual(status, 400, f"{path}: {body.decode('utf-8')}")
+            self.assertEqual(json.loads(body)["error_code"], "image_hidden")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -86,3 +86,98 @@ test("unknown browser-source deletion remains recoverable instead of silently co
     await closeServer(fixture.server);
   }
 });
+
+test("batch source deletion keeps the current canvas when another selected image fails, then moves only after the current image commits", { timeout: 60000 }, async () => {
+  const fixture = await startFixtureServer();
+  const browser = await chromium.launch({ headless: true });
+  const catalogue = ["first", "current", "last"].map((id) => ({
+    id, relativePath: `${id}.png`, sourceKind: "filesystem", sourcePath: `G:\\fixture\\${id}.png`,
+    width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0, reviewed: false, hidden: false,
+  }));
+  async function removeSelected(page, ids) {
+    await page.locator("#overviewButton").click();
+    await page.locator("#batchModeButton").click();
+    for (const id of ids) await page.locator(`.overview-item[data-id="${id}"]`).click();
+    await page.locator("#selectionActionsButton").click();
+    await page.locator('[data-selection-action="remove"]').click();
+    await page.waitForFunction(() => document.querySelector("#confirmDialog").open);
+    await page.locator("#confirmAccept").click();
+  }
+  let context; let page;
+  try {
+    fixture.setCatalog(catalogue);
+    fixture.setSourceDeleteCommitFailureIds(["current"]);
+    ({ context, page } = await freshPage(browser, fixture));
+    await page.locator('.gallery-item[data-id="current"]').click();
+    await page.waitForFunction(() => state.currentId === "current" && state.currentImage);
+    await removeSelected(page, ["current", "last"]);
+    await page.waitForFunction(() => state.images.map((image) => image.id).join(",") === "first,current");
+    assert.deepEqual(await page.evaluate(() => ({ currentId: state.currentId, hasCanvas: Boolean(state.currentImage), ids: state.images.map((image) => image.id) })), {
+      currentId: "current", hasCanvas: true, ids: ["first", "current"],
+    }, "a failed current source deletion keeps the selected image and canvas while another selected image is removed");
+    await context.close(); context = null;
+
+    fixture.setCatalog(catalogue);
+    fixture.setSourceDeleteCommitFailureIds(["first"]);
+    ({ context, page } = await freshPage(browser, fixture));
+    await page.locator('.gallery-item[data-id="current"]').click();
+    await page.waitForFunction(() => state.currentId === "current" && state.currentImage);
+    await removeSelected(page, ["first", "current"]);
+    await page.waitForFunction(() => state.images.map((image) => image.id).join(",") === "first,last" && state.currentId === "last" && state.currentImage);
+    assert.deepEqual(await page.evaluate(() => state.images.map((image) => image.id)), ["first", "last"], "the failed peer stays listed while the committed current image is removed");
+  } finally {
+    await context?.close();
+    await browser.close();
+    await closeServer(fixture.server);
+  }
+});
+
+test("visible delete control selects next for first and middle, previous for last, and clears every view after an all-image batch", { timeout: 60000 }, async () => {
+  const fixture = await startFixtureServer();
+  const browser = await chromium.launch({ headless: true });
+  const catalogue = ["first", "middle", "last"].map((id) => ({
+    id, relativePath: `${id}.png`, sourceKind: "filesystem", sourcePath: `G:\\fixture\\${id}.png`,
+    width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0, reviewed: false, hidden: false,
+  }));
+  let context; let page;
+  async function resetPage() {
+    await context?.close(); context = null;
+    fixture.setCatalog(catalogue); fixture.setSourceDeleteCommitFailureIds([]);
+    ({ context, page } = await freshPage(browser, fixture));
+  }
+  async function deleteCurrent(id) {
+    await page.locator(`.gallery-item[data-id="${id}"]`).click();
+    await page.waitForFunction((imageId) => state.currentId === imageId && state.currentImage, id);
+    await page.locator("#removeAndNextButton").click();
+    await page.waitForFunction(() => document.querySelector("#confirmDialog").open);
+    await page.locator("#confirmAccept").click();
+  }
+  try {
+    await resetPage();
+    await deleteCurrent("first");
+    await page.waitForFunction(() => state.currentId === "middle" && state.images.map((image) => image.id).join(",") === "middle,last");
+
+    await resetPage();
+    await deleteCurrent("middle");
+    await page.waitForFunction(() => state.currentId === "last" && state.images.map((image) => image.id).join(",") === "first,last");
+
+    await resetPage();
+    await deleteCurrent("last");
+    await page.waitForFunction(() => state.currentId === "middle" && state.images.map((image) => image.id).join(",") === "first,middle");
+
+    await resetPage();
+    await page.locator("#overviewButton").click();
+    await page.locator("#batchModeButton").click();
+    for (const id of ["first", "middle", "last"]) await page.locator(`.overview-item[data-id="${id}"]`).click();
+    await page.locator("#selectionActionsButton").click();
+    await page.locator('[data-selection-action="remove"]').click();
+    await page.waitForFunction(() => document.querySelector("#confirmDialog").open);
+    await page.locator("#confirmAccept").click();
+    await page.waitForFunction(() => state.images.length === 0 && state.currentId === null && state.currentImage === null);
+    assert.equal(await page.locator("#overviewEmptyState").isHidden(), false, "the visible overview reports that an all-image deletion has no entries left");
+  } finally {
+    await context?.close();
+    await browser.close();
+    await closeServer(fixture.server);
+  }
+});

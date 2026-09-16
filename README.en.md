@@ -10,6 +10,7 @@ Mozarie is a local Windows app for detecting, reviewing, editing, and saving mos
 - Candidate review, exclusion, removal, and editing with mosaic/exclusion brushes, erasers, and the boundary tool.
 - Hand-area exclusion and forced exclusions that take priority over mosaics.
 - Save copies of current, mosaicked, and reviewed images, or overwrite the source.
+- Hidden images stay in the project with their source and edits, but are excluded from normal listing, all-image detection, saving, and mask export until shown again.
 
 ## Installation
 
@@ -106,6 +107,8 @@ Set one or more workers for automatic detection on GPU or CPU. The number of sel
 2. Run automatic detection for the current image or all images.
 3. Review the candidates at right; correct them with brushes, erasers, or the boundary tool as needed.
 4. Choose a save target; save a copy or overwrite the source.
+
+Hide does not delete the source image or its candidates, manual edits, or review state. A hidden image cannot start detection, saving, or mask export; show it again before editing or exporting it.
 
 For GPU processing, select a GPU in **Settings > Detection**. CPU assists unsupported operators. Mozarie does not automatically retry on CPU when GPU initialization or execution fails. If GPU memory runs out, close other GPU apps or switch to CPU.
 

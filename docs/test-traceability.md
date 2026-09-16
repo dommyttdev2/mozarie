@@ -40,6 +40,9 @@
 | DI-257 | ブラウザーsource再読込後のhydrate失敗は外部変更によるtransform resetを戻す | `tests.test_server.MozarieTests.test_browser_reimport_commits_an_external_source_transform_reset`、`tests.test_server.MozarieTests.test_browser_reimport_rolls_back_a_source_transform_reset_when_hydration_fails` | 実directory handle、外部変更、中断・権限失敗とPJ再開 |
 | ED-129 | 画像外で始めた各編集操作を拒否し、画像内開始後の通常ブラシ移動を端へ丸める | `tests/test_app_core_detection_coverage.cjs` | 実ブラウザーの余白、拡大率、比較表示での全編集操作 |
 | ED-130 | 無名作業の履歴復元を直列に保存し、部分成功を含む失敗後は強制再選択で再同期する | `tests/test_editor_masks_behavior.cjs` | 実ブラウザーと実サーバー通信での表示・再同期順 |
+| DI-161・DI-181 | ORフィルターで、絞り込み外から先頭一致へ進み、中間を経て末尾・1件では現在キャンバスを保持する | `tests/test_filters_and_fluid_e2e.cjs` の `OR filters move from an outside current image to the first match, through the middle, and keep a one-item tail selected`、`filtered review and hide keep their tail, while deletion selects the previous filtered image` | 実通信の遅延、409、切断とH表示時の画面操作 |
+| DI-170・DI-180・DI-203 | UIの非表示操作後、全画像検出・保存対象から除外し、直接APIで検出・保存・ブラウザー保存予約を拒否する | `tests/test_filters_and_fluid_e2e.cjs` の `hiding an image removes it from the visible all-image detection and save targets`、`tests.test_http_live_endpoints.LiveHttpEndpointTests.test_hidden_images_are_rejected_by_explicit_detect_apply_and_browser_save_requests`、`tests/test_browser_save_runtime.cjs` の `runSaveKeepsCatalogueAndEditorStateCase` | PJ ZIP、実モデル、実ブラウザー出力、全編集操作と実画面の案内 |
+| DI-217・DI-218 | 削除ボタンと一括削除は先頭・中間・末尾・全件で元画像削除プロトコルを完走し、成功した現在画像だけ次または前へ移動する | `tests/test_source_delete_e2e.cjs` の `visible delete control selects next for first and middle, previous for last, and clears every view after an all-image batch`、`batch source deletion keeps the current canvas when another selected image fails, then moves only after the current image commits`、`Delete shortcut keeps a durable source-delete intent through claim and acknowledges the committed receipt` | 実ファイル削除、確認文、SQLite、409、応答切断、再起動後の復旧 |
 
 ## active
 

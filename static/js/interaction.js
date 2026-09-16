@@ -256,7 +256,11 @@ function invalidatePendingImage() {
 async function restoreDeletionSelection(snapshot, imageIds) {
   const availableIds = new Set(state.images.map((image) => image.id));
   const removedIds = new Set([...imageIds].filter((imageId) => !availableIds.has(imageId)));
-  const target = snapshot.removesSelection && removedIds.size
+  // A batch can partially fail.  Only change the editor selection when the
+  // image that was actually current (or loading) was removed; deleting a
+  // different selected image must leave its canvas in place.
+  const removesSelection = removedIds.has(snapshot.currentImageId) || removedIds.has(snapshot.pendingImageId);
+  const target = removesSelection
     ? nextVisibleImage(snapshot.visibleImages, snapshot.anchorImageId, { excludedImageIds: removedIds, fallback: true })
     : null;
   const imageId = [target?.id, snapshot.pendingImageId, snapshot.currentImageId].find((id) => availableIds.has(id));
@@ -533,7 +537,7 @@ async function permanentlyDeleteImages(images, visibleImages) {
     if (state.project?.id && removed.size) await forgetProjectImageSources(state.project.id, [...removed]);
     loadReviewedPaths(); pruneSourceAccess();
     if (!state.images.length) { state.batchMode = false; clearBatchSelection(); }
-    if (selection.removesSelection) clearCurrentImageSelection();
+    if (removed.has(selection.currentImageId) || removed.has(selection.pendingImageId)) clearCurrentImageSelection();
     renderCatalogViews(); updateSelectionActionBar();
     await restoreDeletionSelection(selection, imageIds);
     const failed = [...new Map([...local.failed, ...(prepared.failed || []), ...browser.failed, ...(data.failed || [])]
