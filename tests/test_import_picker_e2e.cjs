@@ -844,8 +844,11 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
       return { hasPixelsCalls, getImageDataCalls };
     });
     assert.deepEqual(blinkTickReads, { hasPixelsCalls: 0, getImageDataCalls: 0 }, "a real Chromium blink tick avoids full-resolution mask readback");
-    await page.evaluate(() => window.__candidateBlinkTick());
-    assert.equal(await row.evaluate((node) => getComputedStyle(node).backgroundColor), "rgba(238, 78, 78, 0.3)", "the apply section visibly highlights its selected candidate");
+    const applyBlinkColor = await row.evaluate((node) => {
+      if (!state.blinkPhase) window.__candidateBlinkTick();
+      return getComputedStyle(node).backgroundColor;
+    });
+    assert.equal(applyBlinkColor, "rgba(238, 78, 78, 0.3)", "the apply section visibly highlights its selected candidate");
 
     await page.evaluate(() => {
       state.manualMaskPresent = true; state.manualExclusionPresent = true; state.manualExclusionErasePresent = true;
