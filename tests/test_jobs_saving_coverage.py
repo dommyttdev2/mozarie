@@ -156,6 +156,37 @@ class JobsSavingCoverageTests(unittest.TestCase):
             record.path.unlink()
             with self.assertRaises(ClientError): state._records_for_ids_with_catalog([record.image_id])
 
+    def test_detection_pause_uses_staged_progress(self) -> None:
+        state = self.make_jobs()
+        control = JobControl()
+        state.job = Job(kind="detect", state="running", total=2, processed=2, active_count=1)
+        state.job_control = control
+
+        with self.assertRaises(ClientError):
+            state.request_pause()
+        self.assertEqual(state.job.state, "running")
+        self.assertFalse(control.pause_requested.is_set())
+
+        state.job.processed = 1
+
+        class FinishDuringClaim:
+            def __enter__(_self):
+                state.job.processed = state.job.total
+
+            def __exit__(_self, *_args):
+                return False
+
+        control.claim_lock = FinishDuringClaim()
+        with self.assertRaises(ClientError):
+            state.request_pause()
+        self.assertEqual(state.job.state, "running")
+        self.assertFalse(control.pause_requested.is_set())
+
+        state.job.processed = 1
+        control.claim_lock = threading.Lock()
+        self.assertEqual(state.request_pause().state, "pausing")
+        self.assertTrue(control.pause_requested.is_set())
+
     def test_gpu_cache_candidate_mask_and_job_terminal_paths(self) -> None:
         state = self.make_jobs()
         cuda = Mock(); cuda.is_available.return_value = True
@@ -183,7 +214,7 @@ class JobsSavingCoverageTests(unittest.TestCase):
             state.candidates[record.image_id] = [Candidate("exclude", "penis", .9, mask_path, role=CandidateRole.EXCLUDE, forced=True)]
             add = np.zeros((2, 3), dtype=np.uint8); add[0, 0] = 255
             self.assertIsNotNone(state.combined_candidate_mask(record.image_id, (add, None, None), lock_image=False))
-        state.job = Job(kind="detect", state="running", total=1, image_ids=("one",), completed_image_ids=("one",), completed=1, active_count=1)
+        state.job = Job(kind="detect", state="running", total=1, image_ids=("one",), processed=1, active_count=1)
         state.job_control = JobControl(); state.job_control.pause_requested.set()
         state._finish_claimed_task(state.job_control, 1, 1)
         self.assertFalse(state.job_control.pause_requested.is_set())
