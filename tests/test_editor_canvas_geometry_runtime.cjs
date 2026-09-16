@@ -392,10 +392,15 @@ test.render(); test.flushRender();
   state.images = []; state.pendingImageId = null; state.pendingImageKey = null; state.pendingCandidateKey = null;
   await test.selectImage("absent", true, { saveCurrentDraft: false });
   assert.equal(state.pendingImageId, null);
-  state.images = [{ id: "broken", assetVersion: "v1", candidateRevision: 1 }]; state.imageCache = cache(); state.candidateBundleCache = cache(); state.drafts = new Map();
+  const nextAfterBroken = { id: "next-after-broken", assetVersion: "v1", candidateRevision: 1, relativePath: "next.png", width: 12, height: 9, enabledCandidateCount: 0 };
+  state.images = [{ id: "broken", assetVersion: "v1", candidateRevision: 1 }, nextAfterBroken]; state.imageCache = cache(); state.candidateBundleCache = cache(); state.drafts = new Map();
   const loadError = new Error("image decode failed"); context.cachedImage = async () => { throw loadError; }; context.loadCandidateBundle = async () => ({ candidates: [], candidateImages: new Map(), candidateRevision: 1 });
   await test.selectImage("broken", true, { saveCurrentDraft: false });
   assert.equal(context.lastUserError, loadError, "image load failures reach the standard user error path");
+  context.cachedImage = async () => ({ width: 12, height: 9, alpha: 255 });
+  context.loadWorkspaceDraft = async () => null; context.decodeDraftImages = async () => [null, null, null, null, null, null];
+  await test.selectImage("next-after-broken", true, { saveCurrentDraft: false });
+  assert.equal(state.currentId, "next-after-broken", "a failed main image does not block selecting the next normal image");
 
   // A successful gallery selection changes the image, candidate bundle, and
   // editor dimensions together.  This remains distinct from the stale/error

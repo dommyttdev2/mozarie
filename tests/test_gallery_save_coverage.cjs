@@ -41,19 +41,24 @@ function galleryItem(scope) {
   const name = element();
   const meta = element();
   const badge = element();
-  const item = element({ img: preview, ".gallery-name": name, ".gallery-meta": meta, ".gallery-review-badge": badge });
+  const thumbnailError = element();
+  const item = element({ img: preview, ".gallery-name": name, ".gallery-meta": meta, ".gallery-review-badge": badge, ".thumbnail-error": thumbnailError });
+  preview.closest = () => item;
   item.scope = scope;
   return item;
 }
 
 function overviewItem() {
   const preview = element();
-  return element({
+  const item = element({
     img: preview,
+    ".thumbnail-error": element(),
     ".overview-item-name": element(),
     ".overview-item-dimensions": element(),
     ".overview-review-badge": element(),
   });
+  preview.closest = () => item;
+  return item;
 }
 
 function makeGalleryRuntime() {
@@ -101,7 +106,7 @@ function makeGalleryRuntime() {
   context.reviewResult = true; context.hideResult = true;
   const source = fs.readFileSync(path.join(jsRoot, "gallery.js"), "utf8");
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "gallery.js") });
-  vm.runInNewContext("globalThis.__galleryTest = { thumbnailObserver, thumbnailSource, loadThumbnail, observeThumbnail, forgetThumbnail, catalogWindow, focusCatalogIndex, renderGallery, imageMatchesGalleryFilter, updateGalleryCurrent, overviewFolderOptions, overviewImages, syncOverviewFolders, selectOverviewImage, renderOverview, renderCatalogViews, setViewMode, moveCurrentBy, reviewAndMoveNext, hideAndMoveNext, runNavigationAction, updateNavigationControls, thumbnailObservers, catalogWindows, catalogMoveIndex, resetCatalogWindows, scrollCatalogImage };", context, { filename: "test-gallery-exports.js" });
+  vm.runInNewContext("globalThis.__galleryTest = { thumbnailObserver, thumbnailSource, loadThumbnail, retryThumbnail, observeThumbnail, forgetThumbnail, catalogWindow, focusCatalogIndex, renderGallery, imageMatchesGalleryFilter, updateGalleryCurrent, overviewFolderOptions, overviewImages, syncOverviewFolders, selectOverviewImage, renderOverview, renderCatalogViews, setViewMode, moveCurrentBy, reviewAndMoveNext, hideAndMoveNext, runNavigationAction, updateNavigationControls, thumbnailObservers, catalogWindows, catalogMoveIndex, resetCatalogWindows, scrollCatalogImage };", context, { filename: "test-gallery-exports.js" });
   return { ...context.__galleryTest, calls, context, document, frames, gallery, menus, nodes, observers, overviewGrid, prefetched, selected, state };
 }
 
@@ -121,6 +126,13 @@ async function galleryInteractions() {
   const observer = runtime.observers.at(-1); observer.callback([{ isIntersecting: false, target: standalone }, { isIntersecting: true, target: standalone }]);
   runtime.observeThumbnail(standalone, first);
   assert.equal(standalone.src, "/api/thumbnail/one?v=v%201"); runtime.forgetThumbnail(standalone); runtime.forgetThumbnail(null);
+
+  const retryPreview = element(); const retryNotice = element(); const retryCard = element({ ".thumbnail-error": retryNotice }); retryPreview.closest = () => retryCard;
+  retryPreview.dataset.src = "retry-thumb"; runtime.loadThumbnail(retryPreview); retryPreview.onerror();
+  assert.equal(retryNotice.hidden, false, "a failed thumbnail is visibly marked on its own card");
+  assert.equal(retryNotice.getAttribute("role"), "button", "the thumbnail retry is keyboard-accessible");
+  retryNotice.onclick({ preventDefault() {}, stopPropagation() {} });
+  assert.equal(retryNotice.hidden, true, "retry clears only the failed card marker"); assert.equal(retryPreview.src, "retry-thumb", "retry issues a fresh request for the failed thumbnail");
 
   runtime.renderGallery();
   assert.equal(runtime.gallery.children.length, 4, "the virtualized gallery keeps one spacer and its mounted window");

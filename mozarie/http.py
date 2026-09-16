@@ -736,7 +736,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     lambda: STATE.set_root(str(payload.get("path", "")), expected_project_id=expected_project_id,
                                            expected_catalog_generation=expected_catalog_generation)
                 )
-                self._json(snapshot)
+                with STATE.lock:
+                    scan_failures = [dict(failure) for failure in STATE.last_folder_scan_failures]
+                self._json({**snapshot, "importFailures": scan_failures})
             elif path == "/api/projects":
                 project, snapshot = self._catalog_transition_snapshot(
                     lambda: STATE.create_project(payload.get("name"), expected_project_id=expected_project_id,

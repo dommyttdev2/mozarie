@@ -1012,7 +1012,11 @@ async function loadFolder({ skipSameSourceWarning = false, path: suppliedPath = 
       state.missingNativeSources = typeof missingNativeSources === "function" ? missingNativeSources(data.sources) : [];
       if (typeof restoreBrowserProjectSourcesForCurrentCatalog === "function") void restoreBrowserProjectSourcesForCurrentCatalog().catch(() => {});
       setStatusKey("status.imagesLoaded", { count: state.images.length });
+      showImportFailures(data.importFailures, state.images.length, $("loadFolderButton"));
       if (typeof showSourceMismatches === "function") await showSourceMismatches();
     }, { allowEdits: true, allowNested: allowDuringCatalogTransition });
-  } catch (error) { showUserError(error); }
+  } catch (error) {
+    if (Array.isArray(error?.params?.failures)) showImportFailures(error.params.failures, 0, $("loadFolderButton"));
+    else showUserError(error);
+  }
 }

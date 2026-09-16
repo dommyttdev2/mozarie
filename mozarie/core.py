@@ -87,6 +87,7 @@ IO_CHUNK_BYTES = 1024 * 1024
 LOGGER = logging.getLogger(__name__)
 PUBLIC_ERROR_PARAMS: dict[str, frozenset[str]] = {
     "gpu_out_of_memory": frozenset({"parallelism"}),
+    "image_read_failed": frozenset({"failures"}),
 }
 
 

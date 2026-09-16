@@ -7,7 +7,35 @@ function thumbnailObserver(scope) {
   thumbnailObservers.set(scope, observer); return observer;
 }
 function thumbnailSource(record) { const version = imageAssetVersion(record); return `/api/thumbnail/${encodeURIComponent(record.id)}${version ? `?v=${encodeURIComponent(version)}` : ""}`; }
-function loadThumbnail(image) { const source = image.dataset.src; if (!source || image.dataset.loaded === source) return; image.dataset.loaded = source; image.src = source; }
+function thumbnailFailure(image) {
+  delete image.dataset.loaded;
+  const notice = image.closest?.(".gallery-item, .overview-item")?.querySelector(".thumbnail-error");
+  if (!notice) return;
+  notice.hidden = false;
+  notice.textContent = t("thumbnail.error");
+  notice.onclick = (event) => { event.preventDefault(); event.stopPropagation(); retryThumbnail(image); };
+  notice.onkeydown = (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault(); event.stopPropagation(); retryThumbnail(image);
+  };
+  notice.setAttribute("role", "button"); notice.tabIndex = 0;
+}
+function retryThumbnail(image) {
+  const notice = image.closest?.(".gallery-item, .overview-item")?.querySelector(".thumbnail-error");
+  if (notice) notice.hidden = true;
+  delete image.dataset.loaded;
+  image.removeAttribute("src");
+  loadThumbnail(image);
+}
+function loadThumbnail(image) {
+  const source = image.dataset.src;
+  if (!source || image.dataset.loaded === source) return;
+  const notice = image.closest?.(".gallery-item, .overview-item")?.querySelector(".thumbnail-error");
+  if (notice) notice.hidden = true;
+  image.dataset.loaded = source;
+  image.onerror = () => thumbnailFailure(image);
+  image.src = source;
+}
 function observeThumbnail(image, record, scope = "gallery") {
   const source = thumbnailSource(record);
   if (image.dataset.src !== source) forgetThumbnail(image);
@@ -15,7 +43,7 @@ function observeThumbnail(image, record, scope = "gallery") {
   if (image.dataset.loaded === source) return;
   thumbnailObserver(scope).observe(image);
 }
-function forgetThumbnail(image) { if (!image) return; for (const observer of thumbnailObservers.values()) observer.unobserve(image); image.removeAttribute?.("src"); image.dataset.src = ""; delete image.dataset.loaded; }
+function forgetThumbnail(image) { if (!image) return; for (const observer of thumbnailObservers.values()) observer.unobserve(image); image.removeAttribute?.("src"); image.dataset.src = ""; delete image.dataset.loaded; const notice = image.closest?.(".gallery-item, .overview-item")?.querySelector(".thumbnail-error"); if (notice) notice.hidden = true; }
 
 function catalogWindow(scope, container, nodes, options) {
   let windowState = catalogWindows.get(scope);

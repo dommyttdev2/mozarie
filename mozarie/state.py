@@ -133,6 +133,9 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
         self.session_imports_dir: Path | None = None
         self._session_lock_handle: Any | None = None
         self.root: Path | None = None
+        # The latest native-folder scan is returned by the folder endpoint so
+        # the browser can name every unreadable file while keeping valid files.
+        self.last_folder_scan_failures: list[dict[str, str]] = []
         self.source_roots: dict[str, Path] = {}
         # Published with the catalogue; never read a newer durable source list
         # into an older live image/root generation.

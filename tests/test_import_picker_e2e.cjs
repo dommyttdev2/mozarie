@@ -127,6 +127,7 @@ function startFixtureServer() {
   const pendingSaveRenders = [];
   const catalogRemoveRequests = [];
   const folderRequests = [];
+  let folderImportFailures = [];
   const initialCatalog = [
     { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", sourcePath: "G:\\画像 フォルダー\\sample image.png", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0, reviewed: false, hidden: false },
     { id: "sample-two", relativePath: "sample-two.png", sourceKind: "session", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0, reviewed: false, hidden: false },
@@ -265,7 +266,7 @@ function startFixtureServer() {
       let body = ""; for await (const chunk of request) body += chunk;
       folderRequests.push(JSON.parse(body));
       response.writeHead(200, { "Content-Type": "application/json" });
-      response.end(JSON.stringify({ ...catalogSnapshot(), root: folderRequests.at(-1).path }));
+      response.end(JSON.stringify({ ...catalogSnapshot(), root: folderRequests.at(-1).path, importFailures: folderImportFailures }));
       return;
     }
     // Folder selection now begins explicit unnamed project work.  Keep this
@@ -632,7 +633,7 @@ function startFixtureServer() {
     server.listen(0, "127.0.0.1", () => {
       server.off("error", reject);
       const { port } = server.address();
-      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), setSourceDeleteCommitFailureIds: (imageIds) => { sourceDeleteCommitFailureIds = new Set(imageIds); }, holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests: (count) => settingsStatusRequests.length >= count ? Promise.resolve() : new Promise((resolve) => settingsStatusWaiters.push({ count, resolve })), updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; sourceDeleteCommitFailureIds = new Set(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, setDefaultOutputDirectory: (value) => { settings.saving.default_output_directory = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
+      resolve({ server, url: `http://127.0.0.1:${port}`, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, setFolderImportFailures: (failures) => { folderImportFailures = structuredClone(failures); }, sourceDeleteRequests, sourceDeleteOperations: () => structuredClone([...sourceDeletes.entries()]), setSourceDeleteOperation: (token, operation) => sourceDeletes.set(token, structuredClone(operation)), setSourceDeleteCommitFailureIds: (imageIds) => { sourceDeleteCommitFailureIds = new Set(imageIds); }, holdSourceDeleteClaim: (value) => { holdSourceDeleteClaim = value; }, releaseSourceDeleteClaims: () => { holdSourceDeleteClaim = false; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); }, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests: (count) => settingsStatusRequests.length >= count ? Promise.resolve() : new Promise((resolve) => settingsStatusWaiters.push({ count, resolve })), updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs: () => modelDownloadJobs, modelDownloadPolls: () => modelDownloadPolls, cancelRequests: () => cancelRequests, holdDetection: (value) => { holdDetection = value; }, holdSaveRender: (value) => { holdSaveRender = value; }, releaseSaveRenders: () => { holdSaveRender = false; pendingSaveRenders.splice(0).forEach((resume) => resume()); }, failCancel: (value) => { cancelShouldFail = value; }, failNextSettingsSave: () => { failNextSettingsSave = true; }, failModelDownloadStatus: (value) => { failModelDownloadStatus = value; }, resetModelDownload: () => { modelDownloadJob = { state: "idle", paths: {} }; }, resetScenario: () => { catalog = structuredClone(initialCatalog); catalogGeneration += 1; saveTokens.clear(); sourceDeletes.clear(); sourceDeleteRequests.length = 0; pendingSourceDeleteClaims.splice(0).forEach((resume) => resume()); holdSourceDeleteClaim = false; sourceDeleteCommitFailureIds = new Set(); saveRequests.length = 0; catalogRemoveRequests.length = 0; folderRequests.length = 0; folderImportFailures = []; currentJob = { kind: "idle", state: "idle" }; }, setCatalog: (images) => { catalog = structuredClone(images); }, setDefaultOutputDirectory: (value) => { settings.saving.default_output_directory = value; }, resetJob: () => { currentJob = { kind: "idle", state: "idle" }; }, finishCancel: () => { currentJob = { ...currentJob, state: "cancelled", current: "" }; }, finishApply: () => { currentJob = { ...currentJob, state: "complete", completed: currentJob.total, current: "", completedImageIds: currentJob.imageIds }; }, setUpdateAvailable: (value) => { updateAvailable = value; }, deferFullSettings: () => { deferFullSettings = true; }, releaseNextFullSettings: () => { pendingFullSettings.shift()?.(); }, releaseFullSettings: () => { deferFullSettings = false; pendingFullSettings.splice(0).forEach((reply) => reply()); }, deferUpdateStatus: () => { deferUpdateStatus = true; }, releaseUpdateStatus: () => { deferUpdateStatus = false; pendingUpdateStatus.splice(0).forEach((reply) => reply()); } });
     });
   });
 }
@@ -1795,7 +1796,7 @@ async function runExhaustiveAddedScenarios(page, fixtureUrl, resetScenario) {
   assert.deepEqual(await page.evaluate(() => ({ original: [originalCanvas.width, originalCanvas.height], worker: state.mosaicWorker, imageCache: state.imageCache.items.size, candidateCache: state.candidateBundleCache.items.size })), { original: [1, 1], worker: null, imageCache: 0, candidateCache: 0 }, "clearing a selected 4K image releases its original canvas, preview worker, and decoded caches");
 }
 
-async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdSaveRender, releaseSaveRenders, resetScenario, pageErrors) {
+async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdSaveRender, releaseSaveRenders, resetScenario, setFolderImportFailures, pageErrors) {
   page.setDefaultTimeout(3000);
   const operated = new Set();
   const assertionPassed = new Set();
@@ -2134,6 +2135,19 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
   await input("folderPath", "G:\\fixture");
   await click("pickImages"); await click("pickFolder"); await click("pickFolderFiles");
   await setupFixture(); await click("pickFolder"); await input("folderPath", "G:\\fixture"); await click("loadFolderButton"); await page.waitForFunction(() => state.images.some((image) => image.id === "sample")); await closeDialogs();
+  setFolderImportFailures([{ relativePath: "bad/nested.png", reason: "image_read_failed" }, { relativePath: "changed.png", reason: "scan_changed" }]);
+  await page.locator("#pickFolder").click(); await page.locator("#folderPath").fill("G:\\fixture-mixed"); await page.locator("#loadFolderButton").click();
+  await page.waitForFunction(() => document.querySelector("#importFailuresDialog").open);
+  assert.deepEqual(await page.evaluate(() => ({
+    genericError: document.querySelector("#errorDialog").open,
+    images: state.images.map((image) => image.id),
+    failures: [...document.querySelectorAll("#importFailuresList li")].map((item) => item.textContent),
+  })), {
+    genericError: false,
+    images: ["sample", "sample-two"],
+    failures: ["bad/nested.png: 画像を読み込めません", "changed.png: 読み込み中に画像が変更されました"],
+  }, "native folder loading keeps normal images and presents every skipped file");
+  await page.locator("#importFailuresClose").click(); setFolderImportFailures([]);
   // Folder loading replaces the thumbnail-backed bitmap; re-enter the same
   // normal-size editor fixture before pointer-only controls continue.
   await setupFixture();
@@ -2572,7 +2586,7 @@ async function main() {
   let server;
   let browser;
   let fixtureUrl;
-  let detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetScenario, setCatalog, setDefaultOutputDirectory, resetJob, finishCancel, finishApply, setUpdateAvailable;
+  let detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, resetScenario, setFolderImportFailures, setCatalog, setDefaultOutputDirectory, resetJob, finishCancel, finishApply, setUpdateAvailable;
   let settingsRequests, waitForSettingsStatusRequests;
   let settingsActions;
   let settingsStatusRequests;
@@ -2582,7 +2596,7 @@ async function main() {
   let releaseNextFullSettings, releaseFullSettings;
   let deferUpdateStatus, releaseUpdateStatus;
   try {
-    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, holdSaveRender, releaseSaveRenders, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, setCatalog, setDefaultOutputDirectory, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
+    ({ server, url: fixtureUrl, detectRequests, applyRequests, saveRequests, catalogRemoveRequests, folderRequests, setFolderImportFailures, settingsRequests, settingsActions, settingsStatusRequests, waitForSettingsStatusRequests, updateRequests, modelPickerRequests, modelDownloadRequests, modelDownloadJobs, modelDownloadPolls, cancelRequests, holdDetection, holdSaveRender, releaseSaveRenders, failCancel, failNextSettingsSave, failModelDownloadStatus, resetModelDownload, resetScenario, setCatalog, setDefaultOutputDirectory, resetJob, finishCancel, finishApply, setUpdateAvailable, deferFullSettings, releaseNextFullSettings, releaseFullSettings, deferUpdateStatus, releaseUpdateStatus } = await startFixtureServer());
     browser = await chromium.launch();
     // A real unsupported-browser bootstrap must stop before any API request or
     // editor binding. This covers the user-visible File System Access contract.
@@ -2691,6 +2705,7 @@ async function main() {
       window.showOpenFilePicker = async () => [];
       window.showDirectoryPicker = async () => ({ async *values() {} });
       const nativeFetch = window.fetch.bind(window);
+      window.__nativeFixtureFetch = nativeFetch;
       window.__importUploadRegistry = null;
       window.fetch = (input, init) => {
         const registry = window.__importUploadRegistry;
@@ -2738,6 +2753,54 @@ async function main() {
         return { active, peak, started, completed };
       }), { active: 0, peak: 11, started: 12, completed: 12 }, "every selected browser input completes after the upload gate releases");
       await parallelismPage.evaluate(() => { window.__importUploadRegistry = null; });
+      await parallelismPage.evaluate(async () => {
+        let upload = 0;
+        window.fetch = (input, init) => {
+          const url = new URL(typeof input === "string" ? input : input.url, location.href);
+          if (url.pathname !== "/api/import/file") return window.__nativeFixtureFetch(input, init);
+          upload += 1;
+          const failure = upload === 2;
+          return Promise.resolve(new Response(JSON.stringify(failure ? { error_code: "image_read_failed" } : { imported: [], catalogId: "fixture-import-catalog" }), {
+            status: failure ? 400 : 200, headers: { "Content-Type": "application/json" },
+          }));
+        };
+        state.settings.importing.parallelism = 1;
+        await importFiles([
+          new File(["ok"], "valid-first.png", { type: "image/png" }),
+          new File(["broken"], "broken-middle.png", { type: "image/png" }),
+          new File(["ok"], "valid-last.png", { type: "image/png" }),
+        ]);
+      });
+      await parallelismPage.waitForFunction(() => document.querySelector("#importFailuresDialog").open);
+      assert.deepEqual(await parallelismPage.evaluate(() => ({
+        importing: state.importing,
+        imported: document.querySelector("#connectionStatus").textContent,
+        failures: [...document.querySelectorAll("#importFailuresList li")].map((item) => item.textContent),
+      })), {
+        importing: false,
+        imported: "2件の画像を追加しました",
+        failures: ["broken-middle.png: 画像を読み込めません"],
+      }, "a corrupt browser file is listed while valid files on both sides complete");
+      await parallelismPage.locator("#importFailuresClose").click();
+      await parallelismPage.evaluate(async () => {
+        window.fetch = (input, init) => {
+          const url = new URL(typeof input === "string" ? input : input.url, location.href);
+          if (url.pathname !== "/api/import/file") return window.__nativeFixtureFetch(input, init);
+          return Promise.resolve(new Response(JSON.stringify({ error_code: "image_read_failed" }), { status: 400, headers: { "Content-Type": "application/json" } }));
+        };
+        await importFiles([new File(["broken"], "only-broken.png", { type: "image/png" })]);
+      });
+      await parallelismPage.waitForFunction(() => document.querySelector("#importFailuresDialog").open);
+      assert.deepEqual(await parallelismPage.evaluate(() => ({
+        genericError: document.querySelector("#errorDialog").open,
+        summary: document.querySelector("#importFailuresSummary").textContent,
+        failures: [...document.querySelectorAll("#importFailuresList li")].map((item) => item.textContent),
+      })), {
+        genericError: false,
+        summary: "0件を読み込み、1件を読み込めませんでした。",
+        failures: ["only-broken.png: 画像を読み込めません"],
+      }, "an all-corrupt browser selection shows the complete file list instead of a generic error");
+      await parallelismPage.evaluate(() => { window.fetch = window.__nativeFixtureFetch; });
     } finally {
       await parallelismPage.evaluate(() => { window.__importUploadRegistry = null; }).catch(() => {});
       await stopCoveredPage(parallelismPage, true);
@@ -4457,7 +4520,7 @@ async function main() {
     });
     holdDetection(true);
     try {
-      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, finishCancel, holdSaveRender, releaseSaveRenders, resetScenario, pageErrors);
+      await runControlLedger(ledgerPage, fixtureUrl, uiControlManifest, finishCancel, holdSaveRender, releaseSaveRenders, resetScenario, setFolderImportFailures, pageErrors);
     } finally {
       holdDetection(false);
       await stopCoveredPage(ledgerPage, true);

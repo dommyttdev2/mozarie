@@ -425,6 +425,7 @@ class CatalogMixin:
         records_lock = threading.Lock()
         skip_counts: dict[str, int] = {}
         skip_examples: dict[str, str] = {}
+        scan_failures: list[dict[str, str]] = []
         candidate_count = 0
         candidate_count_lock = threading.Lock()
         worker_count = max(1, int(self.settings["importing"]["parallelism"]))
@@ -440,6 +441,7 @@ class CatalogMixin:
             with records_lock:
                 skip_counts[reason] = skip_counts.get(reason, 0) + 1
                 skip_examples.setdefault(reason, relative_path)
+                scan_failures.append({"relativePath": relative_path, "reason": reason})
 
         def inspect_path() -> None:
             while True:
@@ -563,10 +565,16 @@ class CatalogMixin:
             "フォルダー走査を完了: パス=%s 候補=%d件 読込=%d件 スキップ=%s 所要=%.2f秒",
             root, candidate_count, len(records), skip_summary, time.monotonic() - scan_started_at,
         )
+        if scan_failures:
+            LOGGER.warning(
+                "フォルダー走査で読み込めなかった画像: パス=%s\n%s",
+                root,
+                "\n".join(f"- {failure['relativePath']} ({failure['reason']})" for failure in sorted(scan_failures, key=lambda item: (item["relativePath"].casefold(), item["relativePath"]))),
+            )
         if not candidate_count:
             raise ClientError("指定フォルダーに対応画像がありません。", "image_read_failed")
         if not records:
-            raise ClientError("指定フォルダーの対応画像を読み込めませんでした。CMDの走査ログを確認してください。", "image_read_failed")
+            raise ClientError("指定フォルダーの対応画像を読み込めませんでした。", "image_read_failed", {"failures": scan_failures})
         # A fresh unnamed folder becomes durable only after every source image
         # has passed the scan above. Failed scans leave the prior workspace and
         # its undo history untouched.
@@ -676,6 +684,7 @@ class CatalogMixin:
             raise
         with self.lock:
             self.project_read_only = completed
+            self.last_folder_scan_failures = sorted(scan_failures, key=lambda item: (item["relativePath"].casefold(), item["relativePath"]))
         return images
 
     def relink_project_native_source(self, project_id: str, source_id: str, raw_path: str) -> dict[str, Any]:
