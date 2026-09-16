@@ -1210,7 +1210,8 @@ class MozarieTests(unittest.TestCase):
             get_device_name=lambda index: ["RTX Test", "Legacy Test"][index],
             get_device_properties=lambda index: types.SimpleNamespace(total_memory=[16, 3][index] * 1024 ** 3),
         )
-        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
              patch.object(state, "_start_job") as start:
             with self.assertRaisesRegex(ClientError, "選択したGPU") as raised:
                 state.start_detection([])
