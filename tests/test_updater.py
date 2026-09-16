@@ -510,23 +510,35 @@ class UpdaterTests(unittest.TestCase):
             outside = root / "outside"
             output.mkdir()
             outside.mkdir()
-            try:
-                (output / "root").symlink_to(outside, target_is_directory=True)
-            except OSError:
-                archive = root / "release.zip"
-                with zipfile.ZipFile(archive, "w") as bundle:
-                    bundle.writestr("root/escaped.txt", "bad")
-                with self.assertRaises(updater.UpdateError):
+            archive = root / "release.zip"
+            write_archive(archive, UPDATE_ARCHIVE_CONTENTS)
+
+            for existing in ("directory", "file"):
+                source_root = output / "wrapper"
+                if existing == "directory":
+                    source_root.mkdir()
+                else:
+                    source_root.write_text("occupied", encoding="utf-8")
+                with self.subTest(existing=existing), self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_invalid_path"))):
                     updater.extract_archive(archive, output)
-                self.assertFalse((outside / "escaped.txt").exists())
+                if source_root.is_dir():
+                    source_root.rmdir()
+                else:
+                    source_root.unlink()
+
+            try:
+                (output / "wrapper").symlink_to(outside, target_is_directory=True)
+            except OSError:
                 return
 
-            archive = root / "release.zip"
-            with zipfile.ZipFile(archive, "w") as bundle:
-                bundle.writestr("root/escaped.txt", "bad")
             with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_invalid_path"))):
                 updater.extract_archive(archive, output)
-            self.assertFalse((outside / "escaped.txt").exists())
+            self.assertFalse((outside / "VERSION").exists())
+
+            (output / "wrapper").unlink()
+            (output / "wrapper").symlink_to(root / "missing-target", target_is_directory=True)
+            with self.assertRaisesRegex(updater.UpdateError, re.escape(updater.tr("archive_invalid_path"))):
+                updater.extract_archive(archive, output)
 
     def test_apply_updates_code_and_preserves_user_data_and_batch(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -26,7 +26,7 @@ class UpdaterExtractRegressionTests(unittest.TestCase):
             installed = root / "installed"
             installed.mkdir()
             extracted = updater.extract_archive(archive, destination, installed)
-            self.assertEqual(extracted, destination / source_name)
+            self.assertEqual(extracted, destination.resolve() / source_name)
             self.assertTrue(extracted.is_dir())
             self.assertTrue((extracted / "VERSION").is_file())
 

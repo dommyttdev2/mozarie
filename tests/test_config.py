@@ -86,7 +86,7 @@ class SettingsTests(unittest.TestCase):
             (config / "defaults.json").write_text(json.dumps(defaults), encoding="utf-8")
 
             settings = SettingsStore(root).load()
-            self.assertEqual(settings["saving"]["default_output_directory"], str(custom_output))
+            self.assertEqual(settings["saving"]["default_output_directory"], str(custom_output.resolve()))
             self.assertFalse(custom_output.exists())
             with self.assertRaises(SettingsError):
                 validate_output_directory_ready(custom_output)

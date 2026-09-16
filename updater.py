@@ -427,9 +427,17 @@ def extract_archive(archive: Path, destination: Path, app_dir: Path = APP_DIR) -
     try:
         destination_root = destination.resolve()
         source_name, entries, extracted_size = _archive_plan(archive)
+        source_root = destination_root / source_name
+        try:
+            source_root.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise UpdateError(tr("archive_invalid_path")) from exc
+        else:
+            raise UpdateError(tr("archive_invalid_path"))
         _require_update_storage(destination_root, extracted_size, app_dir)
         with zipfile.ZipFile(archive) as bundle:
-            source_root = destination_root / source_name
             source_root.mkdir(parents=True, exist_ok=False)
             for name, relative, expected_size, is_directory in entries:
                 target = source_root.joinpath(*relative.parts).resolve()

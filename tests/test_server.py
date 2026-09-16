@@ -3342,7 +3342,7 @@ class MozarieTests(unittest.TestCase):
             with patch.object(state, "_require_supported_gpu"), patch.object(state_module, "validate_output_directory_ready") as ready, \
                  patch.object(state.settings_store, "save", return_value=changed_output) as save:
                 state.update_settings(changed_output)
-        ready.assert_called_once_with(directory)
+        ready.assert_called_once_with(str(Path(directory).resolve()))
         save.assert_called_once_with(changed_output)
 
     def test_output_validation_uses_its_dedicated_user_error_and_does_not_save(self):

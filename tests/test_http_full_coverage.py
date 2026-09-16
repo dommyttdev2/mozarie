@@ -67,18 +67,19 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
         self.assertEqual(errors[0][1], http_module.HTTPStatus.INTERNAL_SERVER_ERROR)
 
     def test_picker_os_failures_and_invalid_native_result_are_reported(self) -> None:
-        state = SimpleNamespace(native_picker_lock=threading.Lock())
+        state = SimpleNamespace(native_picker_lock=threading.Lock(), shutdown_requested=threading.Event())
         with patch("mozarie.http.Path.is_file", return_value=True), patch(
-            "mozarie.http.subprocess.run", side_effect=OSError("no desktop session")
+            "mozarie.http.subprocess.Popen", side_effect=OSError("no desktop session")
         ):
             with self.assertRaisesRegex(ClientError, "failed"):
                 http_module._run_native_picker("x", {}, failed_message="failed", busy_message="busy", state=state)
 
-        invalid = SimpleNamespace(returncode=0, stdout=base64.b64encode(b"not base64 output")[1:])
+        invalid = base64.b64encode(b"not base64 output")[1:]
+        process = SimpleNamespace(returncode=0, communicate=Mock(return_value=(invalid, b"")))
         with patch("mozarie.http.Path.is_file", return_value=True), patch(
-            "mozarie.http.subprocess.run", return_value=invalid
+            "mozarie.http.subprocess.Popen", return_value=process
         ):
-            with self.assertRaisesRegex(ClientError, "failed"):
+            with self.assertRaisesRegex(ClientError, "選択結果"):
                 http_module._run_native_picker("x", {}, failed_message="failed", busy_message="busy", state=state)
 
     def test_unexpected_request_faults_preserve_gpu_recovery_contract_for_each_verb(self) -> None:
