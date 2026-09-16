@@ -462,8 +462,11 @@ class WorkspaceStore:
                 raise ValueError("project is missing")
             return self._ensure_project_source_db(db, catalog_id, kind, display_name, identity), True
 
-    def rollback_import(self, catalog_id: str, source_id: str, created_ids: list[str], *, delete_source: bool) -> None:
-        """Undo only database rows created by one failed browser import."""
+    def rollback_import(
+        self, catalog_id: str, source_id: str, created_ids: list[str], *, delete_source: bool,
+        transform_rollback: list[tuple[str, int, int, int]] | None = None,
+    ) -> None:
+        """Undo one failed browser import, including its source-transform reset."""
         unique_ids = list(dict.fromkeys(created_ids))
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -479,6 +482,14 @@ class WorkspaceStore:
                         WHERE source_id=? AND catalog_id=?
                           AND NOT EXISTS (SELECT 1 FROM images WHERE source_id=?)""",
                                (source_id, catalog_id, source_id))
+                for image_id, source_horizontal, source_vertical, revision in transform_rollback or []:
+                    cursor = db.execute(
+                        """UPDATE image_transforms SET source_flip_horizontal=?,source_flip_vertical=?,revision=?
+                           WHERE image_id=? AND revision=?""",
+                        (source_horizontal, source_vertical, revision, image_id, revision + 1),
+                    )
+                    if not cursor.rowcount:
+                        raise RuntimeError("browser import transform rollback was superseded")
                 db.execute("COMMIT")
             except Exception:
                 db.execute("ROLLBACK")
@@ -880,6 +891,7 @@ class WorkspaceStore:
         *,
         allow_new: bool = True,
         before_reconcile: Any | None = None,
+        transform_rollback: list[tuple[str, int, int, int]] | None = None,
     ) -> dict[str, dict[str, Any]]:
         """Return durable state by path without silently discarding edits."""
         now = time.time_ns()
@@ -963,6 +975,11 @@ class WorkspaceStore:
                     if changed:
                         # An outside write has no Mozarie transform contract;
                         # never compensate it as if it had been our bake.
+                        if transform_rollback is not None and row["transform_revision"] is not None:
+                            transform_rollback.append((
+                                str(row["image_id"]), int(row["transform_source_flip_horizontal"]),
+                                int(row["transform_source_flip_vertical"]), int(row["transform_revision"]),
+                            ))
                         db.execute("UPDATE image_transforms SET source_flip_horizontal=0,source_flip_vertical=0,revision=revision+1 WHERE image_id=?", (row["image_id"],))
                     result[record.relative_path] = {
                         "image_id": row["image_id"], "hidden": bool(row["hidden"]),

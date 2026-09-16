@@ -12,10 +12,10 @@ import shutil
 import threading
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
+from queue import Empty, Full, Queue
 from typing import Any
 
 import numpy as np
@@ -395,6 +395,7 @@ class CatalogMixin:
                 self._assert_catalog_mutable()
             previous_catalog_id = self.catalog_id
             previous_workspace_id = self.workspace_id
+            previous_catalog_generation = self.catalog_generation
 
         catalog_id = project_id or (previous_workspace_id if inherit_current_catalog else None)
         if catalog_id is not None and not self.workspace_store.catalog_exists(catalog_id):
@@ -420,14 +421,16 @@ class CatalogMixin:
 
         scan_started_at = time.monotonic()
         LOGGER.info("フォルダー走査を開始: パス=%s", root)
-        paths = [path for path in root.rglob("*") if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES]
-        LOGGER.info("フォルダー候補の列挙を完了: パス=%s 候補=%d件 所要=%.2f秒", root, len(paths), time.monotonic() - scan_started_at)
         records: list[ImageRecord] = []
         records_lock = threading.Lock()
         skip_counts: dict[str, int] = {}
         skip_examples: dict[str, str] = {}
-        next_path = 0
-        paths_lock = threading.Lock()
+        candidate_count = 0
+        candidate_count_lock = threading.Lock()
+        worker_count = max(1, int(self.settings["importing"]["parallelism"]))
+        path_queue: Queue[Path | None] = Queue(maxsize=worker_count * 2)
+        worker_failure = threading.Event()
+        worker_errors: list[Exception] = []
 
         def record_skip(reason: str, path: Path) -> None:
             try:
@@ -439,14 +442,18 @@ class CatalogMixin:
                 skip_examples.setdefault(reason, relative_path)
 
         def inspect_path() -> None:
-            nonlocal next_path
             while True:
-                with paths_lock:
-                    if next_path >= len(paths):
-                        return
-                    path = paths[next_path]
-                    next_path += 1
+                if worker_failure.is_set():
+                    return
                 try:
+                    path = path_queue.get(timeout=0.05)
+                except Empty:
+                    continue
+                if path is None:
+                    return
+                try:
+                    if self.shutdown_requested.is_set():
+                        continue
                     resolved = path.resolve()
                     relative_path = resolved.relative_to(root).as_posix()
                     before = resolved.stat()
@@ -472,27 +479,91 @@ class CatalogMixin:
                     reason = exc.error_code if isinstance(exc, ClientError) else type(exc).__name__
                     record_skip(reason, path)
                     continue
+                except Exception as exc:
+                    with records_lock:
+                        worker_errors.append(exc)
+                    worker_failure.set()
+                    return
                 with records_lock:
                     records.append(record)
 
-        # Keep a fixed number of streaming workers rather than one Future per
-        # file. Folder scans follow the same import-parallelism setting as
-        # drag-and-drop imports.
-        worker_count = min(int(self.settings["importing"]["parallelism"]), len(paths))
-        if worker_count:
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
-                workers = [executor.submit(inspect_path) for _ in range(worker_count)]
-                for worker in workers:
-                    worker.result()
+        # The producer only holds a bounded queue. Inspection starts while the
+        # tree is still being walked, rather than retaining a second full list
+        # of paths alongside the finished catalogue records.
+        # ``set_root``, relinking, and project opening each enter
+        # ``import_lock`` once before calling here. Release and restore that
+        # same acquisition around directory I/O; direct internal calls hold
+        # none. This keeps the later catalogue transaction serialized without
+        # making every other request wait for a large tree walk.
+        scan_holds_import_lock = self.import_lock._is_owned()
+        if scan_holds_import_lock:
+            self.import_lock.release()
+        workers: list[threading.Thread] = []
+
+        def start_scan_worker() -> None:
+            worker = threading.Thread(target=inspect_path, name=f"MozarieFolderScan-{len(workers)}")
+            workers.append(worker)
+            worker.start()
+
+        try:
+            for path in root.rglob("*"):
+                if self.shutdown_requested.is_set():
+                    break
+                try:
+                    if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+                        continue
+                except OSError:
+                    record_skip("scan_unreadable", path)
+                    continue
+                with candidate_count_lock:
+                    candidate_count += 1
+                # Do not start idle threads for a tiny folder. The active
+                # pool grows only to the number of discovered images and the
+                # caller's configured parallelism.
+                if len(workers) < worker_count:
+                    start_scan_worker()
+                while True:
+                    if self.shutdown_requested.is_set() or worker_failure.is_set():
+                        break
+                    try:
+                        path_queue.put(path, timeout=0.05)
+                        break
+                    except Full:
+                        continue
+                if self.shutdown_requested.is_set() or worker_failure.is_set():
+                    break
+        finally:
+            for _worker in workers:
+                while not worker_failure.is_set():
+                    try:
+                        path_queue.put(None, timeout=0.05)
+                        break
+                    except Full:
+                        continue
+            for worker in workers:
+                worker.join()
+            if scan_holds_import_lock:
+                self.import_lock.acquire()
+        if worker_errors:
+            raise worker_errors[0]
+        if self.shutdown_requested.is_set():
+            raise ClientError("アプリを終了するため、フォルダーの読み込みを中止しました。", "operation_cancelled")
+        with self.lock:
+            if (self.catalog_id != previous_catalog_id or self.workspace_id != previous_workspace_id
+                    or self.catalog_generation != previous_catalog_generation):
+                raise ClientError("画像一覧が更新されたため、フォルダーの読み込みを中止しました。もう一度追加してください。", "stale_catalog")
+            if not staging:
+                self._assert_catalog_mutable()
+        LOGGER.info("フォルダー候補の列挙を完了: パス=%s 候補=%d件 所要=%.2f秒", root, candidate_count, time.monotonic() - scan_started_at)
         skip_summary = ", ".join(
             f"{reason}={count}件（例: {skip_examples[reason]}）"
             for reason, count in sorted(skip_counts.items())
         ) or "なし"
         LOGGER.info(
             "フォルダー走査を完了: パス=%s 候補=%d件 読込=%d件 スキップ=%s 所要=%.2f秒",
-            root, len(paths), len(records), skip_summary, time.monotonic() - scan_started_at,
+            root, candidate_count, len(records), skip_summary, time.monotonic() - scan_started_at,
         )
-        if not paths:
+        if not candidate_count:
             raise ClientError("指定フォルダーに対応画像がありません。", "image_read_failed")
         if not records:
             raise ClientError("指定フォルダーの対応画像を読み込めませんでした。CMDの走査ログを確認してください。", "image_read_failed")
@@ -1981,6 +2052,7 @@ class CatalogMixin:
                 durable_source_id: str | None = None
                 durable_source_created = False
                 durable_created_ids: list[str] = []
+                transform_rollback: list[tuple[str, int, int, int]] = []
                 created_projectless_id: str | None = None
                 stored_images: dict[str, dict[str, Any]] = {}
                 try:
@@ -2010,6 +2082,7 @@ class CatalogMixin:
                                 added,
                                 source_id=durable_source_id,
                                 allow_new=intent == "add",
+                                transform_rollback=transform_rollback,
                             )
                             durable_created_ids = [
                                 str(stored["image_id"])
@@ -2076,6 +2149,7 @@ class CatalogMixin:
                                 durable_source_id,
                                 durable_created_ids,
                                 delete_source=durable_source_created,
+                                transform_rollback=transform_rollback,
                             )
                     finally:
                         for destination in final_paths:
@@ -2830,8 +2904,9 @@ class CatalogMixin:
                         else:
                             item.enabled = operation == "enable"
                 revision = self._commit_candidate_snapshot(image_id, candidates, replace=operation == "delete", history_group=history_group)
-            for path in paths:
-                path.unlink(missing_ok=True)
+            # The SQLite revision is already durable. Cache cleanup must not
+            # turn that successful user operation into an error.
+            self._delete_mask_files(paths, [])
             return revision
 
     def batch_update_candidates_many(self, image_ids: list[str], payload: dict[str, Any]) -> dict[str, int]:
@@ -2940,5 +3015,8 @@ class CatalogMixin:
                     return False
                 updated = [replace(item) for item in candidates if item.candidate_id != candidate_id]
                 self._commit_candidate_snapshot(image_id, updated, replace=True)
-            candidate.mask_path.unlink(missing_ok=True)
+            # Candidate masks are disposable cache files. Keep the durable
+            # delete and its undo entry successful when Windows still has a
+            # preview handle open on the old PNG.
+            self._delete_mask_files([candidate.mask_path], [])
             return True
