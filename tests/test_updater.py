@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import importlib.util
 import json
 import os
 import pathlib
@@ -247,6 +248,7 @@ class UpdaterTests(unittest.TestCase):
                 self.assertEqual(updater.perform_update(app, input_fn=lambda _prompt: "y"), updater.EXIT_UPDATED)
             smoke.assert_called_once_with(app)
             self.assertEqual((app / ".venv" / ".mozarie-ready").read_text(encoding="utf-8"), "ready\n")
+            self.assertIsNone(updater._read_pending_update(app))
 
     def test_gpu_smoke_failure_does_not_mark_runtime_ready(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -264,8 +266,8 @@ class UpdaterTests(unittest.TestCase):
                     updater.perform_update(app, input_fn=lambda _prompt: "y")
             self.assertFalse((app / ".venv" / ".mozarie-ready").exists())
 
-    def test_git_archive_includes_every_file_required_by_the_installed_updater(self):
-        """The public archive must satisfy the unchanged v0.5.13 member contract."""
+    def test_next_release_archive_is_accepted_by_v0513_updater(self):
+        """The next public archive must satisfy the updater shipped by v0.5.13."""
         repository = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -279,9 +281,42 @@ class UpdaterTests(unittest.TestCase):
                 names = set(bundle.namelist())
             for relative in updater.MANAGED_FILES:
                 self.assertIn(f"mozarie-release/{relative}", names)
-            extracted = updater.extract_archive(archive, root / "extracted", make_install(root / "installed"))
+            legacy_path = root / "updater-v0.5.13.py"
+            legacy_path.write_text(
+                subprocess.check_output(["git", "show", "v0.5.13:updater.py"], cwd=str(repository), text=True, encoding="utf-8"),
+                encoding="utf-8",
+            )
+            spec = importlib.util.spec_from_file_location("updater_v0513", legacy_path)
+            self.assertIsNotNone(spec)
+            self.assertIsNotNone(spec.loader)
+            legacy = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(legacy)
+            self.assertEqual(tuple(legacy.MANAGED_FILES), updater.MANAGED_FILES)
+            extracted = legacy.extract_archive(archive, root / "extracted")
             self.assertTrue((extracted / ".gitattributes").is_file())
             self.assertTrue((extracted / ".gitignore").is_file())
+
+    def test_dependency_update_success_marks_ready_and_clears_pending_update(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            app = make_install(root / "install")
+            source = make_source(root / "source")
+            (source / "requirements.txt").write_text("new-dependency\n", encoding="utf-8")
+            python = app / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            write_runtime_marker(app)
+            successful_process = type("Result", (), {"returncode": 0})()
+            with patch("updater.fetch_latest_release", return_value=make_release()), \
+                    patch("updater.download_archive"), \
+                    patch("updater.extract_archive", return_value=source), \
+                    patch("updater.subprocess.run", return_value=successful_process), \
+                    patch("updater.run_gpu_smoke") as smoke:
+                self.assertEqual(updater.perform_update(app, input_fn=lambda _prompt: "y"), updater.EXIT_UPDATED)
+            smoke.assert_called_once_with(app)
+            self.assertEqual((app / "VERSION").read_text(encoding="utf-8"), "1.2.0")
+            self.assertEqual((app / ".venv" / ".mozarie-ready").read_text(encoding="utf-8"), "ready\n")
+            self.assertIsNone(updater._read_pending_update(app))
 
     def test_dependency_update_apply_failure_keeps_a_retryable_pending_update(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1015,10 +1050,11 @@ class UpdaterTests(unittest.TestCase):
             source = make_source(root / "source")
             with patch("updater.fetch_latest_release", return_value=make_release()), \
                     patch("updater.download_archive"), \
-                    patch("updater.extract_archive", return_value=source), \
-                    patch("updater.apply_update"):
+                    patch("updater.extract_archive", return_value=source):
                 self.assertEqual(updater.perform_update(app, input_fn=lambda _prompt: "y"), updater.EXIT_UPDATED)
+            self.assertEqual((app / "VERSION").read_text(encoding="utf-8"), "1.2.0")
             self.assertFalse((app / ".venv" / ".mozarie-ready").exists())
+            self.assertIsNone(updater._read_pending_update(app))
 
     def test_update_batch_delegates_status_to_updater_and_never_starts_mozarie(self):
         batch_path = Path(__file__).parents[1] / "update.bat"
