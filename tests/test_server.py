@@ -3704,6 +3704,10 @@ class MozarieTests(unittest.TestCase):
                 self.assertTrue(payload["modelsConfigured"])
                 if provider == "gpu":
                     self.assertTrue(payload["runtimeReady"])
+                    runtime_missing = copy.deepcopy(status)
+                    runtime_missing["runtimeReady"] = False
+                    runtime_missing["gpuDeviceValid"] = False
+                    self.assertFalse(health(runtime_missing)["modelsConfigured"])
                 handseg_missing = copy.deepcopy(status); handseg_missing["models"]["hand_segmentation"] = {"required": False, "enabled": True, "valid": False}
                 self.assertFalse(health(handseg_missing)["modelsConfigured"])
                 high_precision_missing_sam = copy.deepcopy(status); high_precision_missing_sam["models"]["sam_checkpoint"] = {"required": True, "enabled": True, "valid": False}

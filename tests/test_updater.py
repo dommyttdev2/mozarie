@@ -1190,7 +1190,10 @@ class UpdaterTests(unittest.TestCase):
         self.assertIn("mozarie\\requirements-directml.txt", setup)
         self.assertIn('set "PYTHON=%APP_DIR%.venv\\Scripts\\python.exe"', run)
         self.assertIn('if defined MOZARIE_PYTHON goto :python_selected', run)
+        self.assertIn('if defined MOZARIE_PYTHON if not defined MOZARIE_RUNTIME goto :runtime_required', run)
+        self.assertIn('if defined MOZARIE_PYTHON goto :runtime_preflight', run)
         self.assertIn(':invalid_mozarie_python', run)
+        self.assertIn(':runtime_required', run)
         self.assertIn('if not exist "%PYTHON%" if defined MOZARIE_PYTHON goto :invalid_mozarie_python', run)
         self.assertNotIn("pip install", run)
 
@@ -1214,12 +1217,14 @@ class UpdaterTests(unittest.TestCase):
             app = Path(directory) / "app"
             app.mkdir()
             shutil.copy2(root_batch, app / "run.bat")
+            (app / "mozarie").mkdir()
+            shutil.copy2(Path(__file__).parents[1] / "mozarie" / "runtime_profile.py", app / "mozarie" / "runtime_profile.py")
             marker = app / "server-ran.txt"
             (app / "server.py").write_text(
                 f"from pathlib import Path; Path({str(marker)!r}).write_text('ok', encoding='utf-8')",
                 encoding="utf-8",
             )
-            environment = os.environ | {"MOZARIE_PYTHON": sys.executable}
+            environment = os.environ | {"MOZARIE_PYTHON": sys.executable, "MOZARIE_RUNTIME": "cpu"}
             result = subprocess.run(["cmd.exe", "/d", "/c", str(app / "run.bat")], cwd=app, env=environment, capture_output=True, text=True, encoding="utf-8", errors="replace")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual(marker.read_text(encoding="utf-8"), "ok")
@@ -1286,6 +1291,9 @@ class UpdaterTests(unittest.TestCase):
             self.assertLess(batch.index(preflight), batch.index("\n:start\n"))
             self.assertIn(":runtime_invalid", batch)
             self.assertIn("selected ONNX Runtime is inconsistent", batch)
+            self.assertIn('if defined MOZARIE_PYTHON if not defined MOZARIE_RUNTIME goto :runtime_required', batch)
+            self.assertIn('if defined MOZARIE_PYTHON goto :runtime_preflight', batch)
+            self.assertLess(batch.index('"%PYTHON%" -m mozarie.runtime_profile preflight'), batch.index("\n:start\n"))
 
     def test_setup_batch_reports_venv_and_running_states_without_marking_ready(self):
         root_batch = Path(__file__).parents[1] / "setup.bat"

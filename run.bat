@@ -12,7 +12,8 @@ if not exist "%PYTHON%" goto :setup_required
 call :validate_python
 if errorlevel 1 if defined MOZARIE_PYTHON goto :invalid_mozarie_python
 if errorlevel 1 goto :setup_required
-if defined MOZARIE_PYTHON goto :start
+if defined MOZARIE_PYTHON if not defined MOZARIE_RUNTIME goto :runtime_required
+if defined MOZARIE_PYTHON goto :runtime_preflight
 if not exist "%APP_DIR%.venv\.mozarie-ready" goto :setup_required
 if not defined MOZARIE_RUNTIME (
   pushd "%APP_DIR%"
@@ -20,6 +21,7 @@ if not defined MOZARIE_RUNTIME (
   popd
   if not defined MOZARIE_RUNTIME goto :setup_required
 )
+:runtime_preflight
 pushd "%APP_DIR%"
 "%PYTHON%" -m mozarie.runtime_profile preflight "%MOZARIE_RUNTIME%" --venv "%APP_DIR%.venv" --require-installed
 set "RUNTIME_CHECK=%ERRORLEVEL%"
@@ -45,6 +47,11 @@ exit /b 1
 
 :runtime_invalid
 echo [Mozarie] The selected ONNX Runtime is inconsistent. Mozarie did not start. Run setup.bat again to repair it. / 選択したONNX Runtimeの状態が一致しないため、Mozarieは起動しませんでした。setup.batを再実行して修復してください。
+pause
+exit /b 1
+
+:runtime_required
+echo [Mozarie] MOZARIE_RUNTIME is required with MOZARIE_PYTHON. Set it to cuda, directml, or cpu. / MOZARIE_PYTHONを使う場合は、MOZARIE_RUNTIMEへcuda、directml、cpuのいずれかを指定してください。
 pause
 exit /b 1
 
