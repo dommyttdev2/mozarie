@@ -7768,7 +7768,7 @@ class MozarieTests(unittest.TestCase):
             original_inspect = catalog_module.inspect_import_image
 
             def staged_rglob(path, pattern):
-                self.assertEqual(path, root)
+                self.assertTrue(path.samefile(root))
                 self.assertEqual(pattern, "*")
                 yield root / "first.png"
                 self.assertTrue(inspection_started.wait(1), "inspection must begin while enumeration is blocked")
@@ -7887,7 +7887,7 @@ class MozarieTests(unittest.TestCase):
             original_inspect = catalog_module.inspect_import_image
 
             def tracked_rglob(path, pattern):
-                self.assertEqual(path, root)
+                self.assertTrue(path.samefile(root))
                 for name in names:
                     enumerated.append(name)
                     yield root / name
