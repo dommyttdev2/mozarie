@@ -89,7 +89,7 @@ const context = {
 const canvasPath = path.join(__dirname, "..", "static", "js", "editor-canvas.js");
 const source = fs.readFileSync(canvasPath, "utf8");
 vm.runInNewContext(source, context, { filename: canvasPath });
-vm.runInNewContext("globalThis.canvasCompletion = { canvasSizeForImage, ensureHistoryCanvases, releaseHistoryCanvases, clearEditor, canvasHasPixels, syncCandidateRecord, syncStoredMaskStatus, refreshCandidateRecord, updateCandidateStatus, canvasToDataUrl, decodeDraftImages, releaseMosaicPreview, prepareOriginalImage, rebuildMosaicPreview, requestMosaicPreview, drawEffectiveExclusions, composeCurrentMask, markDraftDirty, markMaskDirty, flushMaskComposition, hasEffectiveMask, maskStatusWithoutCandidate, refreshMaskStatus, paintMosaicPreview, updateBrushCursor, drawCandidateBlinkOverlay, renderNow, flushRender };", context, { filename: "test-editor-canvas-completion-exports.js" });
+vm.runInNewContext("globalThis.canvasCompletion = { canvasSizeForImage, ensureHistoryCanvases, releaseHistoryCanvases, clearEditor, canvasHasPixels, syncCandidateRecord, syncStoredMaskStatus, refreshCandidateRecord, updateCandidateStatus, canvasToDataUrl, decodeDraftImages, restoreDraft, releaseMosaicPreview, prepareOriginalImage, rebuildMosaicPreview, requestMosaicPreview, drawEffectiveExclusions, composeCurrentMask, markDraftDirty, markMaskDirty, flushMaskComposition, hasEffectiveMask, maskStatusWithoutCandidate, refreshMaskStatus, paintMosaicPreview, updateBrushCursor, drawCandidateBlinkOverlay, renderNow, flushRender };", context, { filename: "test-editor-canvas-completion-exports.js" });
 const test = context.canvasCompletion;
 
 (async () => {
@@ -149,6 +149,18 @@ const test = context.canvasCompletion;
   assert.deepEqual(JSON.parse(JSON.stringify(decoded)), [{ url: "add" }, { url: "exclude" }, null, null, null, { url: "history" }]);
   assert.deepEqual(JSON.parse(JSON.stringify(await test.decodeDraftImages(null))), [null, null, null, null, null, null]);
 
+  const candidateFixture = state.candidates;
+  state.currentId = "image"; state.currentImage = { width: addCanvas.width, height: addCanvas.height, alpha: 255 }; state.imageGeneration = 9;
+  state.candidates = []; state.images[0].candidateRevision = 2;
+  for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas]) { target.ctx.alpha = 255; target.ctx.calls.length = 0; }
+  await test.restoreDraft("image", 9, { candidateRevision: 2 }, [{ alpha: 255 }, { alpha: 255 }, { alpha: 255 }, null, null, null]);
+  for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas]) {
+    const clear = target.ctx.calls.findIndex(([name]) => name === "clear");
+    const draw = target.ctx.calls.findIndex(([name]) => name === "image");
+    assert.ok(clear >= 0 && clear < draw, "same-size draft restore clears each manual layer before drawing it");
+  }
+  state.candidates = candidateFixture;
+
   state.removedCandidateIds.clear(); state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true; state.manualExclusionForced = true;
   test.composeCurrentMask();
   assert.equal(state.maskDirty, false);
@@ -164,6 +176,7 @@ const test = context.canvasCompletion;
   state.mosaicWorker = { terminate() { this.terminated = true; } }; state.mosaicWorkerBusy = true; state.mosaicPending = true;
   test.releaseMosaicPreview();
   assert.equal(state.mosaicWorker, null); assert.equal(mosaicCanvas.width, 1);
+  workerCreated = 0;
   state.currentImage = { width: 4, height: 3, alpha: 255 }; combinedCanvas.width = 4; combinedCanvas.height = 3;
   test.prepareOriginalImage();
   assert.deepEqual([originalCanvas.width, originalCanvas.height], [4, 3]);

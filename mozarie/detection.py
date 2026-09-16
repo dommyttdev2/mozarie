@@ -363,6 +363,9 @@ class DetectionMixin:
                     with stage_lock:
                         staged[record.image_id] = (index, record, candidates)
                     candidates = []
+                    # Staging is complete for this image, but its ID must not
+                    # become durable/public until the all-or-nothing commit.
+                    self._mark_job_processed(job_generation, catalog_generation)
                 finally:
                     self._discard_candidates(candidates)
                     self.invalidate_sam_image(record.image_id)

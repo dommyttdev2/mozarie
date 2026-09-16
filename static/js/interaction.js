@@ -1012,11 +1012,15 @@ function handleEditorKeydown(event) {
   const binding = shortcutFromEvent(event);
   const shortcuts = state.settings?.shortcuts?.bindings || { undo: "Ctrl+Z", redo: "Ctrl+Shift+Z" };
   const enabled = state.settings?.shortcuts?.actions || {};
-  if (!currentImageActionPending() && !state.projectReadOnly && currentRecord() && !currentRecord()?.sourceDimensionsChanged
-    && ((binding === shortcuts.undo && enabled.undo !== false) || (binding === shortcuts.redo && enabled.redo !== false))) {
+  const direction = binding === shortcuts.redo ? "redo" : "undo";
+  const historyBinding = (binding === shortcuts.undo && enabled.undo !== false) || (binding === shortcuts.redo && enabled.redo !== false);
+  if (!currentImageActionPending() && !state.projectReadOnly && currentRecord() && !currentRecord()?.sourceDimensionsChanged && historyBinding) {
     event.preventDefault();
-    if (hasDurableHistory()) void restoreProjectHistory(binding === shortcuts.redo ? "redo" : "undo");
-    else void restoreSnapshot(binding === shortcuts.redo ? state.historyIndex + 1 : state.historyIndex - 1);
+    if (hasDurableHistory()) {
+      if (canRestoreProjectHistory(direction)) void restoreProjectHistory(direction);
+    } else if (direction === "undo" ? state.historyIndex > 0 : state.historyIndex < state.history.length) {
+      void restoreSnapshot(direction === "redo" ? state.historyIndex + 1 : state.historyIndex - 1);
+    }
     return true;
   }
   return false;
@@ -1053,8 +1057,8 @@ function handleNavigationKeydown(event) {
   else if (action === "last" && galleryFilteredImages().at(-1)) void selectImage(galleryFilteredImages().at(-1).id);
   else if (action === "reviewAndNext") void reviewAndMoveNext();
   else if (action === "removeImage") void removeImageFromCatalog(state.currentId);
-  else if (action === "undo") { if (hasDurableHistory()) void restoreProjectHistory("undo"); else void restoreSnapshot(state.historyIndex - 1); }
-  else if (action === "redo") { if (hasDurableHistory()) void restoreProjectHistory("redo"); else void restoreSnapshot(state.historyIndex + 1); }
+  else if (action === "undo") { if (hasDurableHistory()) { if (canRestoreProjectHistory("undo")) void restoreProjectHistory("undo"); } else if (state.historyIndex > 0) void restoreSnapshot(state.historyIndex - 1); }
+  else if (action === "redo") { if (hasDurableHistory()) { if (canRestoreProjectHistory("redo")) void restoreProjectHistory("redo"); } else if (state.historyIndex < state.history.length) void restoreSnapshot(state.historyIndex + 1); }
   return true;
 }
 

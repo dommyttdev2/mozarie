@@ -409,11 +409,13 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   assert.equal(test.calculatedBlockSize(blockImage, 10), 10, "block size follows the larger image edge");
   assert.equal(test.calculatedBlockSize(null, 10), 0, "block size is zero without a loaded image");
   assert.match(test.progressText({ kind: "detect", state: "running", completed: 1, total: 3, startedAt: "job", activeElapsed: 3 }), /status/);
+  assert.match(test.progressText({ kind: "detect", state: "running", completed: 0, processed: 1, total: 3, startedAt: "staged-job", activeElapsed: 3 }), /status/, "staged detection progress drives the visible count and ETA before candidate publication");
   coreState.images = [{ id: "one", relativePath: "one.png" }, { id: "two", relativePath: "two.png" }];
   const preparing = { kind: "detect", state: "running", phase: "preparing_models", completed: 0, total: 2, imageIds: ["one", "two"], completedImageIds: [] };
   assert.match(test.progressText(preparing), /0/, "model preparation keeps the stable progress count");
   assert.equal(test.processingCurrentPath(preparing), "one.png", "model preparation keeps the first unfinished filename visible");
   assert.equal(test.processingCurrentPath({ ...preparing, phase: "detecting", completedImageIds: ["one"] }), "two.png", "phase changes do not clear the next filename");
+  assert.equal(test.processingCurrentPath({ ...preparing, processed: 1, phase: "detecting" }), "", "parallel staged counts never guess a next filename out of completion order");
   assert.equal(test.processingCurrentPath({ kind: "apply", current: "saving.png" }), "saving.png", "non-detection jobs keep their reported path");
   assert.equal(test.processingCurrentPath({ kind: "detect", current: "fallback.png", imageIds: [], completedImageIds: [] }), "fallback.png", "detection with no targets keeps its reported path");
   assert.equal(test.processingCurrentPath({ kind: "detect", current: "ignored.png", imageIds: ["one"], completedImageIds: ["one"] }), "", "completed detection targets clear the current-path label");

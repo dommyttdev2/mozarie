@@ -393,6 +393,17 @@ class JobsMixin:
                 self.job.completed = len(self.job.completed_image_ids)
                 self._publish_job_snapshot_unchecked()
 
+    def _mark_job_processed(
+        self,
+        job_generation: int | None = None,
+        catalog_generation: int | None = None,
+    ) -> None:
+        """Expose completed inference without publishing staged detection data."""
+        with self.lock:
+            if self._job_is_current(job_generation, catalog_generation):
+                self.job.processed = min(self.job.total, self.job.processed + 1)
+                self._publish_job_snapshot_unchecked()
+
     def _set_detection_model_preparation(
         self,
         active: bool,
@@ -451,7 +462,8 @@ class JobsMixin:
             self.job.active_count -= 1
             if (control.pause_requested.is_set() and not control.cancel_requested.is_set()
                     and not control.failed.is_set() and self.job.active_count == 0):
-                if self.job.completed >= self.job.total:
+                progress = self.job.processed if self.job.kind == "detect" else self.job.completed
+                if progress >= self.job.total:
                     control.pause_requested.clear()
                     self._publish_job_snapshot_unchecked()
                     return self.job.active_count
@@ -530,6 +542,7 @@ class JobsMixin:
             self.job.cancel_requested = False
             self.job.ended_at = time.time()
             self.job.completed = self.job.total
+            self.job.processed = self.job.total
             self.job.current = ""
             self.job.active_count = 0
             kind = self.job.kind
