@@ -2617,6 +2617,38 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.job.completed_image_ids, ())
             self.assertTrue(all(not state.candidates.get(record.image_id) for record in records))
 
+    def test_detection_staging_reports_every_success_before_atomic_publication(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, color in (("first.png", "white"), ("second.png", "black"), ("third.png", "gray")):
+                Image.new("RGB", (16, 16), color).save(root / name)
+            state = self.new_state()
+            records = [state.image_for_id(image["id"]) for image in state.set_root(directory)]
+            state.job = core_module.Job(started_at=time.time(), kind="detect", state="running", total=len(records),
+                                        image_ids=tuple(record.image_id for record in records))
+            staged_snapshots: list[dict[str, object]] = []
+            original_mark_processed = state._mark_job_processed
+
+            def mark_processed(*args, **kwargs):
+                original_mark_processed(*args, **kwargs)
+                staged_snapshots.append(state.job.as_dict())
+
+            def detect_image(_models, record, _confidence, _mode="standard", _targets=None, **_kwargs):
+                mask_path = state.cache_dir / record.image_id / "candidate.png"
+                mask_path.parent.mkdir(parents=True, exist_ok=True)
+                Image.fromarray(self._mask(16, 16)).save(mask_path)
+                return [Candidate(record.image_id, "penis", 0.9, mask_path)]
+
+            with patch.object(state, "_ensure_models", return_value=object()), patch.object(state, "_detect_image", side_effect=detect_image), patch.object(state, "_mark_job_processed", side_effect=mark_processed):
+                state._detect_worker(records, DEFAULT_DETECTION_CONFIDENCE, 1)
+
+            self.assertEqual([(snapshot["processed"], snapshot["completed"], snapshot["completedImageIds"])
+                              for snapshot in staged_snapshots], [(1, 0, []), (2, 0, []), (3, 0, [])])
+            self.assertEqual(state.job.state, "complete")
+            self.assertEqual(state.job.processed, len(records))
+            self.assertEqual(state.job.completed, len(records))
+            self.assertEqual(state.job.completed_image_ids, tuple(record.image_id for record in records))
+
     def test_parallel_detection_completes_empty_results_in_order(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

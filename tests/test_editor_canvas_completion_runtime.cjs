@@ -153,12 +153,19 @@ const test = context.canvasCompletion;
   state.currentId = "image"; state.currentImage = { width: addCanvas.width, height: addCanvas.height, alpha: 255 }; state.imageGeneration = 9;
   state.candidates = []; state.images[0].candidateRevision = 2;
   for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas]) { target.ctx.alpha = 255; target.ctx.calls.length = 0; }
-  await test.restoreDraft("image", 9, { candidateRevision: 2 }, [{ alpha: 255 }, { alpha: 255 }, { alpha: 255 }, null, null, null]);
-  for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas]) {
+  await test.restoreDraft("image", 9, { candidateRevision: 2 }, [{ alpha: 255 }, null, { alpha: 255 }, null, null, null]);
+  for (const target of [addCanvas, exclusionEraseCanvas]) {
     const clear = target.ctx.calls.findIndex(([name]) => name === "clear");
     const draw = target.ctx.calls.findIndex(([name]) => name === "image");
     assert.ok(clear >= 0 && clear < draw, "same-size draft restore clears each manual layer before drawing it");
   }
+  assert.deepEqual([addCanvas.ctx.alpha, exclusionCanvas.ctx.alpha, exclusionEraseCanvas.ctx.alpha], [255, 0, 255], "a same-size restore redraws present mosaic and exclusion-erase layers while clearing an absent exclusion layer");
+  for (const target of [addCanvas, exclusionCanvas, exclusionEraseCanvas]) { target.ctx.alpha = 255; target.ctx.calls.length = 0; }
+  await test.restoreDraft("image", 9, { candidateRevision: 2 }, [null, { alpha: 255 }, null, null, null, null]);
+  const exclusionClear = exclusionCanvas.ctx.calls.findIndex(([name]) => name === "clear");
+  const exclusionDraw = exclusionCanvas.ctx.calls.findIndex(([name]) => name === "image");
+  assert.ok(exclusionClear >= 0 && exclusionClear < exclusionDraw, "same-size draft restore clears the exclusion layer before redrawing it");
+  assert.deepEqual([addCanvas.ctx.alpha, exclusionCanvas.ctx.alpha, exclusionEraseCanvas.ctx.alpha], [0, 255, 0], "a later restore clears absent mosaic and exclusion-erase pixels instead of retaining stale data");
   state.candidates = candidateFixture;
 
   state.removedCandidateIds.clear(); state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true; state.manualExclusionForced = true;
