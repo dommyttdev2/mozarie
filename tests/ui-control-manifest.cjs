@@ -10,7 +10,7 @@ closeOverviewButton batchModeButton overviewFilterButton overviewQuery overviewF
 sourceDeleteResume
 detectParallelism dialogTargetPenis dialogTargetPussy detectConfidenceRange detectConfidenceNumber detectCandidatePadding detectExcludeCandidatePadding detectFluidColorFillEnabled detectFluidColorFillTolerance detectCancelButton detectStartButton
 settingsCloseButton settingsTabGeneral settingsTabModels settingsTabDisplay settingsTabShortcuts settingsTabConfirm settingsTabInfo settingsLanguage settingsPort settingsDefaultOutputDirectory settingsChooseOutputDirectory settingsImportParallelism settingsSaveParallelism settingsOpenBrowser settingsProvider settingsGpuDevice settingsTargetModel settingsNtd11Toggle settingsNtd11Model settingsSensitiveToggle settingsSensitiveModel settingsPrecisionToggle settingsSamType settingsSamModel settingsHandToggle settingsHandModel settingsHandSegmentationToggle settingsHandSegmentationModel settingsFluidToggle settingsApplyColor settingsExcludeColor settingsOpacity settingsMosaicPreview settingsExcludeForcedDefault settingsShortcutsEnabled confirmClearMasks confirmClearCatalog confirmRemoveImage confirmCandidateDelete confirmCandidateRoleDelete confirmOverwriteSource confirmDeleteSourceAfterCopy checkUpdateButton settingsResetButton settingsSaveButton
-modelDownloadClose modelDownloadCopy modelDownloadStart modelDownloadCancel applyTargetMode applyCopyMode applyOverwriteMode applySuffix deleteOriginal applyOutputDirectoryStatus chooseOutputDirectoryButton applyDivisor applyOutputFormat applyKeepMetadata applyCloseButton applyPauseButton applyCancelButton applyStartButton singleSaveCopyMode singleSaveOverwriteMode singleSaveSuffix singleSaveDeleteOriginal singleSaveChooseOutputDirectoryButton singleSaveOutputFormat singleSaveKeepMetadata singleSaveCloseButton singleSaveStartButton mosaicHelpCloseButton processingPauseButton processingCancelButton modelHelpCloseButton modelHelpCopy
+modelDownloadClose modelDownloadCopy modelDownloadStart modelDownloadCancel applyTargetMode applyCopyMode applyOverwriteMode applySuffix deleteOriginal applyOutputDirectoryStatus chooseOutputDirectoryButton applyDivisor applyOutputFormat applyKeepMetadata applyRemoveSaved applyCloseButton applyPauseButton applyCancelButton applyStartButton singleSaveCopyMode singleSaveOverwriteMode singleSaveSuffix singleSaveDeleteOriginal singleSaveOutputDirectoryStatus singleSaveChooseOutputDirectoryButton singleSaveOutputFormat singleSaveKeepMetadata singleSaveRemoveSaved singleSaveCloseButton singleSaveStartButton mosaicHelpCloseButton processingPauseButton processingCancelButton modelHelpCloseButton modelHelpCopy
 importFailuresClose
 `.trim().split(/\s+/);
 
@@ -19,10 +19,10 @@ importFailuresClose
 // id is a button-style activation.  The separate list keeps a new control from
 // silently bypassing the interaction sweep.
 const keyboardIds = new Set(`
-projectNameInput nativeRelinkPath folderPath overviewQuery candidatePaddingInput settingsDefaultOutputDirectory settingsTargetModel settingsNtd11Model settingsSensitiveModel settingsSamModel settingsHandModel settingsHandSegmentationModel applySuffix applyOutputDirectoryStatus singleSaveSuffix
+projectNameInput nativeRelinkPath folderPath overviewQuery candidatePaddingInput settingsDefaultOutputDirectory settingsTargetModel settingsNtd11Model settingsSensitiveModel settingsSamModel settingsHandModel settingsHandSegmentationModel applySuffix applyOutputDirectoryStatus singleSaveSuffix singleSaveOutputDirectoryStatus
 `.trim().split(/\s+/));
 const changeIds = new Set(`
-  sourceMismatchClear brushSize divisor bucketTolerance confidence detectTargetPenis detectTargetPussy detectParallelism dialogTargetPenis dialogTargetPussy detectConfidenceRange detectConfidenceNumber detectCandidatePadding detectExcludeCandidatePadding detectFluidColorFillEnabled detectFluidColorFillTolerance overviewFolder confirmNeverShow settingsLanguage settingsPort settingsImportParallelism settingsSaveParallelism settingsOpenBrowser settingsProvider settingsGpuDevice settingsNtd11Toggle settingsSensitiveToggle settingsPrecisionToggle settingsSamType settingsHandToggle settingsHandSegmentationToggle settingsFluidToggle settingsApplyColor settingsExcludeColor settingsOpacity settingsMosaicPreview settingsExcludeForcedDefault settingsShortcutsEnabled confirmClearMasks confirmClearCatalog confirmRemoveImage confirmCandidateDelete confirmCandidateRoleDelete confirmOverwriteSource confirmDeleteSourceAfterCopy applyTargetMode applyCopyMode applyOverwriteMode deleteOriginal applyDivisor applyOutputFormat applyKeepMetadata singleSaveCopyMode singleSaveOverwriteMode singleSaveDeleteOriginal singleSaveOutputFormat singleSaveKeepMetadata
+  sourceMismatchClear brushSize divisor bucketTolerance confidence detectTargetPenis detectTargetPussy detectParallelism dialogTargetPenis dialogTargetPussy detectConfidenceRange detectConfidenceNumber detectCandidatePadding detectExcludeCandidatePadding detectFluidColorFillEnabled detectFluidColorFillTolerance overviewFolder confirmNeverShow settingsLanguage settingsPort settingsImportParallelism settingsSaveParallelism settingsOpenBrowser settingsProvider settingsGpuDevice settingsNtd11Toggle settingsSensitiveToggle settingsPrecisionToggle settingsSamType settingsHandToggle settingsHandSegmentationToggle settingsFluidToggle settingsApplyColor settingsExcludeColor settingsOpacity settingsMosaicPreview settingsExcludeForcedDefault settingsShortcutsEnabled confirmClearMasks confirmClearCatalog confirmRemoveImage confirmCandidateDelete confirmCandidateRoleDelete confirmOverwriteSource confirmDeleteSourceAfterCopy applyTargetMode applyCopyMode applyOverwriteMode deleteOriginal applyDivisor applyOutputFormat applyKeepMetadata applyRemoveSaved singleSaveCopyMode singleSaveOverwriteMode singleSaveDeleteOriginal singleSaveOutputFormat singleSaveKeepMetadata singleSaveRemoveSaved
 `.trim().split(/\s+/));
 
 const fixtureForScenario = {
@@ -39,9 +39,6 @@ const fixtureForScenario = {
   workspace: "workspace",
 };
 const exemptReasons = {
-  // A readonly status field has no product handler.  Its adjacent button is
-  // the user operation that changes it and is covered by the save fixture.
-  applyOutputDirectoryStatus: "readonly output-directory status; chooseOutputDirectoryButton is the operable control",
   settingsSamType: "hidden selected-SAM value; input[name=settingsSamVariant] is the operable control",
   // Project lifecycle needs both native directory handles and browser file
   // handles.  A compact VM browser-runtime suite exercises every branch,
@@ -132,6 +129,9 @@ const dynamicControls = [
     ["[data-selection-action]", "click", "api", "overview", "overview", "overview:data-selection-action", "applies an isolated selection action"],
     ["[data-project-sort]", "click", "navigation", "workspace", "workspace", "workspace:data-project-sort", "sorts the project table"],
     ["[data-project-action]", "click", "api", "workspace", "workspace", "workspace:data-project-action", "opens, exports, or deletes the selected project"],
+    ["#projectBrowserRestoreList button", "click", "api", "workspace", "workspace", "workspace:projectBrowserRestoreList", "restores one browser project source"],
+    ["#nativeRelinkSources button", "click", "dom", "workspace", "workspace", "workspace:nativeRelinkSources", "selects one native source to relink"],
+    ["#sameSourceList button", "click", "dom", "workspace", "workspace", "workspace:sameSourceList", "selects one matching-source project"],
     [".gallery-item", "click", "navigation", "gallery", "workspace", "gallery:gallery-item", "selects the isolated gallery image"],
     [".overview-item", "click", "navigation", "overview", "overview", "overview:overview-item", "selects the isolated overview image"],
     ["[data-model-download]", "click", "dialog", "settings", "settings", "settings:data-model-download", "opens the model download dialog"],
@@ -177,6 +177,9 @@ const anonymousStaticControls = [
 const dynamicSurfaceContracts = [
   { selector: "[data-project-sort]", source: "static/index.html", markers: ['data-project-sort="name"', 'data-project-sort="created"', 'data-project-sort="updated"'] },
   { selector: "[data-project-action]", source: "static/js/app.js", markers: ["button.dataset.projectAction = action", 'projectActionButton(project, "open"', 'projectActionButton(project, "mosaic"', 'projectActionButton(project, "exclude"', 'projectActionButton(project, "delete"'] },
+  { selector: "#projectBrowserRestoreList button", source: "static/js/app.js", markers: ['const list = $("#projectBrowserRestoreList")', "restoreBrowserProjectSource(source)"] },
+  { selector: "#nativeRelinkSources button", source: "static/js/app.js", markers: ['const list = $("#nativeRelinkSources")', "nativeRelinkSourceId = item.id"] },
+  { selector: "#sameSourceList button", source: "static/js/app.js", markers: ['const list = $("#sameSourceList")', "sameSourceSelectedProjectId = project.id"] },
   { selector: "[data-shortcut-action]", source: "static/js/settings.js", markers: ["input.dataset.shortcutAction = action", "input.addEventListener(\"keydown\""] },
   { selector: "[data-shortcut-enabled]", source: "static/js/settings.js", markers: ["enabled.dataset.shortcutEnabled = action"] },
   { selector: ".candidate-row .candidate-toggle", source: "static/js/editor-masks.js", markers: ['button.className = "candidate-toggle"', "actionRow.append(enabled"] },

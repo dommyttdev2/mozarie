@@ -5,6 +5,7 @@
 // through the same functions that the page uses rather than duplicating their
 // decisions in test-only helpers.
 const assert = require("node:assert/strict");
+const nodeTest = require("node:test");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
@@ -165,6 +166,12 @@ async function testBoundApplicationEvents() {
   for (const dialogId of ["#settingsDialog", "#modelHelpDialog", "#detectDialog", "#mosaicHelpDialog", "#applyDialog", "#singleSaveDialog", "#confirmDialog"]) { const dialog = element(dialogId); await fire(dialogId, "pointerdown", { target: dialog, clientX: -1, clientY: -1 }); await fire(dialogId, "pointerup", { target: dialog, clientX: -1, clientY: -1 }); await fire(dialogId, "pointerdown", { target: dialog, clientX: -1, clientY: -1, pointerId: 2 }); await fire(dialogId, "pointercancel", { target: dialog, pointerId: 2 }); }
   await element("#compareSplitter").listeners.get("keydown")(event({ key: "x" })); state.browserSave = { paused: true }; await fire("#applyPauseButton", "click"); state.browserSave = null; state.job = { state: "paused" }; await fire("#applyPauseButton", "click"); state.job = null;
   state.processing = null; await fire("#processingPauseButton", "click"); await fire("#processingCancelButton", "click"); state.processing = { kind: "import", state: "running" }; state.importSession = null; await fire("#processingPauseButton", "click"); state.processing = { kind: "detect", state: "running" }; context.api = async () => { throw new Error("offline"); }; await fire("#processingPauseButton", "click"); context.api = async () => ({ kind: "detect", state: "running" });
+  state.processing = { kind: "detect", state: "running", total: 3, processed: 3 };
+  element("#processingPauseButton").disabled = true;
+  let publicationPauseRequests = 0;
+  context.api = async () => { publicationPauseRequests += 1; return { kind: "detect", state: "running" }; };
+  await fire("#processingPauseButton", "click");
+  assert.equal(publicationPauseRequests, 0, "a disabled publication-wait pause control cannot send a rejected pause request");
   context.busy = true; await fire("galleryFilter", "change"); await fire("overviewFilter", "change"); await fire("#divisor", "input"); await fire("#confidence", "input"); await fire("#fitButton", "click"); await element("#editorCanvas").listeners.get("pointerdown")(event()); context.busy = false;
   context.polygonVertexAt = () => 0; state.tool = "polygon"; state.polygonPoints = [{ x: 1, y: 1 }]; await canvas.listeners.get("pointerdown")(event()); await canvas.listeners.get("pointermove")(event()); await canvas.listeners.get("pointerup")(event()); context.polygonVertexAt = () => -1; state.boundaryDrafts = [{ id: "draft", points: [{ x: 1, y: 1 }], roi: {} }]; context.completedPolygonVertexAt = () => ({ draft: state.boundaryDrafts[0], index: 0 }); await canvas.listeners.get("pointerdown")(event()); state.drawing = true; await canvas.listeners.get("pointermove")(event()); await canvas.listeners.get("pointerup")(event()); context.completedPolygonVertexAt = () => null; state.polygonPoints = [{}, {}, {}]; await canvas.listeners.get("pointerdown")(event()); state.polygonPoints = [{}, {}, {}, {}]; state.drawing = true; await canvas.listeners.get("pointerup")(event());
   state.tool = "brush"; await canvas.listeners.get("pointerdown")(event()); state.activeStroke = {}; await canvas.listeners.get("pointercancel")(event()); await canvas.listeners.get("pointerdown")(event()); state.activeStroke = {}; await canvas.listeners.get("pointerup")(event()); state.tool = "boundary_brush"; await canvas.listeners.get("pointerdown")(event()); state.drawing = true; await canvas.listeners.get("pointermove")(event()); await canvas.listeners.get("pointerup")(event()); await canvas.listeners.get("pointerdown")(event()); state.drawing = true; await canvas.listeners.get("pointercancel")(event()); state.tool = "boundary"; const draft = { id: "rectangle" }; context.rectangleDraftAt = () => draft; await canvas.listeners.get("pointerdown")(event()); await canvas.listeners.get("pointerup")(event()); context.rectangleDraftAt = () => null;
@@ -315,13 +322,13 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
     console, Promise, Map, Set, Array, Object, Number, String, Boolean, Math, Error, Uint8ClampedArray,
     document, window: { addEventListener() {} }, state, canvas, stage: element("#canvasStage"), $: (selector) => element(selector),
     clearTimeout() {}, setTimeout() {}, fetch: async () => ({ ok: false, json: async () => ({}) }),
-    renderModelStatus() {}, renderCatalogViews() {}, renderCandidates() {}, render() {}, renderGallery() {}, renderOverview() {},
+    uiRefreshes: [], renderModelStatus() {}, renderCatalogViews() {}, renderCandidates() { context.uiRefreshes.push("candidates"); }, render() {}, renderGallery() {}, renderOverview() {},
     renderStatus() {}, updateBoundaryActions() {}, updateNavigationControls() {}, updateHistoryButtons() {}, updateSelectionActionBar() {},
     updateCandidateStatus() {}, syncApplyMode() {}, updateProgress() {}, syncDetectionActions() {}, updateCandidateBatchButtons() {},
     refreshMaskStatus: () => false, selectImage() {}, imageAssetVersion: () => 0, canvasHasPixels: () => false,
     applyRestrictionMessage: () => "", candidateDisplayIdsForRole: () => [], queueWorkspaceFlags: () => Promise.reject(new Error("write failed")),
     showModalFromInvoker() {}, showConnectionFailure() {}, releaseMosaicPreview() {}, requestMosaicPreview() {},
-    closeBoundaryModeMenu() {}, closeCatalogContextMenu() {}, releaseImageCaches() {}, clearCandidateBlink() {}, clearEditor() {}, flushAllWorkspaceMutations: async () => {},
+    closeBoundaryModeMenu() {}, closeCatalogContextMenu() {}, releaseImageCaches() {}, clearCandidateBlink() {}, clearEditor() {}, resetCatalogWindows() {}, flushAllWorkspaceMutations: async () => {},
     isBusy: () => false, catalogStagingEditsActive: () => false, currentImageActionPending: () => false, currentRecord: () => state.images.find((image) => image.id === state.currentId) || null,
     isProcessableImage: (image) => Boolean(image && !image.hidden), candidateControlLocked: () => false, manualLayerPresence: () => ({ hasManualExclude: false, hasManualExclusionErase: false }),
     processableImages: (images = state.images) => images.filter((image) => !image.hidden), imageHasMask: () => false, closeFilterPopovers() {}, selectedSaveMode: () => "copy",
@@ -330,11 +337,35 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   };
   const source = fs.readFileSync(path.join(jsRoot, "core.js"), "utf8");
   vm.runInNewContext(source, context, { filename: path.join(jsRoot, "core.js") });
-  vm.runInNewContext("globalThis.coreCoverage={ state, t, validCandidateTokens, showUserError, responseError, loadTranslations, api, setStatus, setStatusKey, showProcessing, progressText, processingCurrentPath, catalogRecordMatches, cancelFillWork, abortCatalogLoads, publishWorkspaceFlags, saveWorkspaceFlag, saveTargets, setHidden, selectCatalogImage, refreshReviewViews, markImagesUnreviewed, refreshCurrentReviewAndMask, clearBoundaryConstruction, updateActionButtons, updateCandidateBatchButtons, setMosaicPreviewEnabled, loadFolder, formatDuration, normaliseDetectionConfidence, normaliseDivisor, calculatedBlockSize };", context, { filename: "test-core-exports.js" });
+  vm.runInNewContext("globalThis.coreCoverage={ state, t, validCandidateTokens, showUserError, responseError, loadTranslations, api, setStatus, setStatusKey, showProcessing, progressText, processingCurrentPath, catalogRecordMatches, cancelFillWork, abortCatalogLoads, publishWorkspaceFlags, saveWorkspaceFlag, saveTargets, setHidden, selectCatalogImage, refreshReviewViews, markImagesUnreviewed, refreshCurrentReviewAndMask, clearBoundaryConstruction, updateActionButtons, updateCandidateBatchButtons, setMosaicPreviewEnabled, loadFolder, formatDuration, normaliseDetectionConfidence, normaliseDivisor, calculatedBlockSize, isBusy, resetCatalog };", context, { filename: "test-core-exports.js" });
   const test = context.coreCoverage;
   const coreState = test.state;
   Object.assign(coreState, state);
   coreState.workspaceFlagPending = new Map();
+  coreState.transformPending = true;
+  assert.equal(test.isBusy(), true, "an image transform participates in the shared busy lock used by save, detection, and candidate controls");
+  coreState.transformPending = false;
+  assert.equal(test.isBusy(), false, "transform completion releases the shared busy lock");
+  coreState.outputDirectoryCommitPending = true;
+  assert.equal(test.isBusy(), true, "committing a manual output directory locks save and edit actions until its settings write settles");
+  coreState.outputDirectoryCommitPending = false;
+  coreState.outputDirectoryPicking = true;
+  assert.equal(test.isBusy(), true, "the output-directory picker shares the same lock while its request is pending");
+  coreState.outputDirectoryPicking = false;
+  assert.equal(test.isBusy(), false, "output-directory controls release only after their pending request finishes");
+  coreState.galleryFilter = new Set(["masked"]); coreState.overviewFilter = new Set(["reviewed"]); coreState.overviewQuery = "old project query";
+  const catalogFilterControls = [element("galleryFilter"), element("overviewFilter")];
+  catalogFilterControls.forEach((control) => { control.checked = true; }); element("#overviewQuery").value = "old project query";
+  const catalogQuerySelectorAll = document.querySelectorAll;
+  document.querySelectorAll = (selector) => selector === "[data-gallery-filter], [data-overview-filter]" ? catalogFilterControls : catalogQuerySelectorAll.call(document, selector);
+  test.resetCatalog([{ id: "other", relativePath: "other.png" }], "C:/other");
+  document.querySelectorAll = catalogQuerySelectorAll;
+  assert.deepEqual([...coreState.galleryFilter], [], "a catalog replacement clears the prior gallery filter");
+  assert.deepEqual([...coreState.overviewFilter], [], "a catalog replacement clears the prior overview filter");
+  assert.equal(coreState.overviewQuery, "", "a catalog replacement clears the prior overview query state");
+  assert.equal(element("galleryFilter").checked, false, "a catalog replacement clears checked gallery-filter controls");
+  assert.equal(element("overviewFilter").checked, false, "a catalog replacement clears checked overview-filter controls");
+  assert.equal(element("#overviewQuery").value, "", "a catalog replacement clears the visible overview query field");
   coreState.mosaicPreviewFailureReported = true;
   test.setMosaicPreviewEnabled(true);
   assert.equal(coreState.mosaicPreviewFailureReported, false, "explicitly re-enabling mosaic preview starts a fresh failure-reporting attempt");
@@ -503,6 +534,9 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
     { kind: "detect", state: "paused", total: 2, completed: 1, current: "one.png", cancelRequested: false },
     { kind: "import", state: "pausing", total: 0, completed: 0, current: "", cancelRequested: true },
   ]) test.showProcessing(job);
+  test.showProcessing({ kind: "detect", state: "running", total: 3, processed: 3, completed: 0, cancelRequested: false });
+  assert.equal(element("#processingPauseButton").disabled, true, "detection publication waits without offering a pause the backend rejects");
+  assert.equal(element("#processingCancelButton").disabled, false, "detection publication still allows cancellation before durable publication begins");
   assert.match(test.formatDuration(undefined), /duration/);
   coreState.detectionEta = { key: "detect:", completed: 1, remaining: 1 };
   assert.match(test.progressText({ kind: "detect", state: "running", completed: 1, total: 3 }), /status/);
@@ -523,8 +557,10 @@ async function testCoreBoundaryAndWorkspaceBehaviour() {
   assert.equal(test.catalogRecordMatches(matchingRecord, 2, { version: 0, revision: 0 }), true);
   let terminated = false;
   coreState.fillWorker = { terminate() { terminated = true; } };
+  context.uiRefreshes.length = 0;
   test.cancelFillWork();
   assert.equal(terminated, true, "fill cancellation terminates a live worker");
+  assert.deepEqual(context.uiRefreshes, ["candidates"], "fill cancellation redraws candidate controls after releasing their pending lock");
   assert.equal(await test.setHidden(null, true), false);
   test.selectCatalogImage("missing");
   coreState.viewMode = "overview";
@@ -650,10 +686,9 @@ async function testDetectionImportAndSaveBehaviour() {
   await context.detectionCoverage.startDetectionFromDialog({ preventDefault() {} });
 }
 
-Promise.resolve()
-  .then(testApplicationStartupPaths)
-  .then(testBoundApplicationEvents)
-  .then(testCoreBoundaryAndWorkspaceBehaviour)
-  .then(testDetectionImportAndSaveBehaviour)
-  .then(() => console.log("test_app_core_detection_coverage: passed"))
-  .catch((error) => { console.error(error); process.exitCode = 1; });
+nodeTest("application startup, catalog state, and detection controls", async () => {
+  await testApplicationStartupPaths();
+  await testBoundApplicationEvents();
+  await testCoreBoundaryAndWorkspaceBehaviour();
+  await testDetectionImportAndSaveBehaviour();
+});

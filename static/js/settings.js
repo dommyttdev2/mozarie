@@ -403,13 +403,28 @@ async function openSettings() {
   void refreshSettingsStatus();
 }
 
+let settingsMutationPending = false;
+let settingsMutationDisabled = null;
+function syncSettingsMutationControls() {
+  const controls = [...$("#settingsDialog").querySelectorAll("input, select, textarea, button")];
+  if (settingsMutationPending) {
+    settingsMutationDisabled ||= new Map(controls.map((control) => [control, control.disabled]));
+    controls.forEach((control) => { control.disabled = true; });
+    return;
+  }
+  settingsMutationDisabled?.forEach((disabled, control) => { control.disabled = disabled; });
+  settingsMutationDisabled = null;
+}
+
 async function saveSettings(event) {
   event.preventDefault();
+  if (settingsMutationPending) return;
   const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error");
   if (!validateDetectionTargets(detectionTargets())) {
     result.textContent = t("error.detectionTargetsRequired"); result.classList.add("error"); return;
   }
   if (!validateAbsoluteSettingsPaths()) return;
+  settingsMutationPending = true; syncSettingsMutationControls(); let saved = false;
   try {
     const data = await api("/api/settings?status=0", { method: "POST", body: JSON.stringify(settingsPayload()) });
     const languageChanged = state.settings?.general?.language !== data.settings.general.language;
@@ -420,11 +435,20 @@ async function saveSettings(event) {
     if (languageChanged) await loadTranslations();
     result.textContent = t("settings.saved");
     void refreshSettingsStatus();
-  } catch (error) { showUserError(error, $("#settingsSaveButton")); }
+    saved = true;
+  } catch (error) {
+    settingsMutationPending = false; syncSettingsMutationControls();
+    showUserError(error, $("#settingsSaveButton"));
+  } finally {
+    settingsMutationPending = false; syncSettingsMutationControls();
+    if (saved) setSettingsForm(state.settings, state.settingsStatus);
+  }
 }
 
 async function resetSettings() {
+  if (settingsMutationPending) return;
   const result = $("#settingsResult"); result.textContent = ""; result.classList.remove("error");
+  settingsMutationPending = true; syncSettingsMutationControls(); let reset = false;
   try {
     const data = await api("/api/settings/reset?status=0", { method: "POST", body: JSON.stringify({}) });
     setSettingsForm(data.settings);
@@ -434,7 +458,14 @@ async function resetSettings() {
     await loadTranslations();
     result.textContent = t("settings.resetDone");
     void refreshSettingsStatus();
-  } catch (error) { showUserError(error, $("#settingsResetButton")); }
+    reset = true;
+  } catch (error) {
+    settingsMutationPending = false; syncSettingsMutationControls();
+    showUserError(error, $("#settingsResetButton"));
+  } finally {
+    settingsMutationPending = false; syncSettingsMutationControls();
+    if (reset) setSettingsForm(state.settings, state.settingsStatus);
+  }
 }
 
 async function chooseSettingsOutputDirectory() {
@@ -470,6 +501,7 @@ async function chooseSettingsModelFile(button) {
     showUserError(error, button);
   } finally {
     buttons.forEach((item) => { item.disabled = false; });
+    setSamAvailable(Boolean($("#settingsPrecisionToggle").checked));
     setHandSegmentationAvailable(Boolean($(MODEL_TOGGLE_IDS.hand_detection).checked));
   }
 }
@@ -604,6 +636,7 @@ function startModelDownload(key) {
 async function beginModelDownload() {
   const key = pendingModelDownloadKey;
   if (!key) return;
+  let started = false;
   $("#modelDownloadStatus").textContent = ""; $("#modelDownloadStatus").classList.remove("error");
   $("#modelDownloadProgress").value = 0; $("#modelDownloadProgress").max = 1;
   $("#modelDownloadStart").hidden = true; $("#modelDownloadSecurity").hidden = true;
@@ -611,9 +644,16 @@ async function beginModelDownload() {
   try {
     const modelKey = key === "sam" ? `sam_${selectedSamType()}` : key;
     const job = await api("/api/model-download/start", { method: "POST", body: JSON.stringify({ modelKey, samType: selectedSamType() }) });
+    started = true;
     renderModelDownload(job);
     if (!modelDownloadPoll && ["running", "cancelling"].includes(job.state)) modelDownloadPoll = setInterval(() => { void refreshModelDownload(); }, 350);
   } catch (error) { showUserError(error, $("#modelDownloadStart")); }
+  finally {
+    if (!started && pendingModelDownloadKey === key) {
+      $("#modelDownloadStart").hidden = false; $("#modelDownloadSecurity").hidden = false;
+      modelDownloadStatusRefreshPending = false;
+    }
+  }
 }
 
 async function cancelModelDownload() {

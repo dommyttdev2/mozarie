@@ -959,8 +959,46 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(live_record.asset_revision, asset_revision + 1)
             self.assertNotEqual(state.asset_version(live_record), asset_version)
 
-    def test_output_directory_picker_is_not_a_server_api(self):
-        self.assertTrue(callable(http_module._pick_output_directory))
+    def test_output_directory_picker_normalizes_existing_absolute_hint_and_releases_lock(self):
+        state = self.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            executable.parent.mkdir(parents=True); executable.touch()
+            selected = root / "picked"; selected.mkdir()
+            process = Mock(returncode=0)
+            process.communicate.return_value = (base64.b64encode(str(selected).encode("utf-8")), b"")
+            with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), \
+                 patch.object(http_module.subprocess, "Popen", return_value=process) as popen:
+                self.assertEqual(http_module._pick_output_directory(state, str(selected)), str(selected.resolve()))
+            picker_kwargs = popen.call_args.kwargs
+            command = popen.call_args.args[0]
+            script = base64.b64decode(command[-1]).decode("utf-16le")
+            self.assertIn("FolderBrowserDialog", script)
+            self.assertIn("ShowDialog($owner)", script)
+            self.assertFalse(picker_kwargs["shell"])
+            self.assertEqual(picker_kwargs["env"]["MOZARIE_OUTPUT_INITIAL_DIRECTORY"], str(selected.resolve()))
+            self.assertTrue(state.native_picker_lock.acquire(blocking=False)); state.native_picker_lock.release()
+
+    def test_output_directory_picker_cancellation_and_failure_release_lock(self):
+        state = self.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            executable = root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+            executable.parent.mkdir(parents=True); executable.touch()
+            cancelled = Mock(returncode=0)
+            cancelled.communicate.return_value = (b"", b"")
+            failed = Mock(returncode=1)
+            failed.communicate.return_value = (b"", b"failed")
+            with patch.dict(http_module.os.environ, {"SystemRoot": str(root)}, clear=False), \
+                 patch.object(http_module.subprocess, "Popen", side_effect=[cancelled, failed]) as popen:
+                self.assertIsNone(http_module._pick_output_directory(state, "relative-output"))
+                with self.assertRaises(ClientError) as raised:
+                    http_module._pick_output_directory(state, str(root / "missing"))
+            self.assertNotIn("MOZARIE_OUTPUT_INITIAL_DIRECTORY", popen.call_args_list[0].kwargs["env"])
+            self.assertNotIn("MOZARIE_OUTPUT_INITIAL_DIRECTORY", popen.call_args_list[1].kwargs["env"])
+            self.assertEqual(raised.exception.error_code, "output_folder_unavailable")
+            self.assertTrue(state.native_picker_lock.acquire(blocking=False)); state.native_picker_lock.release()
 
     def test_model_file_picker_uses_fixed_powershell_and_validates_selection(self):
         state = self.new_state()
@@ -1175,13 +1213,11 @@ class MozarieTests(unittest.TestCase):
         unchanged_invalid = copy.deepcopy(state.settings)
         unchanged_invalid["models"].update({"provider": "gpu", "gpu_device": 1})
         state.settings = unchanged_invalid
-        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
-             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
-             patch.object(state.settings_store, "save") as save, \
-             self.assertRaisesRegex(ClientError, "選択したGPU") as raised:
+        with patch.object(state, "_require_supported_gpu", side_effect=AssertionError("unchanged GPU must not be probed")) as probe, \
+             patch.object(state.settings_store, "save", return_value=unchanged_invalid) as save:
             state.update_settings(unchanged_invalid)
-        self.assertEqual(raised.exception.error_code, "gpu_unsupported")
-        save.assert_not_called()
+        probe.assert_not_called()
+        save.assert_called_once_with(unchanged_invalid)
 
     def test_settings_status_rejects_a_gpu_when_onnx_exports_only_cpu(self):
         cuda = types.SimpleNamespace(
@@ -2114,6 +2150,39 @@ class MozarieTests(unittest.TestCase):
             self.assertIn(image_id, state.images)
             self.assertTrue(state.workspace_store.has_image(image_id))
 
+    def test_catalog_remove_succeeds_when_disposable_files_are_locked(self):
+        for locked_kind in ("thumbnail", "import_copy"):
+            with self.subTest(locked_kind=locked_kind):
+                encoded = io.BytesIO()
+                Image.new("RGB", (16, 16), "white").save(encoded, format="PNG")
+                state = self.new_state()
+                images, _imported = import_images_for_test(state, [{
+                    "clientKey": "locked-cleanup", "name": "nested/source.png",
+                    "data": base64.b64encode(encoded.getvalue()).decode("ascii"),
+                }])
+                image_id = images[0]["id"]
+                record = state.image_for_id(image_id)
+                thumbnail = state.cache_dir / "thumbnails" / f"{image_id}-test.jpg"
+                thumbnail.parent.mkdir(parents=True, exist_ok=True)
+                thumbnail.write_bytes(b"thumbnail")
+                locked_path = thumbnail if locked_kind == "thumbnail" else record.path
+                unlink = Path.unlink
+
+                def locked_unlink(path, *args, **kwargs):
+                    if path == locked_path:
+                        raise PermissionError("file is in use")
+                    return unlink(path, *args, **kwargs)
+
+                with patch.object(Path, "unlink", locked_unlink), patch("mozarie.catalog.LOGGER.warning") as warning:
+                    result = state.remove_images_from_catalog([image_id])
+
+                self.assertEqual(result["removedImageIds"], [image_id])
+                self.assertEqual(result["images"], [])
+                self.assertNotIn(image_id, state.images)
+                self.assertFalse(state.workspace_store.has_image(image_id))
+                self.assertTrue(locked_path.exists())
+                warning.assert_called()
+
     def test_remove_image_from_catalog_rejects_active_work(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "source.png"
@@ -2907,7 +2976,6 @@ class MozarieTests(unittest.TestCase):
             completion_lock = threading.Lock()
             record_indexes = {record.image_id: index for index, record in enumerate(records)}
             output_paths = {record.image_id: root / "copies" / f"{index}.png" for index, record in enumerate(records)}
-            written_paths: list[Path] = []
 
             def render_in_inverse_order(record, _mask, _block_size, *_args, **_kwargs):
                 index = record_indexes[record.image_id]
@@ -2932,9 +3000,6 @@ class MozarieTests(unittest.TestCase):
                         completion_order.append(index)
                 return f"rendered-{index}".encode("ascii"), ".png", "image/png"
 
-            def capture_copy(destination, _output):
-                written_paths.append(destination)
-
             def output_destination(record, _suffix, _reserved):
                 return output_paths[record.image_id]
 
@@ -2944,8 +3009,7 @@ class MozarieTests(unittest.TestCase):
                 kwargs={"copy_to_default": True, "saving_parallelism": 2},
             )
             with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory: output_destination(record, suffix, state.reserved_output_paths)), \
-                 patch.object(saving_module, "render_output", side_effect=render_in_inverse_order), \
-                 patch.object(saving_module, "write_rendered_copy", side_effect=capture_copy):
+                 patch.object(saving_module, "render_output", side_effect=render_in_inverse_order):
                 thread.start()
                 self.assertTrue(two_workers_started.wait(2))
                 self.assertEqual(set(started), {0, 1})
@@ -2959,7 +3023,8 @@ class MozarieTests(unittest.TestCase):
             self.assertEqual(state.job.state, "complete")
             self.assertEqual(state.job.completed_image_ids, image_ids)
             self.assertEqual(state.job.outputs, [str(output_paths[record.image_id]) for record in records])
-            self.assertEqual(set(written_paths), set(output_paths.values()))
+            self.assertEqual({Path(path) for path in state.job.outputs}, set(output_paths.values()))
+            self.assertTrue(all(path.is_file() for path in output_paths.values()))
 
     def test_parallel_apply_failure_stops_workers_from_claiming_more_records(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -3669,6 +3734,15 @@ class MozarieTests(unittest.TestCase):
                 state.update_settings(changed_output)
         ready.assert_called_once_with(canonical)
         save.assert_called_once_with(expected_output)
+
+    def test_output_directory_only_update_does_not_probe_an_unchanged_gpu(self):
+        state = self.new_state()
+        with tempfile.TemporaryDirectory() as directory:
+            output = str(Path(directory).resolve())
+            with patch.object(state, "_require_supported_gpu", side_effect=AssertionError("GPU must not be checked")) as probe:
+                settings = state.update_settings({"saving": {"default_output_directory": output}})
+        self.assertEqual(settings["saving"]["default_output_directory"], output)
+        probe.assert_not_called()
 
     def test_output_validation_uses_its_dedicated_user_error_and_does_not_save(self):
         state = self.new_state()
@@ -5185,6 +5259,9 @@ class MozarieTests(unittest.TestCase):
             state = self.new_state()
             state.settings["models"]["provider"] = "cpu"
             first_id = state.set_root(str(first_root))[0]["id"]
+            first_workspace_store = state.workspace_store
+            with first_workspace_store._connect() as db:
+                history_group_count = db.execute("SELECT COUNT(*) FROM history_groups").fetchone()[0]
             original_start_job = state._start_job
 
             def switch_then_start(*args, **kwargs):
@@ -5197,6 +5274,75 @@ class MozarieTests(unittest.TestCase):
 
             self.assertEqual(state.root, second_root.resolve())
             self.assertEqual(state.job.state, "idle")
+            with first_workspace_store._connect() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM history_groups WHERE status='building'").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM history_groups").fetchone()[0], history_group_count)
+
+    def test_detection_start_job_failure_removes_its_empty_history_group(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.png"
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state()
+            state.settings["models"]["provider"] = "cpu"
+            image_id = state.set_root(directory)[0]["id"]
+            self.persist_project(state, "detection-start-failure")
+            with state.workspace_store._connect() as db:
+                history_group_count = db.execute("SELECT COUNT(*) FROM history_groups").fetchone()[0]
+
+            with patch.object(state, "_start_job", side_effect=ClientError("処理中です。", "operation_in_progress")):
+                with self.assertRaisesRegex(ClientError, "処理中です"):
+                    state.start_detection([image_id])
+
+            self.assertEqual(state.job.state, "idle")
+            with state.workspace_store._connect() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM history_groups WHERE status='building'").fetchone()[0], 0)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM history_groups").fetchone()[0], history_group_count)
+
+    def test_thread_start_failure_releases_every_job_gate_and_allows_retry(self):
+        for kind in ("apply", "detect"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                source = Path(directory) / "source.png"
+                Image.new("RGB", (4, 4), "white").save(source)
+                state = self.new_state()
+                cpu_settings = copy.deepcopy(state.settings)
+                cpu_settings["models"]["provider"] = "cpu"
+                state.settings = state.settings_store.save(cpu_settings)
+                image_id = state.set_root(directory)[0]["id"]
+                self.persist_project(state, f"thread-start-{kind}")
+
+                with patch("mozarie.jobs.threading.Thread.start", side_effect=RuntimeError("cannot start new thread")):
+                    with self.assertRaisesRegex(RuntimeError, "cannot start new thread"):
+                        if kind == "apply":
+                            state.start_apply([image_id], 100, {})
+                        else:
+                            state.start_detection([image_id])
+
+                self.assertEqual(state.job.state, "error")
+                self.assertEqual(state.job.error_code, "internal_error")
+                self.assertIsNone(state.worker_thread)
+                self.assertIsNone(state.job_control)
+                self.assertFalse(state._has_active_worker())
+                state.update_settings({"general": {"language": "en"}})
+                self.assertEqual(state.clear_masks([image_id]), 1)
+                image_id = state.set_root(directory)[0]["id"]
+
+                if kind == "apply":
+                    self.assertTrue(state.start_apply([image_id], 100, {}))
+                else:
+                    with patch.object(state, "_ensure_models", return_value=DetectionModels(target=object())), \
+                         patch.object(state, "_detect_image", return_value=[]):
+                        state.start_detection([image_id])
+                        assert state.worker_thread is not None
+                        state.worker_thread.join(2)
+                        self.assertFalse(state.worker_thread.is_alive())
+                        self.assertEqual(state.job.state, "complete")
+                    with state.workspace_store._connect() as db:
+                        self.assertEqual(db.execute("SELECT COUNT(*) FROM history_groups WHERE status='building'").fetchone()[0], 0)
+                    continue
+                assert state.worker_thread is not None
+                state.worker_thread.join(2)
+                self.assertFalse(state.worker_thread.is_alive())
+                self.assertEqual(state.job.state, "complete")
 
     def test_apply_start_rejects_a_catalog_switch_without_touching_old_source(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -5937,7 +6083,13 @@ class MozarieTests(unittest.TestCase):
             )
             self.assertEqual([candidate.candidate_id for candidate in state.candidates[first_id]], ["candidate"])
             self.assertTrue(mask_path.is_file())
-            self.assertEqual(state.manual_workspace(first_id)["add"], manual)
+            restored = state.manual_workspace(first_id)["add"]
+            self.assertTrue(restored.startswith("data:image/png;base64,"))
+            with Image.open(io.BytesIO(base64.b64decode(restored.split(",", 1)[1]))) as normalized, \
+                    Image.open(io.BytesIO(manual_png.getvalue())) as original:
+                normalized_alpha = normalized.getchannel("A") if normalized.mode in {"RGBA", "LA"} else normalized.convert("L")
+                original_alpha = original.getchannel("A") if original.mode in {"RGBA", "LA"} else original.convert("L")
+                self.assertTrue(np.array_equal(np.asarray(normalized_alpha), np.asarray(original_alpha)))
             self.assertFalse(state.manual_workspace(first_id)["manualEnabled"])
             self.assertEqual(state.workspace_store.image_state(first_id), (False, False))
             self.assertEqual(second.read_bytes(), original_second)
@@ -5968,20 +6120,18 @@ class MozarieTests(unittest.TestCase):
             records = [state.image_for_id(image_id) for image_id in (first_id, second_id)]
             state.job = core_module.Job(started_at=time.time(), kind="apply", state="running", total=2, image_ids=(first_id, second_id))
             output = root / "output.png"
-            written: list[Path] = []
-
             def colliding_destination(_record, _suffix, reserved):
                 return output if output not in reserved else root / "output_2.png"
 
-            with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory: colliding_destination(record, suffix, state.reserved_output_paths)), \
-                 patch.object(saving_module, "write_rendered_copy", side_effect=lambda path, _data: written.append(path)):
+            with patch.object(state, "_reserve_output_destination", side_effect=lambda record, suffix, _directory: colliding_destination(record, suffix, state.reserved_output_paths)):
                 state._apply_worker(
                     records, 100, {first_id: np.zeros((16, 16), dtype=np.uint8), second_id: self._mask(16, 16)},
                     copy_to_default=True, saving_parallelism=2,
                 )
 
-            self.assertEqual(state.job.outputs, [str(output), str(output)])
-            self.assertEqual(written, [output, output])
+            self.assertEqual(state.job.outputs[0], str(output))
+            self.assertNotEqual(state.job.outputs[0], state.job.outputs[1])
+            self.assertTrue(all(Path(path).is_file() for path in state.job.outputs))
 
     def test_copy_save_mask_failure_releases_later_destination_reservation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -7962,19 +8112,18 @@ class MozarieTests(unittest.TestCase):
             enumeration_finished = threading.Event()
             original_inspect = catalog_module.inspect_import_image
 
-            def staged_rglob(path, pattern):
+            def staged_walk(path, *, onerror):
                 self.assertTrue(path.samefile(root))
-                self.assertEqual(pattern, "*")
-                yield root / "first.png"
+                yield str(root), [], ["first.png"]
                 self.assertTrue(inspection_started.wait(1), "inspection must begin while enumeration is blocked")
-                yield root / "second.png"
+                yield str(root), [], ["second.png"]
                 enumeration_finished.set()
 
             def tracked_inspect(path, suffix):
                 inspection_started.set()
                 return original_inspect(path, suffix)
 
-            with patch.object(Path, "rglob", autospec=True, side_effect=staged_rglob), \
+            with patch.object(catalog_module.os, "walk", autospec=True, side_effect=staged_walk), \
                     patch.object(catalog_module, "inspect_import_image", side_effect=tracked_inspect):
                 records = state.set_root(str(root))
 
@@ -8087,17 +8236,17 @@ class MozarieTests(unittest.TestCase):
             enumerated = []
             original_inspect = catalog_module.inspect_import_image
 
-            def tracked_rglob(path, pattern):
+            def tracked_walk(path, *, onerror):
                 self.assertTrue(path.samefile(root))
                 for name in names:
                     enumerated.append(name)
-                    yield root / name
+                    yield str(root), [], [name]
 
             def stop_during_first_inspection(path, suffix):
                 state.shutdown_requested.set()
                 return original_inspect(path, suffix)
 
-            with patch.object(Path, "rglob", autospec=True, side_effect=tracked_rglob), \
+            with patch.object(catalog_module.os, "walk", autospec=True, side_effect=tracked_walk), \
                     patch.object(catalog_module, "inspect_import_image", side_effect=stop_during_first_inspection):
                 with self.assertRaises(ClientError) as cancelled:
                     state.set_root(str(root))
@@ -8426,13 +8575,13 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             candidate = Candidate("candidate", "penis", 0.9, mask_path)
             state.candidates[record.image_id] = [candidate]
             revision = state._touch_candidates(record.image_id)
+            state.job = core_module.Job(started_at=time.time(), kind="apply", state="running", total=1, image_ids=(record.image_id,))
 
-            with patch.object(saving_module, "render_output", wraps=saving_module.render_output) as render, \
-                 patch.object(saving_module, "write_rendered_copy") as write_copy:
+            with patch.object(saving_module, "render_output", wraps=saving_module.render_output) as render:
                 state._apply_worker([record], 100, {record.image_id: self._mask(16, 16)}, copy_to_default=True)
-            write_copy.assert_called_once()
             self.assertEqual(render.call_count, 1)
             self.assertEqual(source.read_bytes(), source_bytes)
+            self.assertTrue(Path(state.job.outputs[0]).is_file())
             self.assertEqual(state.candidates[record.image_id], [candidate])
             self.assertEqual(state._candidate_revision(record.image_id), revision)
             self.assertTrue(mask_path.is_file())
@@ -8459,6 +8608,88 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             self.assertEqual(state.candidates[image_id], [candidate])
             self.assertTrue(mask_path.is_file())
             self.assertEqual(list(output.rglob("*.png")), [])
+            self.assertEqual(state._candidate_revision(image_id), revision)
+
+    def test_background_copy_fsync_failure_does_not_publish_or_change_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; output = root / "copies"; output.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            original = source.read_bytes()
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            mask_path = state.cache_dir / image_id / "candidate.png"; mask_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(mask_path)
+            candidate = Candidate("candidate", "penis", .9, mask_path)
+            state.candidates[image_id] = [candidate]; revision = state._touch_candidates(image_id)
+            fsync_calls: list[int] = []
+
+            def fail_fsync(descriptor: int) -> None:
+                fsync_calls.append(descriptor)
+                raise OSError("simulated staging sync failure")
+
+            with patch.object(saving_module.os, "fsync", side_effect=fail_fsync):
+                state._apply_worker([record], 100, {image_id: self._mask(16, 16)}, copy_to_default=True, output_directory=output)
+
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(len(fsync_calls), 1)
+            self.assertEqual(list(output.rglob("*.png")), [])
+            self.assertEqual(source.read_bytes(), original)
+            self.assertEqual(state.candidates[image_id], [candidate])
+            self.assertTrue(mask_path.is_file())
+            self.assertEqual(state._candidate_revision(image_id), revision)
+
+    def test_background_copy_reassigns_when_an_external_file_appears_after_reservation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; output = root / "copies"; output.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            state.job = core_module.Job(started_at=time.time(), kind="apply", state="running", total=1, image_ids=(image_id,))
+            original_publish = state._publish_staged_copy
+            foreign = b"external file created after reservation"
+            appeared = False
+
+            def publish_after_external_reservation(token, staged, destination, fingerprint):
+                nonlocal appeared
+                self.assertEqual(staged.parent, destination.parent / ".mozarie-staging")
+                if not appeared:
+                    appeared = True
+                    destination.write_bytes(foreign)
+                return original_publish(token, staged, destination, fingerprint)
+
+            with patch.object(state, "_publish_staged_copy", side_effect=publish_after_external_reservation):
+                state._apply_worker([record], 100, {image_id: self._mask(16, 16)}, copy_to_default=True, output_directory=output)
+
+            original_destination = output / "source_censored.png"
+            self.assertEqual(state.job.state, "complete")
+            self.assertEqual(original_destination.read_bytes(), foreign)
+            self.assertNotEqual(Path(state.job.outputs[0]), original_destination)
+            self.assertTrue(Path(state.job.outputs[0]).is_file())
+
+    def test_background_copy_database_failure_preserves_an_external_output_replacement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; output = root / "copies"; output.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(str(root))[0]["id"]
+            record = state.image_for_id(image_id)
+            candidate_path = state.cache_dir / image_id / "candidate.png"; candidate_path.parent.mkdir(parents=True, exist_ok=True)
+            Image.fromarray(self._mask(16, 16)).save(candidate_path)
+            candidate = Candidate("candidate", "penis", .9, candidate_path)
+            state.candidates[image_id] = [candidate]; revision = state._touch_candidates(image_id)
+            foreign = b"external replacement before database failure"
+
+            def fail_after_external_replacement(*_args, **_kwargs):
+                published = next(output.rglob("*.png"))
+                published.unlink(); published.write_bytes(foreign)
+                raise OSError("database locked")
+
+            with patch.object(state.workspace_store, "commit_save", side_effect=fail_after_external_replacement):
+                state._apply_worker([record], 100, {image_id: self._mask(16, 16)}, copy_to_default=True, output_directory=output)
+
+            self.assertEqual(state.job.state, "error")
+            self.assertEqual(next(output.rglob("*.png")).read_bytes(), foreign)
+            self.assertEqual(state.candidates[image_id], [candidate])
+            self.assertTrue(candidate_path.is_file())
             self.assertEqual(state._candidate_revision(image_id), revision)
 
     def test_background_overwrite_database_failure_restores_the_journaled_source(self):
@@ -8539,6 +8770,28 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
             state.shutdown()
             recovered = self.new_state()
             self.assertFalse(Path(str(row["quarantine"])).exists())
+            self.assertIsNone(recovered.save_journal.row(token))
+            self.assertEqual(recovered.workspace_store.apply_save_receipts(), [])
+
+    def test_background_copy_receipt_recovers_the_private_stage_at_startup_without_removing_output(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; output = root / "copies"; output.mkdir()
+            Image.new("RGB", (16, 16), "white").save(source)
+            state = self.new_state(); image_id = state.set_root(directory)[0]["id"]
+            record = replace(state.image_for_id(image_id))
+            state.job = core_module.Job(started_at=time.time(), kind="apply", state="running", total=1, image_ids=(image_id,))
+
+            with patch.object(state.save_journal, "recover_token", side_effect=sqlite3.OperationalError("journal locked")):
+                state._apply_worker([record], 100, {image_id: self._mask(16, 16)}, copy_to_default=True, output_directory=output)
+
+            self.assertEqual(state.job.state, "complete")
+            receipt = state.workspace_store.apply_save_receipts()[0]; token = str(receipt["token"])
+            saved = Path(str(receipt["outputPath"])); row = state.save_journal.row(token)
+            self.assertTrue(saved.is_file())
+            self.assertFalse(Path(str(row["staged"])).exists())
+            state.shutdown()
+            recovered = self.new_state()
+            self.assertTrue(saved.is_file())
             self.assertIsNone(recovered.save_journal.row(token))
             self.assertEqual(recovered.workspace_store.apply_save_receipts(), [])
 
@@ -8647,7 +8900,7 @@ image_io._stage_record_replacement(record, rendered, (source.stat().st_mtime_ns,
                 patch.object(state, "_records_for_ids_with_catalog", return_value=([], state.catalog_generation)), \
                 patch.object(state, "_start_job") as start:
             state.start_detection([], .6, 3)
-        self.assertEqual(start.call_args.args[-2], {"penis"})
+        self.assertEqual(start.call_args.args[-3], {"penis"})
 
     def test_detection_worker_cancel_stale_directml_and_outer_error_paths(self):
         state = self.new_state()

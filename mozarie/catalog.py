@@ -27,7 +27,7 @@ from .core import (
     safe_import_relative_path, torch_module,
 )
 from .domain import Candidate, CandidateRole
-from .image_io import _valid_color, decode_draft_masks, draft_manual_exclusion_forced, inspect_import_image, open_image, oriented_image_size, unique_session_import_destination
+from .image_io import _valid_color, decode_draft_masks, draft_manual_exclusion_forced, inspect_import_image, mask_alpha_or_luma, open_image, oriented_image_size, unique_session_import_destination
 from .masks import compose_masks, expand_mask, union_mask
 from .runtime import patch_directml_sam_prompt_encoder, runtime_backend, torch_device
 from .save_journal import SaveJournal
@@ -338,7 +338,11 @@ class CatalogMixin:
                 self._publish_job_snapshot_unchecked()
                 self.catalog_generation += 1
                 self._cancel_manual_uploads_unchecked("画像一覧を切り替えました")
-                session = self._detach_session_unchecked()
+                keep_session = self.session_imports_dir is not None and any(
+                    record.source_kind == "session" and record.path.is_relative_to(self.session_imports_dir)
+                    for record in records
+                )
+                session = (None, None) if keep_session else self._detach_session_unchecked()
             self._clear_cache()
             if prehydrated is None:
                 # Cache cleanup intentionally happens before masks are materialised.
@@ -466,6 +470,7 @@ class CatalogMixin:
         path_queue: Queue[Path | None] = Queue(maxsize=worker_count * 2)
         worker_failure = threading.Event()
         worker_errors: list[Exception] = []
+        scan_interrupted = False
 
         def record_skip(reason: str, path: Path) -> None:
             try:
@@ -541,31 +546,43 @@ class CatalogMixin:
             workers.append(worker)
             worker.start()
 
+        def on_walk_error(exc: OSError) -> None:
+            nonlocal scan_interrupted
+            # Path.rglob suppresses scan errors on newer Python releases.
+            # os.walk exposes them through this callback, so do not silently
+            # replace a catalogue with an incomplete prefix.
+            scan_interrupted = True
+            record_skip("scan_unreadable", Path(exc.filename) if exc.filename else root)
+
         try:
-            for path in root.rglob("*"):
-                if self.shutdown_requested.is_set():
+            for directory, _directories, filenames in os.walk(root, onerror=on_walk_error):
+                if self.shutdown_requested.is_set() or scan_interrupted:
                     break
-                try:
-                    if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+                for filename in filenames:
+                    path = Path(directory) / filename
+                    try:
+                        if path.suffix.lower() not in IMAGE_SUFFIXES:
+                            continue
+                    except OSError:
+                        record_skip("scan_unreadable", path)
                         continue
-                except OSError:
-                    record_skip("scan_unreadable", path)
-                    continue
-                with candidate_count_lock:
-                    candidate_count += 1
-                # Do not start idle threads for a tiny folder. The active
-                # pool grows only to the number of discovered images and the
-                # caller's configured parallelism.
-                if len(workers) < worker_count:
-                    start_scan_worker()
-                while True:
+                    with candidate_count_lock:
+                        candidate_count += 1
+                    # Do not start idle threads for a tiny folder. The active
+                    # pool grows only to the number of discovered images and the
+                    # caller's configured parallelism.
+                    if len(workers) < worker_count:
+                        start_scan_worker()
+                    while True:
+                        if self.shutdown_requested.is_set() or worker_failure.is_set():
+                            break
+                        try:
+                            path_queue.put(path, timeout=0.05)
+                            break
+                        except Full:
+                            continue
                     if self.shutdown_requested.is_set() or worker_failure.is_set():
                         break
-                    try:
-                        path_queue.put(path, timeout=0.05)
-                        break
-                    except Full:
-                        continue
                 if self.shutdown_requested.is_set() or worker_failure.is_set():
                     break
         finally:
@@ -605,6 +622,8 @@ class CatalogMixin:
                 root,
                 "\n".join(f"- {failure['relativePath']} ({failure['reason']})" for failure in sorted(scan_failures, key=lambda item: (item["relativePath"].casefold(), item["relativePath"]))),
             )
+        if scan_interrupted:
+            raise ClientError("指定フォルダーを最後まで読み込めませんでした。", "image_read_failed", {"failures": scan_failures})
         if not candidate_count:
             raise ClientError("指定フォルダーに対応画像がありません。", "image_read_failed")
         if not records:
@@ -628,16 +647,36 @@ class CatalogMixin:
                 raise
         records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path))
         prehydrated: dict[str, tuple[int, list[Candidate]]] | None = None
+        relink_previous_source: dict[str, Any] | None = None
+        relink_previous_project: dict[str, Any] | None = None
+        relink_transform_rollback: list[tuple[str, int, int, int]] = []
+        relink_committed = False
+
+        def rollback_native_relink() -> None:
+            if not relink_committed or relink_previous_source is None or relink_previous_project is None:
+                return
+            self.workspace_store.rollback_native_relink(
+                catalog_id, source_id, relink_previous_source, relink_previous_project, relink_transform_rollback,
+            )
+
         try:
             if created_projectless_stored is not None:
                 stored = created_projectless_stored
             elif staging:
                 stored = self.workspace_store.preview_reconcile_images(catalog_id, source_id, records)
             elif relink_source_id:
+                relink_previous_source = self.workspace_store.native_source(catalog_id, source_id)
+                relink_previous_project = self.workspace_store.project(catalog_id)
+                if relink_previous_project is None:
+                    raise ValueError("project is missing")
                 preview = self.workspace_store.preview_reconcile_images(catalog_id, source_id, records)
                 staged_records, _staged_mismatches = self._apply_source_state(records, preview, source_id, root, keep_unstored=allow_new)
                 prehydrated = self._stage_workspace_candidates(staged_records)
-                stored = self.workspace_store.relink_native_source(catalog_id, source_id, root, records, allow_new=allow_new)
+                stored = self.workspace_store.relink_native_source(
+                    catalog_id, source_id, root, records, allow_new=allow_new,
+                    transform_rollback=relink_transform_rollback,
+                )
+                relink_committed = True
             elif catalog_id is not None:
                 preview = self.workspace_store.preview_reconcile_images(catalog_id, source_id, records)
                 staged_records, _staged_mismatches = self._apply_source_state(records, preview, source_id, root, keep_unstored=allow_new)
@@ -666,7 +705,11 @@ class CatalogMixin:
             if relink_source_id:
                 raise ClientError("元フォルダーを読み込めません。", "project_source_unavailable") from exc
             raise
-        records, source_mismatches = self._apply_source_state(records, stored, source_id, root)
+        try:
+            records, source_mismatches = self._apply_source_state(records, stored, source_id, root)
+        except Exception:
+            rollback_native_relink()
+            raise
         source_image_ids = {record.image_id for record in records}
         if staged_source_mismatches is not None:
             staged_source_mismatches.update(source_mismatches)
@@ -695,9 +738,13 @@ class CatalogMixin:
             records = retained + records
             records.sort(key=lambda record: (record.relative_path.casefold(), record.relative_path, record.image_id))
         try:
-            prehydrated = self._stage_workspace_candidates(records) if catalog_id is not None and prehydrated is None else prehydrated
+            if catalog_id is not None and (
+                prehydrated is None or set(prehydrated) != {record.image_id for record in records}
+            ):
+                prehydrated = self._stage_workspace_candidates(records)
             publish_sources = self.workspace_store.project_sources(catalog_id) if catalog_id is not None else []
         except Exception:
+            rollback_native_relink()
             if created_projectless_id is not None:
                 self.workspace_store.delete_project(created_projectless_id)
             raise
@@ -713,6 +760,7 @@ class CatalogMixin:
                                            publish_source_mismatches=publish_mismatches if catalog_id is not None else None,
                                            publish_sources=publish_sources)
         except Exception:
+            rollback_native_relink()
             if created_projectless_id is not None:
                 self.workspace_store.delete_project(created_projectless_id)
             raise
@@ -1017,7 +1065,7 @@ class CatalogMixin:
                 continue
             try: raw = base64.b64decode(str(candidate["mask"]), validate=True)
             except (KeyError, ValueError, binascii.Error) as exc: raise ClientError("保存済みマスクが正しくありません。", "workspace_write_failed") from exc
-            with open_image(io.BytesIO(raw)) as image: mask = expand_mask(np.asarray(image.convert("L"), dtype=np.uint8), int(candidate.get("expandPx", 0)))
+            with open_image(io.BytesIO(raw)) as image: mask = expand_mask(mask_alpha_or_luma(image), int(candidate.get("expandPx", 0)))
             if mask.shape != shape:
                 raise ValueError("apply mask dimensions do not match the source image" if candidate.get("role") == CandidateRole.APPLY.value else "exclude mask dimensions do not match the source image")
             if candidate.get("role") == CandidateRole.APPLY.value:
@@ -1065,7 +1113,13 @@ class CatalogMixin:
             with open_image(io.BytesIO(raw)) as image:
                 if image.format != "PNG" or image.size != (width, height):
                     raise ValueError("workspace mask is invalid")
-                return np.asarray(image.convert("L"), dtype=np.uint8)
+                if image.mode in {"RGBA", "LA"}:
+                    channel = image.getchannel("A")
+                elif image.mode in {"L", "1"}:
+                    channel = image.convert("L")
+                else:
+                    raise ValueError("workspace mask has no alpha or grayscale channel")
+                return np.asarray(channel.point(lambda value: 255 if value else 0), dtype=np.uint8)
         except (OSError, ValueError) as exc:
             raise ClientError("保存済みマスクが正しくありません。", "workspace_write_failed") from exc
 
@@ -1715,9 +1769,16 @@ class CatalogMixin:
                 for record in records:
                     shutil.rmtree(self.cache_dir / record.image_id, ignore_errors=True)
                 for thumbnail_path in thumbnail_paths:
-                    thumbnail_path.unlink(missing_ok=True)
+                    try:
+                        thumbnail_path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        LOGGER.warning("Could not remove stale thumbnail %s: %s", thumbnail_path, exc)
                 for path in session_paths:
-                    path.unlink(missing_ok=True)
+                    try:
+                        path.unlink(missing_ok=True)
+                    except OSError as exc:
+                        LOGGER.warning("Could not remove stale import copy %s: %s", path, exc)
+                        continue
                     if session_imports_dir is not None:
                         parent = path.parent
                         while parent != session_imports_dir and parent.is_relative_to(session_imports_dir):
@@ -2513,7 +2574,14 @@ class CatalogMixin:
 
     @staticmethod
     def _encode_workspace_mask(value: bytes | None) -> str:
-        return "" if not value else f"data:image/png;base64,{base64.b64encode(value).decode('ascii')}"
+        if value is None:
+            return ""
+        # WorkspaceStore.manual has already opened and validated this PNG. The
+        # browser writes its masks as RGBA, so preserve that common 4K path
+        # without a second Pillow decode/encode; legacy grayscale forms still
+        # pass through the canonical alpha encoder.
+        canonical = value if len(value) >= 26 and value[12:16] == b"IHDR" and value[25] == 6 else WorkspaceStore._encode_png_mask(value)
+        return f"data:image/png;base64,{base64.b64encode(canonical).decode('ascii')}"
 
     def save_manual_workspace(self, image_id: str, payload: dict[str, Any]) -> None:
         self.image_for_id(image_id)
@@ -2832,7 +2900,8 @@ class CatalogMixin:
                             self._commit_candidate_snapshot(image_id, candidates, replace=True)
                     raise StaleMaskError("検出候補は既に更新されています。") from exc
         with open_image(io.BytesIO(raw_mask)) as mask_image:
-            alpha = mask_image.convert("L").point(lambda value: 255 if value else 0)
+            alpha_source = mask_image.getchannel("A") if mask_image.mode in {"RGBA", "LA"} else mask_image.convert("L")
+            alpha = alpha_source.point(lambda value: 255 if value else 0)
             alpha = Image.fromarray(expand_mask(np.asarray(alpha, dtype=np.uint8), candidate.expand_px))
             rgba = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
             rgba.putalpha(alpha)

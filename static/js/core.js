@@ -12,9 +12,9 @@ const state = {
   polygonPoints: [], polygonDragIndex: -1, polygonDraftDrag: null, blinkCandidateIds: new Set(), blinkModes: new Map(), blinkRoleModes: new Map(), blinkPhase: false, blinkTimer: null,
   pointer: null, hover: null, brushCursorGeometry: "", history: [], historyIndex: 0, activeStroke: null, manualStrokePaintFrame: 0, removedCandidateIds: new Set(),
   view: { scale: 1, x: 0, y: 0 }, job: null, saving: false, saveStarting: false, detectionStarting: false, masksClearing: false, transformPending: false,
-  catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, serverCatalogGeneration: null, catalogTransition: null, viewGeneration: 0, historyRestoreBusy: false, workspaceId: null, historyDurable: false, translations: {},
+  catalogMutation: false, imageGeneration: 0, catalogEpoch: 0, serverCatalogGeneration: null, catalogTransition: null, viewGeneration: 0, historyRestoreBusy: false, projectHistoryRefreshTokens: new Map(), workspaceId: null, historyDurable: false, translations: {},
   applyTargetIds: [], applyTargetMode: "masked", applyCatalogSnapshot: null, applyRunning: false, applyFinishing: false, handledApplyStartedAt: null, importing: false, mosaicPreviewEnabled: true, mosaicPreviewGeneration: 0, mosaicWorker: null, mosaicPreviewRequested: false, mosaicWorkerBusy: false, mosaicPending: null, mosaicPreviewRoi: null, mosaicPreviewFull: false, mosaicSourceImage: null, mosaicSourceId: "", mosaicSourcePromise: null, mosaicPreviewFailureReported: false,
-  outputDirectoryPicking: false, singleSave: null,
+  outputDirectoryPicking: false, outputDirectoryCommitPending: false, singleSave: null, applyDialogInitialized: false, singleSaveDialogInitialized: false,
   detectionTargetIds: [], pendingDetectionTargetIds: [], detectCancelRequested: false,
   pageLoadedAt: Date.now() / 1000, handledDetectionStartedAt: null, importSession: null,
   candidateUpdateChains: new Map(), candidateUpdateVersions: new Map(), candidateDeleting: new Set(), candidateBatchPending: new Set(), imageMutationChains: new Map(), candidateControlLocks: new Map(),
@@ -317,8 +317,10 @@ function showProcessing(processing) {
   $("#processingProgress").value = Math.min($("#processingProgress").max, Number(progress) || 0);
   $("#processingProgressText").textContent = progressText(current);
   const cancelling = Boolean(current.cancelRequested || state.detectCancelRequested || state.importSession?.cancelled);
+  const detectionPublicationPending = current.kind === "detect" && current.state === "running"
+    && Number(current.processed) >= Number(current.total);
   $("#processingPauseButton").textContent = t(current.state === "paused" ? "apply.resume" : "apply.pause");
-  $("#processingPauseButton").disabled = current.state === "pausing" || cancelling;
+  $("#processingPauseButton").disabled = current.state === "pausing" || cancelling || detectionPublicationPending;
   $("#processingCancelButton").disabled = cancelling;
   showModalFromInvoker(modal);
 }
@@ -391,7 +393,7 @@ function isBusy() {
   return ["running", "pausing", "paused"].includes(state.job?.state)
     || state.saving || state.saveStarting || state.detectionStarting || state.masksClearing
     || state.processing?.kind === "detect"
-    || state.catalogMutation || state.boundaryPending || state.fillPending || state.projectHistoryBusy || state.historyRestoreBusy;
+    || state.catalogMutation || state.boundaryPending || state.fillPending || state.transformPending || state.outputDirectoryPicking || state.outputDirectoryCommitPending || state.projectHistoryBusy || state.historyRestoreBusy;
 }
 function beginCatalogEpoch() { state.catalogEpoch += 1; return state.catalogEpoch; }
 function isCurrentCatalogEpoch(epoch) { return state.catalogEpoch === epoch; }
@@ -544,7 +546,10 @@ function abortCatalogLoads() {
   state.imageLoadControllers.clear(); state.candidateLoadControllers.clear();
   state.imageInflight.clear(); state.candidateInflight.clear();
 }
-function cancelFillWork() { state.fillWorker?.terminate?.(); state.fillWorker = null; state.fillPending = false; }
+function cancelFillWork() {
+  state.fillWorker?.terminate?.(); state.fillWorker = null; state.fillPending = false;
+  renderCandidates(); updateActionButtons();
+}
 function isGestureActive() { return state.drawing || state.panning || state.boundaryDragging; }
 function imageHasMask(image) { return state.maskStatus.get(image.id) ?? image.hasEffectiveMask === true; }
 function isProcessableImage(image) { return Boolean(image) && !isHidden(image); }
@@ -744,6 +749,17 @@ function canRemoveCurrentImage() {
     && !state.projectOperationPending && !catalogStagingEditsActive() && !currentImageActionPending();
 }
 
+function applyBusyControlLock(controls, busyLocked, confirmDialog) {
+  if (!busyLocked) return;
+  for (const control of controls) {
+    if ((["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning)
+      || (["processingPauseButton", "processingCancelButton"].includes(control.id) && state.processing)
+      || control.id === "errorDialogClose" || (state.saveStarting && confirmDialog.open && confirmDialog.contains(control))) continue;
+    if (!control.disabled) control.dataset.disabledByLock = "true";
+    control.disabled = true;
+  }
+}
+
 function updateActionButtons() {
   const running = isBusy();
   const catalogStaging = catalogStagingEditsActive();
@@ -823,15 +839,7 @@ function updateActionButtons() {
   }
   updateHistoryButtons();
   if (typeof syncFlipControls === "function") syncFlipControls();
-  if (busyLocked) {
-    for (const control of controls) {
-      if ((["applyPauseButton", "applyCancelButton"].includes(control.id) && state.applyRunning)
-        || (["processingPauseButton", "processingCancelButton"].includes(control.id) && state.processing)
-        || control.id === "errorDialogClose" || (state.saveStarting && confirmDialog.open && confirmDialog.contains(control))) continue;
-      if (!control.disabled) control.dataset.disabledByLock = "true";
-      control.disabled = true;
-    }
-  } else if (mutationLocked) {
+  if (mutationLocked) {
     const availableInReadOnly = new Set([
       "projectButton", "projectClose", "projectOpenList", "projectListClose", "projectResume", "projectCloseWorkspace", "projectNew",
       "downloadCurrentMosaicMask", "downloadCurrentExcludeMask",
@@ -857,6 +865,7 @@ function updateActionButtons() {
   syncDetectionActions();
   if (typeof renderProjectCurrent === "function") renderProjectCurrent();
   if (typeof renderProjectTableControls === "function") renderProjectTableControls();
+  applyBusyControlLock([...document.querySelectorAll("button, input, select, textarea")], busyLocked, confirmDialog);
 }
 
 function updateCandidateBatchButtons(hasImage = Boolean(state.currentId && state.currentImage && currentRecord()), mutationLocked = isBusy() || state.importing || state.projectReadOnly || currentRecord()?.sourceDimensionsChanged || state.candidateBatchPending.has(state.currentId), presence, viewLocked = mutationLocked) {
@@ -947,6 +956,9 @@ function resetCatalog(images, root) {
   state.sourceAccess.clear();
   state.projectlessDirectorySources.clear();
   state.missingNativeSources = [];
+  state.galleryFilter.clear(); state.overviewFilter.clear(); state.overviewQuery = "";
+  for (const input of document.querySelectorAll("[data-gallery-filter], [data-overview-filter]")) input.checked = false;
+  $("#overviewQuery").value = "";
   state.reviewRoot = normaliseReviewRoot(root);
   state.overviewFolder = "";
   loadReviewedPaths();

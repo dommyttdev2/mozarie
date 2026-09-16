@@ -260,6 +260,8 @@ function releaseCandidateBitmap(candidateId) {
   state.candidateImages.delete(candidateId);
 }
 
+const CANDIDATE_MASK_DECODE_CONCURRENCY = 4;
+
 function invalidateCandidateBundles(imageId) {
   for (const [key, entry] of state.candidateBundleCache.items) {
     const bundle = entry.value;
@@ -309,10 +311,15 @@ async function loadCandidateBundle(imageId, generation, reconciled = false) {
       if (cached) { record.candidateRevision = revision; return cached; }
       candidateImages = new Map();
       const pendingCandidates = [...candidateData.candidates];
-      const workers = Array.from({ length: pendingCandidates.length }, async () => {
+      const workers = Array.from({ length: Math.min(CANDIDATE_MASK_DECODE_CONCURRENCY, pendingCandidates.length) }, async () => {
         while (pendingCandidates.length) {
           const candidate = pendingCandidates.shift();
-          try { candidateImages.set(candidate.id, await fetchBitmap(maskUrl(imageId, candidate.id, revision), controller.signal)); }
+          let bitmap;
+          try {
+            bitmap = await fetchBitmap(maskUrl(imageId, candidate.id, revision), controller.signal);
+            if (controller.signal.aborted) { closeBitmap(bitmap); throw new DOMException("candidate load aborted", "AbortError"); }
+            candidateImages.set(candidate.id, bitmap);
+          }
           catch (error) { controller.abort(); throw error; }
         }
       });
@@ -857,6 +864,9 @@ function takeMosaicPreviewRequest() {
 
 async function rebuildMosaicPreview() {
   if (!state.mosaicPreviewEnabled || !state.currentImage) return;
+  if (mosaicCanvas.width !== state.currentImage.width || mosaicCanvas.height !== state.currentImage.height) {
+    mosaicCanvas.width = state.currentImage.width; mosaicCanvas.height = state.currentImage.height;
+  }
   if (state.mosaicWorkerBusy) { state.mosaicPending = true; return; }
   const worker = createMosaicWorker(); if (!worker) return;
   state.mosaicWorkerBusy = true;
@@ -878,6 +888,8 @@ async function rebuildMosaicPreview() {
     if (state.mosaicWorker !== worker || !state.mosaicPreviewEnabled) { mask.close?.(); state.mosaicWorkerBusy = false; state.mosaicInFlightSourceId = ""; state.mosaicInFlightGeneration = 0; return; }
     if (state.mosaicPending) {
       mask.close?.(); state.mosaicWorkerBusy = false; state.mosaicInFlightSourceId = ""; state.mosaicInFlightGeneration = 0;
+      if (full) { state.mosaicPreviewFull = true; state.mosaicPreviewRoi = null; }
+      else if (!state.mosaicPreviewFull) state.mosaicPreviewRoi = mergeMosaicPreviewRoi(roi, state.mosaicPreviewRoi);
       state.mosaicPending = false; void rebuildMosaicPreview();
       return;
     }

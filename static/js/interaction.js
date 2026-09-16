@@ -151,7 +151,7 @@ async function clearMasks(imageIds, titleKey, messageKey, expectedImageId = null
     if (!replaced) await refreshWorkspaceImages(refreshed, imageIds, { clearWorkspace: true });
     clearStatus();
   } catch (error) { if (catalogEpoch === null || isCurrentCatalogEpoch(catalogEpoch)) showUserError(error); }
-  finally { state.masksClearing = false; updateActionButtons(); }
+  finally { state.masksClearing = false; renderCandidates(); updateActionButtons(); }
 }
 
 async function clearCatalog() {
@@ -392,7 +392,9 @@ async function recoverPendingBrowserDeletes(pending) {
 }
 
 async function resumePendingSourceDeletes(requestPermission = false) {
-  for (const pending of await pendingSourceDeletes()) {
+  const pendingDeletes = await pendingSourceDeletes();
+  if (!pendingDeletes.length) return;
+  for (const pending of pendingDeletes) {
     try {
       let status;
       try {

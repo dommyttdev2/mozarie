@@ -23,7 +23,7 @@ from PIL import Image, UnidentifiedImageError
 import numpy as np
 
 from .image_io import open_image
-from .masks import compose_masks, expand_mask
+from .masks import compose_masks, expand_mask, union_mask
 
 
 def _chunks(db: sqlite3.Connection, values: list[str], *, reserved_binds: int = 0) -> Iterator[list[str]]:
@@ -380,6 +380,18 @@ class WorkspaceStore:
         raise ValueError("workspace mask has no alpha or grayscale channel")
 
     @classmethod
+    def _encode_png_mask(cls, raw: bytes | None) -> bytes | None:
+        """Return the browser's canonical transparent-white binary PNG mask."""
+        alpha = cls._decode_png_mask(raw)
+        if alpha is None:
+            return None
+        image = Image.new("RGBA", alpha.size, (255, 255, 255, 0))
+        image.putalpha(alpha)
+        output = io.BytesIO()
+        image.save(output, format="PNG")
+        return output.getvalue()
+
+    @classmethod
     def _require_png_mask(cls, raw: bytes | None) -> None:
         if raw is not None:
             cls._decode_png_mask(raw)
@@ -647,7 +659,10 @@ class WorkspaceStore:
         return {"id": str(row["source_id"]), "kind": str(row["kind"]), "displayName": str(row["display_name"]),
                 "nativePath": row["native_path"], "identity": str(row["source_identity"])}
 
-    def relink_native_source(self, catalog_id: str, source_id: str, root: Path, records: list[Any], *, allow_new: bool) -> dict[str, dict[str, Any]]:
+    def relink_native_source(
+        self, catalog_id: str, source_id: str, root: Path, records: list[Any], *, allow_new: bool,
+        transform_rollback: list[tuple[str, int, int, int]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         identity = native_source_identity(root)
         incoming_paths = {str(record.relative_path) for record in records}
         def update_source(db: sqlite3.Connection, now: int) -> None:
@@ -667,7 +682,45 @@ class WorkspaceStore:
             db.execute("""UPDATE project_sources SET display_name=?,native_path=?,source_identity=?
                 WHERE catalog_id=? AND source_id=?""", (root.name or identity, identity, identity, catalog_id, source_id))
             db.execute("UPDATE catalogs SET source_root=?,updated_at=? WHERE catalog_id=?", (identity, now, catalog_id))
-        return self.reconcile_images(catalog_id, records, source_id=source_id, allow_new=allow_new, before_reconcile=update_source)
+        return self.reconcile_images(
+            catalog_id, records, source_id=source_id, allow_new=allow_new,
+            before_reconcile=update_source, transform_rollback=transform_rollback,
+        )
+
+    def rollback_native_relink(
+        self, catalog_id: str, source_id: str, previous_source: dict[str, Any], previous_project: dict[str, Any],
+        transform_rollback: list[tuple[str, int, int, int]],
+    ) -> None:
+        """Restore the durable source metadata when its live publication fails."""
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = db.execute(
+                    """UPDATE project_sources SET display_name=?,native_path=?,source_identity=?
+                       WHERE catalog_id=? AND source_id=? AND kind='native-folder'""",
+                    (
+                        previous_source["displayName"], previous_source["nativePath"], previous_source["identity"],
+                        catalog_id, source_id,
+                    ),
+                )
+                if not cursor.rowcount:
+                    raise ProjectSourceUnavailableError("native project source is missing")
+                db.execute(
+                    "UPDATE catalogs SET source_root=?,updated_at=? WHERE catalog_id=?",
+                    (previous_project["sourceRoot"], previous_project["updatedAt"], catalog_id),
+                )
+                for image_id, source_horizontal, source_vertical, revision in transform_rollback:
+                    cursor = db.execute(
+                        """UPDATE image_transforms SET source_flip_horizontal=?,source_flip_vertical=?,revision=?
+                           WHERE image_id=? AND revision=?""",
+                        (source_horizontal, source_vertical, revision, image_id, revision + 1),
+                    )
+                    if not cursor.rowcount:
+                        raise RuntimeError("native relink transform rollback was superseded")
+                db.execute("COMMIT")
+            except Exception:
+                db.execute("ROLLBACK")
+                raise
 
     def reconcile_native_source(self, catalog_id: str, source_id: str, root: Path, records: list[Any]) -> dict[str, dict[str, Any]]:
         identity = str(root.resolve())
@@ -1156,41 +1209,55 @@ class WorkspaceStore:
         WorkspaceStore._prune_unreferenced_candidates(db, image_id)
 
     def _preserve_resized_workspace_db(self, db: sqlite3.Connection, image_id: str, old_size: tuple[int, int], new_size: tuple[int, int], revision: int) -> None:
-        candidate_rows = db.execute("""SELECT candidates.candidate_id,candidates.mask_png,candidates.enabled,candidates.role,candidates.forced,
+        candidate_rows = db.execute("""SELECT candidates.candidate_id,candidates.enabled,candidates.role,candidates.forced,
             COALESCE(candidate_metadata.expand_px,0) AS expand_px FROM candidates
             LEFT JOIN candidate_metadata USING(image_id,candidate_id) WHERE candidates.image_id=? AND candidates.deleted=0""", (image_id,)).fetchall()
         manual = db.execute("SELECT * FROM manual_edits WHERE image_id=?", (image_id,)).fetchone()
         max_expand = int(np.ceil(np.hypot(new_size[0] - 1, new_size[1] - 1)))
-        candidates: list[tuple[sqlite3.Row, np.ndarray, int]] = []
+        if manual is not None:
+            try:
+                removed = json.loads(str(manual["removed_candidate_ids"]))
+            except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                raise ValueError("workspace removed candidates are invalid") from exc
+            if not isinstance(removed, list) or any(not isinstance(candidate_id, str) for candidate_id in removed):
+                raise ValueError("workspace removed candidates are invalid")
+        else:
+            removed = []
+        candidate_ids = {str(row["candidate_id"]) for row in candidate_rows}
+        removed_ids = set(removed) & candidate_ids
+        apply_union: np.ndarray | None = None
+        exclude_union: np.ndarray | None = None
+        forced_exclude_union: np.ndarray | None = None
         for row in candidate_rows:
-            raw, mask = self._resize_binary_mask(row["mask_png"], old_size, new_size)
+            stored = db.execute("SELECT mask_png FROM candidates WHERE image_id=? AND candidate_id=?", (image_id, row["candidate_id"])).fetchone()
+            if stored is None:
+                raise ValueError("workspace candidate is missing")
+            raw, mask = self._resize_binary_mask(stored["mask_png"], old_size, new_size)
             assert raw is not None and mask is not None
             expand_px = min(int(row["expand_px"]), max_expand)
             db.execute("UPDATE candidates SET mask_png=? WHERE image_id=? AND candidate_id=?", (raw, image_id, row["candidate_id"]))
             db.execute("""INSERT INTO candidate_metadata(image_id,candidate_id,expand_px) VALUES(?,?,?)
                 ON CONFLICT(image_id,candidate_id) DO UPDATE SET expand_px=excluded.expand_px""", (image_id, row["candidate_id"], expand_px))
-            candidates.append((row, expand_mask(mask, expand_px), expand_px))
+            if manual is None or not row["enabled"] or row["candidate_id"] in removed_ids:
+                continue
+            expanded = expand_mask(mask, expand_px)
+            if row["role"] == "apply":
+                apply_union = union_mask(apply_union, expanded)
+            else:
+                exclude_union = union_mask(exclude_union, expanded)
+                if row["forced"]:
+                    forced_exclude_union = union_mask(forced_exclude_union, expanded)
         if manual is None:
             self._reset_image_history_db(db, image_id)
             return
         add_raw, add = self._resize_binary_mask(manual["add_png"], old_size, new_size)
         exclusion_raw, exclusion = self._resize_binary_mask(manual["exclusion_png"], old_size, new_size)
         erase_raw, erase = self._resize_binary_mask(manual["exclusion_erase_png"], old_size, new_size)
-        try:
-            removed = json.loads(str(manual["removed_candidate_ids"]))
-        except (TypeError, ValueError, json.JSONDecodeError) as exc:
-            raise ValueError("workspace removed candidates are invalid") from exc
-        if not isinstance(removed, list) or any(not isinstance(candidate_id, str) for candidate_id in removed):
-            raise ValueError("workspace removed candidates are invalid")
-        removed_ids = set(removed) & {str(row["candidate_id"]) for row, _mask, _expand in candidates}
-        apply_masks = [mask for row, mask, _expand in candidates if row["enabled"] and row["role"] == "apply" and row["candidate_id"] not in removed_ids]
-        exclude_masks = [mask for row, mask, _expand in candidates if row["enabled"] and row["role"] != "apply" and row["candidate_id"] not in removed_ids]
-        forced_exclude_masks = [mask for row, mask, _expand in candidates if row["enabled"] and row["role"] != "apply" and row["forced"] and row["candidate_id"] not in removed_ids]
         effective = bool(np.any(compose_masks(
-            (new_size[1], new_size[0]), apply_masks, exclude_masks,
+            (new_size[1], new_size[0]), [apply_union] if apply_union is not None else [], [exclude_union] if exclude_union is not None else [],
             add if manual["manual_enabled"] else None,
             exclusion if manual["exclusion_enabled"] else None,
-            forced_exclude_masks, bool(manual["exclusion_forced"]),
+            [forced_exclude_union] if forced_exclude_union is not None else [], bool(manual["exclusion_forced"]),
             erase if manual["exclusion_erase_enabled"] else None,
         )))
         db.execute("""UPDATE manual_edits SET add_png=?,exclusion_png=?,exclusion_erase_png=?,removed_candidate_ids=?,candidate_revision=?,has_effective_mask=?,updated_at=?
@@ -1567,6 +1634,7 @@ class WorkspaceStore:
                 raise
 
     def commit_save(self, image_id: str, *, mtime_ns: int | None = None, size_bytes: int | None = None,
+                    relative_path: str | None = None,
                     candidate_revision: int | None = None,
                     clear_workspace: bool, delete_image: bool = False,
                     source_flip_horizontal: bool | None = None, source_flip_vertical: bool | None = None,
@@ -1580,7 +1648,10 @@ class WorkspaceStore:
                 if delete_image:
                     db.execute("DELETE FROM images WHERE image_id=?", (image_id,))
                 elif mtime_ns is not None and size_bytes is not None:
-                    db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, time.time_ns(), image_id))
+                    if relative_path is None:
+                        db.execute("UPDATE images SET mtime_ns=?,size_bytes=?,updated_at=? WHERE image_id=?", (mtime_ns, size_bytes, time.time_ns(), image_id))
+                    else:
+                        db.execute("UPDATE images SET relative_path=?,mtime_ns=?,size_bytes=?,updated_at=? WHERE image_id=?", (relative_path, mtime_ns, size_bytes, time.time_ns(), image_id))
                 if candidate_revision is not None and not delete_image:
                     db.execute("UPDATE images SET candidate_revision=?,reviewed=0,updated_at=? WHERE image_id=?", (candidate_revision, time.time_ns(), image_id))
                 if source_flip_horizontal is not None and source_flip_vertical is not None and not delete_image:
@@ -2100,15 +2171,15 @@ class WorkspaceStore:
     def _history_json(state: dict[str, Any]) -> str:
         return json.dumps(WorkspaceStore._history_public_state(state), ensure_ascii=False, separators=(",", ":"), sort_keys=True)
 
-    @staticmethod
-    def _manual_xor(before: bytes | None, after: bytes | None, roi: tuple[int, int, int, int] | None = None) -> dict[str, Any] | None:
+    @classmethod
+    def _manual_xor(cls, before: bytes | None, after: bytes | None, roi: tuple[int, int, int, int] | None = None) -> dict[str, Any] | None:
         """Encode only the changed rectangle of a binary manual layer."""
         if before is None and after is None: return None
         if before == after: return None
         try:
-            source = before if before is not None else after
+            source = cls._decode_png_mask(before if before is not None else after)
             assert source is not None
-            with open_image(io.BytesIO(source)) as image: width, height = image.size
+            width, height = source.size
             if roi is None:
                 left, top, right, bottom = 0, 0, width, height
             else:
@@ -2117,10 +2188,11 @@ class WorkspaceStore:
                     raise ValueError("workspace manual dirty region is invalid")
             def pixels(raw: bytes | None) -> np.ndarray:
                 if raw is None: return np.zeros((bottom - top, right - left), dtype=np.uint8)
-                with open_image(io.BytesIO(raw)) as image:
-                    if image.size != (width, height):
-                        raise ValueError("workspace manual mask dimensions are invalid")
-                    return np.asarray(image.crop((left, top, right, bottom)).convert("L"), dtype=np.uint8) > 0
+                image = cls._decode_png_mask(raw)
+                assert image is not None
+                if image.size != (width, height):
+                    raise ValueError("workspace manual mask dimensions are invalid")
+                return np.asarray(image.crop((left, top, right, bottom)), dtype=np.uint8) > 0
             changed = np.logical_xor(pixels(before), pixels(after))
             ys, xs = np.where(changed)
             if not len(xs): return {"existsBefore": before is not None, "existsAfter": after is not None, "box": None}
@@ -2137,8 +2209,8 @@ class WorkspaceStore:
         old = before.get("_manual_raw") or {}; new = after.get("_manual_raw") or {}
         return {key: value for key in ("add", "exclusion", "erase") if (value := cls._manual_xor(old.get(key), new.get(key), (rois or {}).get(key))) is not None}
 
-    @staticmethod
-    def _apply_manual_xor(raw: bytes | None, change: dict[str, Any], *, forward: bool) -> bytes | None:
+    @classmethod
+    def _apply_manual_xor(cls, raw: bytes | None, change: dict[str, Any], *, forward: bool) -> bytes | None:
         target_exists = bool(change["existsAfter"] if forward else change["existsBefore"])
         box = change.get("box")
         if box is None: return raw if target_exists else None
@@ -2153,19 +2225,24 @@ class WorkspaceStore:
         try:
             if raw is None: canvas = np.zeros((height, width), dtype=np.uint8)
             else:
-                with open_image(io.BytesIO(raw)) as image:
-                    if image.size != (width, height):
-                        raise ValueError("workspace history is invalid")
-                    canvas = (np.asarray(image.convert("L"), dtype=np.uint8) > 0).astype(np.uint8) * 255
-            delta = WorkspaceStore._unpack_blob(encoded)
-            WorkspaceStore._require_png_mask(delta)
+                image = cls._decode_png_mask(raw)
+                assert image is not None
+                if image.size != (width, height):
+                    raise ValueError("workspace history is invalid")
+                canvas = (np.asarray(image, dtype=np.uint8) > 0).astype(np.uint8) * 255
+            delta = cls._unpack_blob(encoded)
+            cls._require_png_mask(delta)
             assert delta is not None
-            with open_image(io.BytesIO(delta)) as image: region = (np.asarray(image.convert("L"), dtype=np.uint8) > 0)
+            image = cls._decode_png_mask(delta)
+            assert image is not None
+            region = np.asarray(image, dtype=np.uint8) > 0
             if region.shape != (box_height, box_width):
                 raise ValueError("workspace history is invalid")
             canvas[top:top + box_height, left:left + box_width] ^= region.astype(np.uint8) * 255
             if not target_exists: return None
-            output = io.BytesIO(); Image.fromarray(canvas).save(output, format="PNG"); return output.getvalue()
+            image = Image.new("RGBA", (width, height), (255, 255, 255, 0))
+            image.putalpha(Image.fromarray(canvas))
+            output = io.BytesIO(); image.save(output, format="PNG"); return output.getvalue()
         except (MemoryError, OSError, UnidentifiedImageError) as exc:
             raise ValueError("workspace history mask cannot be decoded") from exc
 
