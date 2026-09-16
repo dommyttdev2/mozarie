@@ -26,7 +26,7 @@ from .core import (
 )
 from . import state as state_module
 from .state import STATE, StudioState
-from .image_io import _decode_mask, _valid_color, calculate_block_size, inference_device_name, open_image_without_png_text, parse_png_chunks
+from .image_io import IMAGE_DECODE_ERRORS, _decode_mask, _valid_color, calculate_block_size, inference_device_name, open_image_without_png_text, parse_png_chunks
 from .model_downloads import ModelDownloadError, ModelDownloadInProgress
 from .config import SettingsError, validate_output_directory_ready
 
@@ -1247,7 +1247,9 @@ class MosaicHandler(BaseHTTPRequestHandler):
                             raise ClientError("画像は更新されています。もう一度読み込んでください。", "stale_asset")
                     os.replace(temporary_path, thumbnail_path)
                     temporary_path = None
-                except (MemoryError, OSError) as exc:
+                except ClientError:
+                    raise
+                except IMAGE_DECODE_ERRORS as exc:
                     raise ClientError("サムネイルを作成できませんでした。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
                 finally:
                     if temporary_path is not None:

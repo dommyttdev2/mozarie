@@ -534,7 +534,7 @@ def arbitrate_segment_sources(segments: list[dict[str, Any]]) -> list[dict[str, 
     accepted: list[dict[str, Any]] = []
     for segment in ordered:
         segment["_consensus_sources"] = frozenset({str(segment["source"])})
-        duplicate = False
+        matching: list[dict[str, Any]] = []
         for winner in accepted:
             if winner["source"] == segment["source"]:
                 continue
@@ -543,12 +543,25 @@ def arbitrate_segment_sources(segments: list[dict[str, Any]]) -> list[dict[str, 
             else:
                 iou_threshold, containment_threshold = 0.75, 0.95
             if segment_overlaps(winner, segment, iou_threshold, containment_threshold):
-                winner["_consensus_sources"] = (
-                    frozenset(winner.get("_consensus_sources", {str(winner["source"])}))
-                    | segment["_consensus_sources"]
-                )
-                duplicate = True
-        if not duplicate:
+                matching.append(winner)
+        if matching:
+            # A broad auxiliary mask can overlap separate targets.  It is
+            # evidence for its closest duplicate only, never for every target
+            # it happens to cover.
+            winner = max(
+                enumerate(matching),
+                key=lambda item: (
+                    mask_iou(item[1]["mask"], segment["mask"]),
+                    mask_containment(item[1]["mask"], segment["mask"]),
+                    _segment_rank(item[1]),
+                    -item[0],
+                ),
+            )[1]
+            winner["_consensus_sources"] = (
+                frozenset(winner.get("_consensus_sources", {str(winner["source"])}))
+                | segment["_consensus_sources"]
+            )
+        else:
             accepted.append(segment)
     return accepted
 

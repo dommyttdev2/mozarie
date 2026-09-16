@@ -28,6 +28,10 @@ from .save_journal import SaveJournal
 _IMAGE_OPEN_LOCK = threading.RLock()
 _IMAGE_OPEN_DEPTH = 0
 _IMAGE_OPEN_PREVIOUS_LIMIT: int | None = None
+IMAGE_DECODE_ERRORS = (
+    MemoryError, OSError, RuntimeError, ValueError, SyntaxError,
+    UnidentifiedImageError, Image.DecompressionBombError, Image.DecompressionBombWarning,
+)
 
 
 @contextmanager
@@ -307,21 +311,27 @@ def open_image_without_png_text(path: Path, raw: bytes | None = None):
 
 
 def inspect_import_image(path: Path, expected_suffix: str) -> tuple[int, int]:
-    """Validate an input image without decoding its complete pixel payload."""
+    """Validate an input image completely before publishing it to the catalogue."""
     try:
         with open_image_without_png_text(path) as image:
             _assert_image_suffix_matches_format(expected_suffix, image.format)
             size = oriented_image_size(image)
         with open_image_without_png_text(path) as image:
             image.verify()
+        with open_image_without_png_text(path) as image:
+            _assert_image_suffix_matches_format(expected_suffix, image.format)
+            image.load()
+            if oriented_image_size(image) != size:
+                raise OSError("image dimensions changed while decoding")
         if expected_suffix.lower() in {".jpg", ".jpeg"}:
             with path.open("rb") as source:
                 source.seek(-2, os.SEEK_END)
                 if source.read() != b"\xff\xd9":
                     raise OSError("truncated JPEG")
         return size
-    except (MemoryError, OSError, RuntimeError, ValueError, SyntaxError, UnidentifiedImageError,
-            Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+    except ClientError:
+        raise
+    except IMAGE_DECODE_ERRORS as exc:
         raise ClientError("追加画像を読み込めません。", "image_read_failed") from exc
 
 
@@ -579,7 +589,9 @@ def canonical_image(record: ImageRecord, source: bytes | None = None) -> tuple[I
             image.load()
             normalized = ImageOps.exif_transpose(image)
             info = dict(image.info)
-    except (MemoryError, OSError) as exc:
+    except ClientError:
+        raise
+    except IMAGE_DECODE_ERRORS as exc:
         raise ClientError("元画像を読み込めません。画像ファイルと使用可能なメモリを確認してください。", "image_read_failed") from exc
     if "exif" in info:
         info["exif"] = _normalized_exif_bytes(raw)

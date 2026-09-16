@@ -339,6 +339,22 @@ class HttpBoundaryCoverageTests(unittest.TestCase):
                 request._stream_file(stream, None, "text/plain", "no-store")
             self.assertTrue(request.close_connection)
 
+    def test_thumbnail_normalizes_pillow_decode_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); source = root / "source.png"; Image.new("RGB", (8, 8), "white").save(source)
+            record = ImageRecord("image", source, "source.png", 8, 8, source.stat().st_mtime_ns, source.stat().st_size)
+            state = SimpleNamespace(
+                cache_dir=root / "cache", images={"image": record}, lock=threading.RLock(),
+                thumbnail_gate=threading.RLock(), image_io_lock=lambda _id: contextlib.nullcontext(),
+                thumbnail_generation_lock=lambda _id: contextlib.nullcontext(), image_snapshot=lambda _id: record,
+                _assert_record_stat_matches=lambda _record: None, asset_version=lambda _record: "v1",
+            )
+            request = handler(); request._stream_file = Mock()
+            with patch.object(http_module, "STATE", state), patch.object(http_module, "open_image_without_png_text", side_effect=SyntaxError("bad pixels")):
+                with self.assertRaises(ClientError) as raised:
+                    request._send_image("image", thumbnail=True, version="v1")
+            self.assertEqual(raised.exception.error_code, "image_read_failed")
+
     def test_missing_candidate_mask_is_stale_not_a_server_error(self) -> None:
         request = handler(); state = SimpleNamespace(lock=threading.RLock(), images={})
         with patch.object(http_module, "STATE", state):

@@ -2,25 +2,54 @@ import io
 import tempfile
 import threading
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
 from PIL import Image, PngImagePlugin
 
-from mozarie.core import ClientError
-from mozarie.image_io import inspect_import_image, open_image
+from mozarie.core import ClientError, ImageRecord
+from mozarie.image_io import canonical_image, inspect_import_image, open_image
 
 
 class InputImageValidationTests(unittest.TestCase):
-    def test_truncated_jpeg_is_rejected_without_pixel_decode(self):
+    def test_truncated_jpeg_is_rejected(self):
         output = io.BytesIO()
         Image.new("RGB", (4, 4), "white").save(output, format="JPEG")
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "truncated.jpg"
             path.write_bytes(output.getvalue()[:-2])
-            with mock.patch.object(Image.Image, "load", side_effect=AssertionError("input validation must not decode pixels")):
-                with self.assertRaises(ClientError):
-                    inspect_import_image(path, ".jpg")
+            with self.assertRaises(ClientError):
+                inspect_import_image(path, ".jpg")
+
+    def test_verify_passes_but_pixel_decode_failure_is_rejected(self):
+        """PNG chunk checks alone do not prove that the compressed pixels decode."""
+        output = io.BytesIO()
+        pixels = np.random.default_rng(3).integers(0, 256, (64, 64, 3), dtype=np.uint8)
+        Image.fromarray(pixels).save(output, format="PNG")
+        raw = output.getvalue()
+        corrupted = bytearray(raw[:8])
+        position = 8
+        while position < len(raw):
+            length = int.from_bytes(raw[position:position + 4], "big")
+            chunk_type = raw[position + 4:position + 8]
+            chunk = raw[position + 8:position + 8 + length]
+            if chunk_type == b"IDAT":
+                chunk = chunk[:-5]
+            corrupted.extend(len(chunk).to_bytes(4, "big"))
+            corrupted.extend(chunk_type)
+            corrupted.extend(chunk)
+            corrupted.extend((zlib.crc32(chunk_type + chunk) & 0xffffffff).to_bytes(4, "big"))
+            position += length + 12
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "decode-failure.png"
+            path.write_bytes(corrupted)
+            with open_image(path) as image:
+                image.verify()
+            with self.assertRaises(ClientError) as raised:
+                inspect_import_image(path, ".png")
+            self.assertEqual(raised.exception.error_code, "image_read_failed")
 
     def test_pillow_pixel_guard_is_disabled_only_while_opening(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -64,6 +93,17 @@ class InputImageValidationTests(unittest.TestCase):
             path.write_bytes(b"not an image")
             with self.assertRaises(ClientError) as raised:
                 inspect_import_image(path, ".png")
+            self.assertEqual(raised.exception.error_code, "image_read_failed")
+
+    def test_canonical_image_normalizes_pillow_decode_errors(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "source.png"
+            Image.new("RGB", (2, 2), "white").save(path)
+            stat = path.stat()
+            record = ImageRecord("source", path, path.name, 2, 2, stat.st_mtime_ns, stat.st_size)
+            with mock.patch("mozarie.image_io.open_image_without_png_text", side_effect=SyntaxError("bad pixels")):
+                with self.assertRaises(ClientError) as raised:
+                    canonical_image(record)
             self.assertEqual(raised.exception.error_code, "image_read_failed")
 
     def test_png_with_large_text_metadata_is_inspected_from_pixels(self):
