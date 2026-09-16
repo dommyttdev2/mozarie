@@ -22,7 +22,7 @@ from .core import (
 )
 from .config import SettingsError, SettingsStore, validate_output_directory_ready
 from .runtime_types import DetectionModels
-from .runtime import directml_devices, runtime_backend
+from .runtime import directml_devices, onnx_execution_status, runtime_backend
 from .catalog import CatalogMixin
 from .saving import SavingMixin
 from .detection import DetectionMixin
@@ -73,8 +73,8 @@ def cuda_device_statuses(torch: Any) -> list[dict[str, object]]:
     return devices
 
 
-def gpu_device_statuses(torch: Any) -> list[dict[str, object]]:
-    backend = runtime_backend(torch_module=torch)
+def gpu_device_statuses(torch: Any, *, backend: str | None = None) -> list[dict[str, object]]:
+    backend = backend or runtime_backend(torch_module=torch)
     if backend == "directml":
         try:
             return directml_devices()
@@ -268,12 +268,18 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
     def _gpu_selection_error() -> ClientError:
         return ClientError("選択したGPUは使用できません。対応しているGPUを選ぶか、CPUへ切り替えてください。", "gpu_unsupported")
 
-    def _require_supported_gpu(self, models: dict[str, Any] | None = None) -> None:
+    def _require_supported_gpu(self, models: dict[str, Any] | None = None, *, require_runtime: bool = True) -> None:
         models = models or self.settings["models"]
         if models["provider"] != "gpu":
             return
+        backend, runtime_ready = onnx_execution_status()
+        if require_runtime and (backend not in {"cuda", "directml"} or not runtime_ready):
+            raise ClientError(
+                "選択したGPU用のONNX Runtimeを開始できません。Mozarieを再セットアップしてください。",
+                "gpu_runtime_unavailable",
+            )
         selected_gpu = next(
-            (gpu for gpu in gpu_device_statuses(torch_module()) if gpu["id"] == models["gpu_device"]),
+            (gpu for gpu in gpu_device_statuses(torch_module(), backend=backend) if gpu["id"] == models["gpu_device"]),
             None,
         )
         if not selected_gpu or not selected_gpu["supported"]:
@@ -287,7 +293,7 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 if self.active_import_count or self.job.state in {"running", "pausing", "paused"} or self._has_active_worker():
                     raise ClientError("処理中はGPU推論を確認できません。", "operation_in_progress")
                 models = dict(self.settings["models"])
-            self._require_supported_gpu(models)
+            self._require_supported_gpu(models, require_runtime=False)
             try:
                 return diagnose_runtime("gpu", int(models.get("gpu_device", 0)))
             except ClientError:
@@ -711,10 +717,13 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
                 "reasonCode": reason_code,
             }
         torch = torch_module()
-        backend = runtime_backend(torch_module=torch)
-        gpus = gpu_device_statuses(torch)
+        backend, runtime_ready = onnx_execution_status()
+        gpus = gpu_device_statuses(torch, backend=backend)
         selected_gpu = next((gpu for gpu in gpus if gpu["id"] == models.get("gpu_device", 0)), None)
-        gpu_device_valid = models["provider"] != "gpu" or bool(selected_gpu and selected_gpu["supported"])
+        gpu_device_valid = models["provider"] != "gpu" or bool(runtime_ready and backend in {"cuda", "directml"} and selected_gpu and selected_gpu["supported"])
+        gpu_reason = None
+        if not gpu_device_valid:
+            gpu_reason = "gpu_runtime_unavailable" if not runtime_ready or backend not in {"cuda", "directml"} else "gpu_unsupported"
         return {
             "models": result,
             "provider": models["provider"],
@@ -722,9 +731,10 @@ class StudioState(CatalogMixin, SavingMixin, DetectionMixin, JobsMixin):
             "samVariants": sam_variants,
             "gpus": gpus,
             "runtimeBackend": backend,
+            "runtimeReady": runtime_ready,
             "gpuDevice": models.get("gpu_device", 0),
             "gpuDeviceValid": gpu_device_valid,
-            "gpuDeviceReasonCode": None if gpu_device_valid else "gpu_unsupported",
+            "gpuDeviceReasonCode": gpu_reason,
         }
 
     def preview_settings_status(self, update: dict[str, Any]) -> dict[str, Any]:

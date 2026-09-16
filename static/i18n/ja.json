@@ -407,6 +407,7 @@
   "settings.modelStatus.invalid_format": "指定したモデルファイルの形式が正しくありません。",
   "settings.modelStatus.invalid_model": "指定したモデルファイルは対応していません。",
   "settings.gpuUnsupported": "このPyTorchでは非対応",
+  "settings.gpuRuntimeUnavailable": "このGPU用のONNX Runtimeを開始できません。Mozarieを再セットアップしてください。",
   "settings.gpuUnavailable": "利用できません",
   "modelHelp.samTable.model": "モデル",
   "modelHelp.samTable.speed": "速度",

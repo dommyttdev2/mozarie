@@ -131,7 +131,8 @@ GPUを使う場合は、**設定 > 検出**で選択します。GPUが対応し�
 依存関係を準備して、バックエンドとフロントエンドのテストを実行します。
 
 ```powershell
-& ".\.venv\Scripts\python.exe" -m pip install -r requirements-test.txt
+py -3.12 -m venv .venv-test
+& ".\.venv-test\Scripts\python.exe" -m pip install -r requirements-test.txt
 npm ci
 node scripts/test-quiet.cjs all
 ```

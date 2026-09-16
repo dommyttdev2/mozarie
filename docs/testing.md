@@ -28,6 +28,8 @@ AIには対象の利用者観測を一つずつ示し、初期状態、操作、
 
 `tests/` 配下の `test_*.cjs` は再帰的に同じ順序で通常実行とcoverageへ渡す。`test_gallery_performance_e2e.cjs`だけはcoverageから外し、`test-quiet` の `frontend` と `all` がcoverage成功後に非instrumentedで1回実行する。Nodeの構造化テスト結果でSKIP/TODOが一件でも報告された実行は失敗にする。Windows専用のPython試験はWindows CIで実行するため、backendもskip 0件を要求する。
 
+Pythonの自動テストは製品の`.venv`を参照・変更しない。リポジトリ直下に`.venv-test`を作成し、`requirements-test.txt`だけを入れて`node scripts/test-quiet.cjs`を実行する。別の隔離環境を使う場合は`MOZARIE_TEST_PYTHON`へそのPython実行ファイルを指定する。製品`.venv`配下は指定できない。
+
 ## 回帰境界
 
 次の境界が変わるときは、成功だけでなく失敗後の状態も検証する。

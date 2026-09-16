@@ -20,6 +20,11 @@ if not defined MOZARIE_RUNTIME (
   popd
   if not defined MOZARIE_RUNTIME goto :setup_required
 )
+pushd "%APP_DIR%"
+"%PYTHON%" -m mozarie.runtime_profile preflight "%MOZARIE_RUNTIME%" --venv "%APP_DIR%.venv" --require-installed
+set "RUNTIME_CHECK=%ERRORLEVEL%"
+popd
+if not "%RUNTIME_CHECK%"=="0" goto :runtime_invalid
 :start
 echo [Mozarie] Preparing Mozarie... / Mozarieを準備しています...
 "%PYTHON%" "%APP_DIR%server.py"
@@ -35,6 +40,11 @@ exit /b %ERRORLEVEL%
 
 :setup_required
 echo [Mozarie] Initial setup is required. Run setup.bat once, then start with run.bat. / 初回セットアップが必要です。setup.batを一度実行してから、run.batを起動してください。
+pause
+exit /b 1
+
+:runtime_invalid
+echo [Mozarie] The selected ONNX Runtime is inconsistent. Mozarie did not start. Run setup.bat again to repair it. / 選択したONNX Runtimeの状態が一致しないため、Mozarieは起動しませんでした。setup.batを再実行して修復してください。
 pause
 exit /b 1
 

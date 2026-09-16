@@ -149,10 +149,20 @@ async function requiredCommand(label, command, args, options) {
 
 function temporaryDirectory() { return fs.mkdtempSync(path.join(os.tmpdir(), "mozarie-test-")); }
 
-function pythonExecutable() {
-  if (process.env.MOZARIE_PYTHON) return process.env.MOZARIE_PYTHON;
-  const virtualEnvironment = process.platform === "win32" ? path.join(root, ".venv", "Scripts", "python.exe") : path.join(root, ".venv", "bin", "python");
-  return fs.existsSync(virtualEnvironment) ? virtualEnvironment : "python";
+function testPythonExecutable(environment = process.env) {
+  const configured = environment.MOZARIE_TEST_PYTHON;
+  const productEnvironment = path.resolve(root, ".venv");
+  const executable = configured || (process.platform === "win32"
+    ? path.join(root, ".venv-test", "Scripts", "python.exe")
+    : path.join(root, ".venv-test", "bin", "python"));
+  const resolved = path.resolve(executable);
+  if (resolved === productEnvironment || resolved.startsWith(`${productEnvironment}${path.sep}`)) {
+    throw new Error("MOZARIE_TEST_PYTHON must not point into the product .venv");
+  }
+  if (!fs.existsSync(resolved)) {
+    throw new Error(`Dedicated test Python was not found: ${resolved}. Create .venv-test and install requirements-test.txt, or set MOZARIE_TEST_PYTHON.`);
+  }
+  return resolved;
 }
 
 function backendEnvironment(temporaryRoot, coverageFile) {
@@ -209,7 +219,7 @@ async function runBackend(temporaryRoot, artifacts) {
   const coverageFile = path.join(directory, ".coverage");
   const coverageXml = path.join(directory, "coverage.xml");
   const env = backendEnvironment(temporaryRoot, coverageFile);
-  const python = pythonExecutable();
+  const python = testPythonExecutable(env);
   const tests = await requiredCommand("backend tests", python, ["-m", "coverage", "run", "-m", "unittest", "discover", "-s", "tests", "-t", "."], { env });
   assertNoSkippedUnittestTests(tests);
   await requiredCommand("backend coverage", python, ["-m", "coverage", "report"], { env });
@@ -266,4 +276,4 @@ async function main(argv = process.argv.slice(2)) {
 
 if (require.main === module) main().catch((error) => { console.error(error.message || error); process.exitCode = 1; });
 
-module.exports = { artifactDirectory, backendEnvironment, coverageRates, diagnostic, parseArguments, performanceEnvironment, requiredCommand, runCommand, runFrontend, runSuites, temporaryDirectory, testCount, verifyBackendCoverage, workspaceArtifacts };
+module.exports = { artifactDirectory, backendEnvironment, coverageRates, diagnostic, parseArguments, performanceEnvironment, requiredCommand, runCommand, runFrontend, runSuites, temporaryDirectory, testCount, testPythonExecutable, verifyBackendCoverage, workspaceArtifacts };

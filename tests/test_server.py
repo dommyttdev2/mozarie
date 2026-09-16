@@ -1101,12 +1101,14 @@ class MozarieTests(unittest.TestCase):
         ])
         state = self.new_state()
         state.settings["models"].update({"provider": "gpu", "gpu_device": 1})
-        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
             status = state.settings_status()
         self.assertFalse(status["gpuDeviceValid"])
         self.assertEqual(status["gpuDeviceReasonCode"], "gpu_unsupported")
         state.settings["models"]["provider"] = "cpu"
-        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
             self.assertTrue(state.settings_status()["gpuDeviceValid"])
 
     def test_cuda_status_treats_an_empty_pytorch_arch_list_as_unchecked(self):
@@ -1124,14 +1126,16 @@ class MozarieTests(unittest.TestCase):
         state = self.new_state()
         no_cuda = types.SimpleNamespace(cuda=types.SimpleNamespace(is_available=lambda: False))
         state.settings["models"].update({"provider": "gpu", "gpu_device": 0})
-        with patch.object(state_module, "torch_module", return_value=no_cuda):
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=no_cuda):
             missing = state.settings_status()
         self.assertEqual(missing["gpus"], [])
         self.assertFalse(missing["gpuDeviceValid"])
         self.assertEqual(missing["gpuDeviceReasonCode"], "gpu_unsupported")
 
         state.settings["models"]["provider"] = "cpu"
-        with patch.object(state_module, "torch_module", return_value=no_cuda):
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=no_cuda):
             cpu = state.settings_status()
         self.assertEqual(cpu["gpus"], [])
         self.assertTrue(cpu["gpuDeviceValid"])
@@ -1152,7 +1156,8 @@ class MozarieTests(unittest.TestCase):
             with self.subTest(gpu_device=gpu_device):
                 update = copy.deepcopy(state.settings)
                 update["models"].update({"provider": "gpu", "gpu_device": gpu_device})
-                with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+                with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+                     patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
                      patch.object(state.settings_store, "save") as save, \
                      self.assertRaisesRegex(ClientError, "選択したGPU") as raised:
                     state.update_settings(update)
@@ -1161,7 +1166,8 @@ class MozarieTests(unittest.TestCase):
 
         update = copy.deepcopy(state.settings)
         update["models"].update({"provider": "gpu", "gpu_device": 0})
-        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
              patch.object(state.settings_store, "save", return_value=update) as save:
             state.update_settings(update)
         save.assert_called_once_with(update)
@@ -1169,12 +1175,29 @@ class MozarieTests(unittest.TestCase):
         unchanged_invalid = copy.deepcopy(state.settings)
         unchanged_invalid["models"].update({"provider": "gpu", "gpu_device": 1})
         state.settings = unchanged_invalid
-        with patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", True)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)), \
              patch.object(state.settings_store, "save") as save, \
              self.assertRaisesRegex(ClientError, "選択したGPU") as raised:
             state.update_settings(unchanged_invalid)
         self.assertEqual(raised.exception.error_code, "gpu_unsupported")
         save.assert_not_called()
+
+    def test_settings_status_rejects_a_gpu_when_onnx_exports_only_cpu(self):
+        cuda = types.SimpleNamespace(
+            is_available=lambda: True, get_arch_list=lambda: ["sm_89"], device_count=lambda: 1,
+            get_device_capability=lambda _index: (8, 9), get_device_name=lambda _index: "RTX Test",
+            get_device_properties=lambda _index: types.SimpleNamespace(total_memory=16 * 1024 ** 3),
+        )
+        state = self.new_state()
+        state.settings["models"].update({"provider": "gpu", "gpu_device": 0})
+        with patch.object(state_module, "onnx_execution_status", return_value=("cuda", False)), \
+             patch.object(state_module, "torch_module", return_value=types.SimpleNamespace(cuda=cuda)):
+            status = state.settings_status()
+        self.assertEqual(status["runtimeBackend"], "cuda")
+        self.assertFalse(status["runtimeReady"])
+        self.assertFalse(status["gpuDeviceValid"])
+        self.assertEqual(status["gpuDeviceReasonCode"], "gpu_runtime_unavailable")
 
     def test_detection_rejects_an_unsupported_gpu_before_loading_models(self):
         state = self.new_state()
@@ -3672,16 +3695,19 @@ class MozarieTests(unittest.TestCase):
                 connection.request("GET", "/api/health")
                 response = connection.getresponse(); payload = json.loads(response.read())
                 connection.close()
-            return payload["modelsConfigured"]
+            return payload
 
         try:
             for provider in ("cpu", "gpu"):
                 state.settings["models"]["provider"] = provider
-                self.assertTrue(health(status))
+                payload = health(status)
+                self.assertTrue(payload["modelsConfigured"])
+                if provider == "gpu":
+                    self.assertTrue(payload["runtimeReady"])
                 handseg_missing = copy.deepcopy(status); handseg_missing["models"]["hand_segmentation"] = {"required": False, "enabled": True, "valid": False}
-                self.assertFalse(health(handseg_missing))
+                self.assertFalse(health(handseg_missing)["modelsConfigured"])
                 high_precision_missing_sam = copy.deepcopy(status); high_precision_missing_sam["models"]["sam_checkpoint"] = {"required": True, "enabled": True, "valid": False}
-                self.assertFalse(health(high_precision_missing_sam))
+                self.assertFalse(health(high_precision_missing_sam)["modelsConfigured"])
         finally:
             httpd.shutdown(); httpd.server_close()
 

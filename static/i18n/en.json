@@ -414,6 +414,7 @@
   "settings.modelStatus.invalid_format": "The selected model file has an invalid format.",
   "settings.modelStatus.invalid_model": "The selected model file is not compatible.",
   "settings.gpuUnsupported": "not supported by this PyTorch build",
+  "settings.gpuRuntimeUnavailable": "The ONNX Runtime for this GPU cannot start. Run Mozarie setup again.",
   "settings.gpuUnavailable": "not available",
   "modelHelp.samTable.model": "Model",
   "modelHelp.samTable.speed": "Speed",

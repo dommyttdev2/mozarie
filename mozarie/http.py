@@ -216,14 +216,14 @@ def _read_fluid_color_fill_options(payload: dict[str, Any], settings: dict[str, 
     return enabled, tolerance
 
 
-def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]]) -> dict[str, object]:
+def health_device(provider: str, gpu_device: int, gpus: list[dict[str, object]], *, runtime_backend: str = "cpu", runtime_ready: bool = True) -> dict[str, object]:
     """Format health device data without probing a GPU for a CPU selection."""
     if provider != "gpu":
         return {"provider": "cpu", "runtimeBackend": "cpu", "gpuDevice": None, "device": "CPU"}
     selected = next((gpu for gpu in gpus if gpu["id"] == gpu_device), None)
     name = str(selected["name"]) if selected else "unavailable"
-    backend = str(selected.get("backend", "cuda")) if selected else "unavailable"
-    return {"provider": "gpu", "runtimeBackend": backend, "gpuDevice": gpu_device, "gpuName": name, "device": f"GPU {gpu_device}: {name}"}
+    backend = str(selected.get("backend", runtime_backend)) if selected else runtime_backend
+    return {"provider": "gpu", "runtimeBackend": backend, "runtimeReady": runtime_ready, "gpuDevice": gpu_device, "gpuName": name, "device": f"GPU {gpu_device}: {name}"}
 
 
 def _run_native_picker(script: str, environment: dict[str, str], *, failed_message: str, busy_message: str, state: StudioState) -> str | None:
@@ -494,7 +494,11 @@ class MosaicHandler(BaseHTTPRequestHandler):
                     "modelsConfigured": configured,
                 }
                 if provider == "gpu":
-                    payload.update(health_device(provider, int(models.get("gpu_device", 0)), status["gpus"]))
+                    payload.update(health_device(
+                        provider, int(models.get("gpu_device", 0)), status["gpus"],
+                        runtime_backend=str(status.get("runtimeBackend", "cpu")),
+                        runtime_ready=bool(status.get("runtimeReady", status.get("gpuDeviceValid", True))),
+                    ))
                 else:
                     payload.update(health_device(provider, 0, []))
                 self._json(payload)
