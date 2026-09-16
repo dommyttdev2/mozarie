@@ -711,10 +711,11 @@ def _perform_update(
     current = display_version(current_raw)
     latest = display_version(latest_raw)
 
+    current_version = parse_version(current_raw)
     latest_version = parse_version(latest_raw)
     pending = _read_pending_update(app_dir)
-    retry_pending = pending is not None and pending[0] == latest_version
-    if latest_version <= parse_version(current_raw) and not retry_pending:
+    retry_pending = pending is not None and pending[0] == latest_version and current_version <= latest_version
+    if latest_version <= current_version and not retry_pending:
         print(tr("current", version=current))
         return EXIT_CURRENT
 
