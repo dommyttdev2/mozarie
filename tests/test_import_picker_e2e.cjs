@@ -1,5 +1,9 @@
 const assert = require("node:assert/strict");
-const { controls: uiControlManifest, dynamicControls: uiDynamicControlManifest } = require("./ui-control-manifest.cjs");
+const {
+  controls: uiControlManifest,
+  dynamicControls: uiDynamicControlManifest,
+  anonymousStaticControls: uiAnonymousStaticControls,
+} = require("./ui-control-manifest.cjs");
 const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -17,6 +21,7 @@ const contentTypes = {
 const onePixelPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGP8zwACTGCSAQANHQEDgslx/wAAAABJRU5ErkJggg==", "base64");
 const browserCoverage = process.env.MOZARIE_JS_COVERAGE === "1" ? [] : null;
 const dynamicControlEvidence = new Set();
+const anonymousControlEvidence = new Set();
 
 function recordDynamicControl(selector) {
   assert.ok(uiDynamicControlManifest.some((control) => control.selector === selector), `${selector} has a dynamic control contract`);
@@ -27,6 +32,16 @@ function assertDynamicControlEvidence() {
   const missing = uiDynamicControlManifest.filter((control) => !dynamicControlEvidence.has(control.selector))
     .map((control) => `${control.assertionId} (${control.selector})`);
   assert.equal(missing.join("\n"), "", `all ${uiDynamicControlManifest.length} dynamic controls are operated through Playwright with an observed result\n${missing.join("\n")}`);
+}
+
+function recordAnonymousControl(selector) {
+  assert.ok(uiAnonymousStaticControls.includes(selector), `${selector} has an exact anonymous control contract`);
+  anonymousControlEvidence.add(selector);
+}
+
+function assertAnonymousControlEvidence() {
+  const missing = uiAnonymousStaticControls.filter((selector) => !anonymousControlEvidence.has(selector));
+  assert.equal(missing.join("\n"), "", `all ${uiAnonymousStaticControls.length} anonymous controls are operated through Playwright with an observed result\n${missing.join("\n")}`);
 }
 
 async function newCoveredPage(browser, options) {
@@ -1013,6 +1028,12 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     await page.waitForFunction(() => state.candidates.find((item) => item.id === "candidate-blink-apply")?.expandPx === 2);
     assert.equal(scenario.candidateUpdates.length, batchPaddingUpdates + 1, "batch padding makes one API request");
     assert.deepEqual(await page.evaluate(() => state.candidates.map((candidate) => [candidate.id, candidate.expandPx || 0])), [["candidate-blink-apply", 2], ["candidate-blink-exclude", 0]], "batch padding changes only candidates in its selected role");
+    recordAnonymousControl('[data-candidate-padding-batch="apply"]');
+    await page.locator('[data-candidate-padding-batch="exclude"]').click();
+    assert.equal(await paddingPopover.evaluate((node) => node.matches(":popover-open")), true, "the exclude batch padding control opens the shared editor");
+    assert.equal(await paddingInput.inputValue(), "0", "exclude batch padding starts from the exclusion candidate value");
+    recordAnonymousControl('[data-candidate-padding-batch="exclude"]');
+    await page.keyboard.press("Escape");
     await page.evaluate(() => {
       state.manualMaskPresent = true; state.manualEnabled = true; state.manualExclusionEnabled = true;
       state.manualExclusionEraseEnabled = true; state.manualExclusionForced = true;
@@ -1044,6 +1065,30 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     });
     assert.equal(await page.locator(".candidate-row .candidate-toggle, .candidate-row .candidate-forced, .candidate-row .candidate-padding-button, .candidate-row .candidate-delete").evaluateAll((buttons) => buttons.every((button) => !button.disabled)), true, "candidate mutations become available after every lock clears");
     assert.deepEqual(await page.evaluate(() => state.candidates.map(({ id, enabled, forced, expandPx }) => ({ id, enabled, forced, expandPx }))), candidateStateBeforeLocks, "candidate lock transitions do not change candidate values");
+    await page.evaluate(() => { clearCandidateBlink(); renderCandidates(); });
+    for (const role of ["apply", "exclude"]) {
+      const displaySelector = `[data-candidate-display-toggle="${role}"]`;
+      await page.locator(displaySelector).click();
+      await page.waitForFunction((value) => state.blinkRoleModes.get(value) === "normal", role);
+      assert.equal(await page.locator(displaySelector).getAttribute("aria-pressed"), "true", `${role} display button selects every range in its role`);
+      recordAnonymousControl(displaySelector);
+      const effectiveSelector = `[data-candidate-effective-toggle="${role}"]`;
+      await page.locator(effectiveSelector).click();
+      await page.waitForFunction((value) => state.blinkRoleModes.get(value) === "effective", role);
+      assert.equal(await page.locator(effectiveSelector).getAttribute("aria-pressed"), "true", `${role} effective button selects every effective range in its role`);
+      recordAnonymousControl(effectiveSelector);
+    }
+    await page.evaluate(() => clearCandidateBlink());
+    for (const role of ["apply", "exclude"]) {
+      const selector = `[data-candidate-batch="${role}:toggle"]`;
+      await page.locator(selector).click();
+      await page.waitForFunction((value) => state.candidates.filter((candidate) => candidate.role === value).every((candidate) => !candidate.enabled)
+        && (value === "apply" ? !state.manualEnabled : !state.manualExclusionEnabled && !state.manualExclusionEraseEnabled), role);
+      recordAnonymousControl(selector);
+      await page.locator(selector).click();
+      await page.waitForFunction((value) => state.candidates.filter((candidate) => candidate.role === value).every((candidate) => candidate.enabled)
+        && (value === "apply" ? state.manualEnabled : state.manualExclusionEnabled && state.manualExclusionEraseEnabled), role);
+    }
     await excludeRow.locator(".candidate-display-toggle").click();
     await page.waitForFunction(() => state.blinkModes.get("candidate-blink-exclude") === "normal");
     await excludeRow.locator(".candidate-effective-toggle").click();
@@ -1102,6 +1147,24 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
     await page.locator("#confirmAccept").click();
     await page.waitForFunction(() => state.removedCandidateIds.has("candidate-blink-exclude") && !document.querySelector('[data-candidate-blink-id="candidate-blink-exclude"]'));
     assert.equal(await page.evaluate(() => { state.maskDirty = true; composeCurrentMask(); return canvasHasPixels(combinedCtx, combinedCanvas); }), false, "deleting every automatic and manual mosaic source clears the composed mask in Chromium");
+    await page.evaluate(() => {
+      state.candidates = [
+        { id: "role-delete-apply", role: "apply", enabled: true, forced: false, labelToken: "penis", confidence: .9, color: "#ff3d4d" },
+        { id: "role-delete-exclude", role: "exclude", enabled: true, forced: true, labelToken: "hand", confidence: .9, color: "#28d3ff" },
+      ];
+      state.removedCandidateIds.clear(); state.manualMaskPresent = true; state.manualExclusionPresent = true; state.manualExclusionErasePresent = true;
+      state.manualEnabled = true; state.manualExclusionEnabled = true; state.manualExclusionEraseEnabled = true;
+      addCtx.fillRect(0, 0, 2, 2); exclusionCtx.fillRect(2, 0, 2, 2); exclusionEraseCtx.fillRect(3, 0, 1, 2);
+      renderCandidates();
+    });
+    for (const role of ["apply", "exclude"]) {
+      const selector = `[data-candidate-batch="${role}:delete"]`;
+      await page.locator(selector).click();
+      if (await page.locator("#confirmDialog").evaluate((dialog) => dialog.open)) await page.locator("#confirmAccept").click();
+      await page.waitForFunction((value) => state.candidates.filter((candidate) => candidate.role === value).every((candidate) => state.removedCandidateIds.has(candidate.id))
+        && (value === "apply" ? !state.manualMaskPresent : !state.manualExclusionPresent && !state.manualExclusionErasePresent), role);
+      recordAnonymousControl(selector);
+    }
     }
 
     const blinkPixels = await page.evaluate(async (applyId) => {
@@ -1182,9 +1245,13 @@ async function runDynamicProjectAndShortcutScenario(browser, fixtureUrl) {
     await page.locator("#projectButton").click();
     await page.locator("#projectOpenList").click();
     await page.locator('[data-project-action="open"]').first().waitFor();
-    await page.locator('[data-project-sort="name"]').click();
-    await page.waitForFunction(() => document.querySelector('[data-project-sort="name"]')?.closest("th")?.getAttribute("aria-sort") === "ascending");
-    assert.equal(await page.locator('[data-project-sort="name"]').evaluate((button) => button.closest("th")?.getAttribute("aria-sort")), "ascending", "project sort reorders through its public sort control");
+    for (const key of ["name", "created", "updated"]) {
+      const selector = `[data-project-sort="${key}"]`;
+      await page.locator(selector).click();
+      await page.waitForFunction((value) => document.querySelector(`[data-project-sort="${value}"]`)?.closest("th")?.getAttribute("aria-sort") === "ascending", key);
+      assert.equal(await page.locator(selector).evaluate((button) => button.closest("th")?.getAttribute("aria-sort")), "ascending", `${key} project sort reorders through its public control`);
+      recordAnonymousControl(selector);
+    }
     recordDynamicControl("[data-project-sort]");
 
     await page.locator('[data-project-action="delete"]').click();
@@ -1488,6 +1555,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
       await page.locator("#modelHelpCopy").click();
       assert.match(await page.locator("#modelHelpCopyResult").textContent(), /コピーしました|Copied/, `${key} help command can be copied at ${width}x${height} (${language})`);
     }
+    recordAnonymousControl(`[data-model-help="${key}"]`);
     await page.locator("#modelHelpCloseButton").click();
   }
   const pickerCount = await page.locator("[data-model-picker]").count();
@@ -1517,6 +1585,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     const rect = link.getBoundingClientRect(); return document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2) === link;
   })), true, `download source links own their hit targets at ${width}x${height} (${language})`);
   await assertNoUserFacingInternalModelDetails(page.locator("#modelDownloadDialog"), `download all omits internal paths, fixed filenames, and pinned revisions at ${width}x${height} (${language})`);
+  recordAnonymousControl('[data-model-download="all"]');
   await page.locator("#modelDownloadClose").click();
   assert.equal(await allDownload.evaluate((button) => document.activeElement === button), true, `closing download confirmation restores focus at ${width}x${height} (${language})`);
   const targetDownload = page.locator('[data-model-download="target"]');
@@ -1530,6 +1599,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   assert.equal(await page.locator("#modelDownloadCommandWrap").isHidden(), true, `primary model has no conversion command at ${width}x${height} (${language})`);
   await assertNoVisibleUserFacingInternalModelDetails(page.locator("#modelDownloadDialog"), `primary model preparation omits internal paths, fixed filenames, and pinned revisions at ${width}x${height} (${language})`);
   for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadStart", "#modelDownloadCancel", "#modelDownloadActions"]) assert.equal(await page.locator(selector).isHidden(), true, `primary model hides ${selector} at ${width}x${height} (${language})`);
+  recordAnonymousControl('[data-model-download="target"]');
   await page.locator("#modelDownloadClose").click();
   const ntd11Download = page.locator('[data-model-download="ntd11"]');
   await ntd11Download.scrollIntoViewIfNeeded(); await ntd11Download.click();
@@ -1549,6 +1619,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   await page.evaluate(() => { window.__copiedCommand = ""; navigator.clipboard.writeText = async (text) => { window.__copiedCommand = text; }; });
   await page.locator("#modelDownloadCopy").click();
   assert.equal(await page.evaluate(() => window.__copiedCommand), ntdCommand, `NTD11 copies its exact command at ${width}x${height} (${language})`);
+  recordAnonymousControl('[data-model-download="ntd11"]');
   await page.locator("#modelDownloadClose").click();
   const sensitiveDownload = page.locator('[data-model-download="sensitive"]');
   await sensitiveDownload.scrollIntoViewIfNeeded(); await sensitiveDownload.click();
@@ -1578,6 +1649,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
     };
   });
   assert.equal(downloadCommandLayout.buttonBelow && downloadCommandLayout.noOverlap && downloadCommandLayout.hit && downloadCommandLayout.actionsFollowPre && downloadCommandLayout.fits, true, `download command and copy control are separate and usable at ${width}x${height} (${language})`);
+  recordAnonymousControl('[data-model-download="sensitive"]');
   await page.locator("#modelDownloadClose").click();
   if (!await page.locator("#settingsPrecisionToggle").isChecked()) await page.locator("#settingsPrecisionCard .model-switch-track").click();
   await page.waitForFunction(() => !document.querySelector('[data-model-download="sam"]').disabled);
@@ -1585,6 +1657,7 @@ async function assertSettingsDialogLayout(page, width, height, language, modelDo
   assert.equal(await page.locator("#modelDownloadTitle").textContent(), language === "ja" ? "モデルをダウンロード" : "Download model", `supported model restores the download title at ${width}x${height} (${language})`);
   for (const selector of ["#modelDownloadProgress", "#modelDownloadStatus", "#modelDownloadSecurity", "#modelDownloadActions", "#modelDownloadStart"]) assert.equal(await page.locator(selector).isHidden(), false, `supported model restores ${selector} at ${width}x${height} (${language})`);
   await assertNoUserFacingInternalModelDetails(page.locator("#modelDownloadDialog"), `SAM confirmation omits internal paths, fixed filenames, and pinned revisions at ${width}x${height} (${language})`);
+  recordAnonymousControl('[data-model-download="sam"]');
   await page.locator("#modelDownloadClose").click();
   assert.equal(await page.locator('[data-model-help="samType"]').count(), 0, `SAM variants have no separate help control at ${width}x${height} (${language})`);
   assert.equal(await page.locator("#settingsSamVariants legend").count(), 0, `SAM variants omit the redundant heading at ${width}x${height} (${language})`);
@@ -1741,23 +1814,35 @@ async function runExhaustiveAddedScenarios(page, fixtureUrl, resetScenario) {
     state.reviewedImageIds = new Set([state.images[1].id]);
     state.hiddenImageIds = new Set([state.images[2].id]);
     state.maskStatus = new Map([["overview-reviewed-masked", true]]);
-    setViewMode("overview");
+    setViewMode("edit"); renderCatalogViews();
   });
-  for (const [filter, expected] of [
-    ["all", ["overview-unreviewed", "overview-reviewed-masked", "overview-hidden"]],
+  const exactFilterCases = [
     ["unreviewed", ["overview-unreviewed"]], ["reviewed", ["overview-reviewed-masked"]],
     ["masked", ["overview-reviewed-masked"]], ["unmasked", ["overview-unreviewed"]], ["hidden", ["overview-hidden"]],
-  ]) {
-    await page.locator("#overviewFilterButton").click();
-    await page.evaluate((value) => {
-      const inputs = [...document.querySelectorAll("[data-overview-filter]")];
-      for (const input of inputs) input.checked = input.dataset.overviewFilter === value && value !== "all";
-      (document.querySelector(`[data-overview-filter="${value}"]`) || inputs[0])?.dispatchEvent(new Event("change", { bubbles: true }));
-    }, filter);
-    await page.waitForFunction((value) => state.overviewFilter instanceof Set && (value === "all" ? state.overviewFilter.size === 0 : state.overviewFilter.size === 1 && state.overviewFilter.has(value)), filter);
-    await page.locator("#overviewFilterButton").click();
-    assert.deepEqual(await page.locator(".overview-item").evaluateAll((items) => items.map((item) => item.dataset.id)), expected, `overview ${filter} filter exposes exactly its matching images`);
+  ];
+  await page.locator("#galleryFilterButton").click();
+  for (const [filter, expected] of exactFilterCases) {
+    const selector = `[data-gallery-filter="${filter}"]`;
+    await page.locator(selector).check();
+    await page.waitForFunction((value) => state.galleryFilter.size === 1 && state.galleryFilter.has(value), filter);
+    assert.deepEqual(await page.locator(".gallery-item").evaluateAll((items) => items.map((item) => item.dataset.id)), expected, `gallery ${filter} filter exposes exactly its matching images`);
+    recordAnonymousControl(selector);
+    await page.locator(selector).uncheck();
+    await page.waitForFunction(() => state.galleryFilter.size === 0);
   }
+  await page.locator("#galleryFilterButton").click();
+  await page.evaluate(() => { setViewMode("overview"); renderOverview(true); });
+  await page.locator("#overviewFilterButton").click();
+  for (const [filter, expected] of exactFilterCases) {
+    const selector = `[data-overview-filter="${filter}"]`;
+    await page.locator(selector).check();
+    await page.waitForFunction((value) => state.overviewFilter.size === 1 && state.overviewFilter.has(value), filter);
+    assert.deepEqual(await page.locator(".overview-item").evaluateAll((items) => items.map((item) => item.dataset.id)), expected, `overview ${filter} filter exposes exactly its matching images`);
+    recordAnonymousControl(selector);
+    await page.locator(selector).uncheck();
+    await page.waitForFunction(() => state.overviewFilter.size === 0);
+  }
+  await page.locator("#overviewFilterButton").click();
   for (const action of ["remove", "hide", "show", "clear", "detect", "reviewed", "unreviewed"]) {
     resetScenario(); await setupFixture();
     if (action === "show") await page.evaluate(() => { const image = state.images.find((item) => item.id === "sample"); state.hiddenImageIds.add(image.id); image.hidden = true; renderCatalogViews(); });
@@ -1776,6 +1861,7 @@ async function runExhaustiveAddedScenarios(page, fixtureUrl, resetScenario) {
     else if (action === "clear") await page.waitForFunction(() => state.maskStatus.get("sample") !== true && state.images.find((image) => image.id === "sample")?.candidateCount === 0);
     else if (action === "reviewed") await page.waitForFunction(() => isReviewed(state.images.find((image) => image.id === "sample")));
     else await page.waitForFunction(() => !isReviewed(state.images.find((image) => image.id === "sample")));
+    recordAnonymousControl(`[data-selection-action="${action}"]`);
   }
 
   await setupFixture();
@@ -2397,6 +2483,7 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
   const galleryBefore = await snapshot(); await page.locator('.gallery-item[data-id="sample-two"]').click();
   await page.waitForFunction(() => state.currentId === "sample-two");
   await markDynamic(".gallery-item", galleryBefore, (prior, after) => assert.equal(after.state.current, "sample-two", "gallery item must select sample-two"));
+  recordAnonymousControl(".gallery-item");
   await click("previousImageButton"); await click("nextImageButton");
   for (const id of ["reviewAndNextButton", "hideAndNextButton", "removeCurrentImageButton"]) await click(id);
   await page.locator('.gallery-item[data-id="sample"]').click();
@@ -2423,6 +2510,7 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
   await page.locator("#overviewFilterButton").click();
   const overviewItemBefore = await snapshot(); await page.locator(".overview-item").last().click();
   await markDynamic(".overview-item", overviewItemBefore, (prior, after) => assert.notDeepEqual(after.state.selectedImageIds, prior.state.selectedImageIds, "overview item must change the selected image set in batch mode"));
+  recordAnonymousControl(".overview-item");
   await click("selectionActionsButton"); const selectionBefore = await snapshot(); await page.locator('[data-selection-action="reviewed"]').click();
   await markDynamic("[data-selection-action]", selectionBefore, (prior, after) => apiChanged(prior, after, "selection action", "/api/")); await click("selectionClearButton"); await click("closeOverviewButton");
 
@@ -3041,6 +3129,15 @@ async function main() {
     assert.deepEqual(modelPickerRequests.at(-1), { modelKey: "sam_checkpoint", currentPath: "" }, "SAM browse posts its model key and current path");
     assert.equal(await page.locator("#settingsSamType").inputValue(), "vit_l", "known SAM filename synchronizes the model type without saving");
     assert.equal(await page.locator('input[name="settingsSamVariant"]:checked').inputValue(), "vit_l", "the matching accessible SAM radio is selected");
+    recordAnonymousControl('[data-model-picker="sam_checkpoint"]');
+    for (const value of ["vit_b", "vit_l", "vit_h"]) {
+      const selector = `input[name="settingsSamVariant"][value="${value}"]`;
+      await page.locator(selector).check();
+      assert.equal(await page.locator("#settingsSamType").inputValue(), value, `${value} radio updates the selected SAM type`);
+      assert.equal(await page.locator(selector).isChecked(), true, `${value} radio becomes the checked variant`);
+      recordAnonymousControl(selector);
+    }
+    await page.locator('input[name="settingsSamVariant"][value="vit_l"]').check();
     await page.locator("#settingsSamModel").fill("C:\\custom\\large.pth");
     await page.locator('input[name="settingsSamVariant"][value="vit_h"]').check();
     await page.locator("#settingsSamModel").fill("C:\\custom\\huge.pth");
@@ -3077,6 +3174,21 @@ async function main() {
     await cancelResponse;
     assert.equal(await page.locator("#settingsTargetModel").inputValue(), targetBeforeCancel, "cancelled model browse leaves its input unchanged");
     assert.equal(await page.locator("#settingsResult").textContent(), statusBeforeCancel, "cancelled model browse leaves status unchanged");
+    recordAnonymousControl('[data-model-picker="target_segmentation"]');
+    for (const toggleId of ["settingsNtd11Toggle", "settingsSensitiveToggle", "settingsHandToggle", "settingsHandSegmentationToggle"]) {
+      const toggle = page.locator(`#${toggleId}`);
+      if (!await toggle.isChecked()) await page.locator(`#${toggleId} + .model-switch-track`).click();
+      await page.waitForFunction((id) => document.querySelector(`#${id}`).checked, toggleId);
+    }
+    for (const key of ["ntd11", "sensitive", "hand_detection", "hand_segmentation"]) {
+      const selector = `[data-model-picker="${key}"]`;
+      await page.waitForFunction((value) => !document.querySelector(`[data-model-picker="${value}"]`).disabled, key);
+      const pickResponse = page.waitForResponse((response) => response.url().includes("/api/model-file/pick") && response.status() === 200);
+      await page.locator(selector).click();
+      await pickResponse;
+      assert.equal(modelPickerRequests.at(-1).modelKey, key, `${key} browse posts its exact model key`);
+      recordAnonymousControl(selector);
+    }
     assert.equal(await page.locator("[data-model-download]").count(), 7, "model preparation and downloadable models expose their actions");
     const requestsBeforeModelPreparation = modelDownloadRequests.length;
     await page.locator('[data-model-download="ntd11"]').click();
@@ -3120,7 +3232,13 @@ async function main() {
     await page.waitForFunction(() => document.querySelector("#errorDialog").open, null, { timeout: 3000 });
     assert.equal(await page.locator("#modelDownloadStatus").textContent(), "", "download errors do not remain inside the download modal");
     assert.doesNotMatch(await page.locator("#errorDialog").textContent(), /fixture download failed/, "raw download errors are not shown");
+    recordAnonymousControl('[data-model-download="hand_detection"]');
     await page.locator("#errorDialogClose").click();
+    await page.locator("#modelDownloadClose").click();
+    await page.locator('[data-model-download="hand_segmentation"]').click();
+    assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 1, "HandSeg download opens one exact model confirmation");
+    assert.match(await page.locator("#modelDownloadItems").textContent(), /HandSegNet|handsegnet/i, "HandSeg download identifies the segmentation model");
+    recordAnonymousControl('[data-model-download="hand_segmentation"]');
     await page.locator("#modelDownloadClose").click();
     await page.locator('[data-model-download="all"]').click();
     assert.equal(await page.locator("#modelDownloadItems .model-download-item").count(), 3, "Download all lists three separate models");
@@ -4696,6 +4814,7 @@ async function main() {
     await runDynamicProjectAndShortcutScenario(browser, fixtureUrl);
     await runExhaustiveCandidateScenarios(browser);
     assertDynamicControlEvidence();
+    assertAnonymousControlEvidence();
 
     assert.deepEqual(pageErrors, [], `unexpected page errors: ${pageErrors.join("; ")}`);
     assert.deepEqual(consoleErrors.sort(), ["Failed to load resource: the server responded with a status of 400 (Bad Request)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 500 (Internal Server Error)", "Failed to load resource: the server responded with a status of 503 (Service Unavailable)"].sort(), `unexpected console errors: ${consoleErrors.join("; ")}`);
