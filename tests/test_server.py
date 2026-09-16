@@ -3339,11 +3339,14 @@ class MozarieTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             changed_output = copy.deepcopy(state.settings)
             changed_output["saving"]["default_output_directory"] = directory
+            expected_output = copy.deepcopy(changed_output)
+            canonical = str(Path(directory).resolve())
+            expected_output["saving"]["default_output_directory"] = canonical
             with patch.object(state, "_require_supported_gpu"), patch.object(state_module, "validate_output_directory_ready") as ready, \
-                 patch.object(state.settings_store, "save", return_value=changed_output) as save:
+                 patch.object(state.settings_store, "save", return_value=expected_output) as save:
                 state.update_settings(changed_output)
-        ready.assert_called_once_with(str(Path(directory).resolve()))
-        save.assert_called_once_with(changed_output)
+        ready.assert_called_once_with(canonical)
+        save.assert_called_once_with(expected_output)
 
     def test_output_validation_uses_its_dedicated_user_error_and_does_not_save(self):
         state = self.new_state()
