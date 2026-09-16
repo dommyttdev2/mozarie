@@ -34,6 +34,6 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - run: python -m pip install --only-binary=:all: numpy Pillow opencv-python
+      - run: 'python -m pip install --only-binary=:all: numpy Pillow opencv-python'
       - run: python -m unittest tests.test_http_import_regression
       - run: node tests/test_save_source_snapshot_contract.cjs
