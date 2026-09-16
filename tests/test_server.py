@@ -7794,28 +7794,34 @@ class MozarieTests(unittest.TestCase):
             entered = threading.Event()
             release = threading.Event()
             finished = threading.Event()
+            failures = []
             original_inspect = catalog_module.inspect_import_image
 
             def blocked_inspect(path, suffix):
                 entered.set()
-                self.assertTrue(release.wait(1), "scan test must release its controlled image read")
+                self.assertTrue(release.wait(10), "scan test must release its controlled image read")
                 return original_inspect(path, suffix)
 
             def load_root():
                 try:
                     state.set_root(str(root))
+                except Exception as exc:
+                    failures.append(exc)
                 finally:
                     finished.set()
 
             with patch.object(catalog_module, "inspect_import_image", side_effect=blocked_inspect):
                 loader = threading.Thread(target=load_root)
                 loader.start()
-                self.assertTrue(entered.wait(1))
+                self.assertTrue(entered.wait(10), "folder scan did not reach its controlled inspection")
                 self.assertTrue(state.import_lock.acquire(blocking=False))
                 state.import_lock.release()
+                self.assertFalse(finished.is_set(), "folder reload finished before its controlled inspection was released")
                 release.set()
-                self.assertTrue(finished.wait(1))
-                loader.join()
+                loader.join(10)
+                self.assertFalse(loader.is_alive(), "folder reload did not finish after inspection was released")
+                self.assertTrue(finished.is_set())
+                self.assertEqual(failures, [])
 
     def test_folder_scan_rejects_a_catalogue_change_after_releasing_the_import_lock(self):
         with tempfile.TemporaryDirectory() as directory:
