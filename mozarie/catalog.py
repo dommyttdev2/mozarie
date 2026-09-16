@@ -141,8 +141,8 @@ class CatalogMixin:
             self.candidates[image_id] = candidates
             self.candidate_revisions[image_id] = revision
         LOGGER.warning(
-            "候補状態を保存領域から再同期: 対象=%d件 image_ids=%s",
-            len(stale_ids), ",".join(stale_ids),
+            "候補状態を保存領域から再同期: 対象=%d件",
+            len(stale_ids),
         )
 
     def _commit_candidate_snapshot(self, image_id: str, candidates: list[Candidate], *, replace: bool, history_group: str | None = None) -> int:
