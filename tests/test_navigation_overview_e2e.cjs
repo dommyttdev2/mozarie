@@ -15,7 +15,7 @@ test("navigation and overview selection use isolated browser state", { timeout: 
       window.showOpenFilePicker = async () => [];
       window.showDirectoryPicker = async () => ({ async *values() {} });
     });
-    await page.goto(fixture.url, { waitUntil: "networkidle" });
+    await page.goto(fixture.url, { waitUntil: "domcontentloaded" });
     await page.locator('.gallery-item[data-id="sample"]').click();
     await page.waitForFunction(() => state.currentId === "sample");
     await page.locator("#nextImageButton").click();

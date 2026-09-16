@@ -6,6 +6,15 @@ const { assertNoSkippedUnittestTests } = require("./test-result-policy.cjs");
 const { frontendPerformanceTestFiles, frontendTestArguments } = require("./test-discovery.cjs");
 
 const root = path.resolve(__dirname, "..");
+const DEFAULT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
+const COMMAND_TIMEOUTS = {
+  "backend tests": 9 * 60 * 1000,
+  "backend coverage": 2 * 60 * 1000,
+  "backend coverage XML": 2 * 60 * 1000,
+  "frontend syntax": 2 * 60 * 1000,
+  "frontend coverage": 8 * 60 * 1000,
+  "frontend performance": 4 * 60 * 1000,
+};
 
 function parseArguments(argv) {
   const [suite = "all", ...rest] = argv;
@@ -20,13 +29,29 @@ function parseArguments(argv) {
 }
 
 function runCommand(command, args, options = {}) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
     const child = childProcess.spawn(command, args, { cwd: root, env: options.env || process.env, shell: false, windowsHide: true });
     let output = "";
+    let spawnError = null;
+    let timedOut = false;
+    let finished = false;
+    const timeoutMs = options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+    const finish = (status) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      if (spawnError) output += `${output ? "\n" : ""}${spawnError.message}`;
+      resolve({ command, args, output, status: status ?? (timedOut ? 124 : 1), timedOut, elapsedMs: Date.now() - startedAt });
+    };
     child.stdout.on("data", (chunk) => { output += chunk; });
     child.stderr.on("data", (chunk) => { output += chunk; });
-    child.on("error", reject);
-    child.on("close", (status) => resolve({ command, args, output, status: status ?? 1 }));
+    child.on("error", (error) => { spawnError = error; });
+    child.on("close", finish);
+    const timeout = timeoutMs > 0 ? setTimeout(() => {
+      timedOut = true;
+      child.kill();
+    }, timeoutMs) : null;
   });
 }
 
@@ -96,7 +121,7 @@ function tapDiagnostic(lines) {
     const detailLines = [];
     for (let candidateIndex = 0; candidateIndex < candidate.length; candidateIndex += 1) {
       const line = candidate[candidateIndex];
-      if (/\b(?:error|code|name|message|stack)\s*:|(?:Assertion|Error|Exception)\b/i.test(line)) {
+      if (/\b(?:error|code|name|message|stack|expected|actual|operator)\s*:|(?:Assertion|Error|Exception)\b/i.test(line)) {
         detailLines.push(line);
         if (/\bstack\s*:/i.test(line)) detailLines.push(...candidate.slice(candidateIndex + 1, candidateIndex + 5));
       }
@@ -140,11 +165,32 @@ function diagnostic(output) {
 }
 
 async function requiredCommand(label, command, args, options) {
-  const result = await runCommand(command, args, options);
+  const result = await runCommand(command, args, { ...options, timeoutMs: options?.timeoutMs ?? COMMAND_TIMEOUTS[label] ?? DEFAULT_COMMAND_TIMEOUT_MS });
   if (result.status === 0) return result.output;
-  const error = new Error(`${label} failed (exit ${result.status})\n${diagnostic(result.output)}`);
+  const rawLog = writeFailureArtifact(options?.artifactDirectory, label, result);
+  const timeout = result.timedOut ? ` timed out after ${(result.elapsedMs / 1000).toFixed(1)}s` : "";
+  const artifact = rawLog ? `\nraw output: ${rawLog}` : "";
+  const error = new Error(`${label}${timeout} failed (exit ${result.status}; elapsed ${(result.elapsedMs / 1000).toFixed(1)}s)${artifact}\n${diagnostic(result.output)}`);
   error.output = result.output;
+  error.rawLog = rawLog;
   throw error;
+}
+
+function writeFailureArtifact(directory, label, result) {
+  if (!directory) return null;
+  fs.mkdirSync(directory, { recursive: true });
+  const basename = label.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+  const rawLog = path.join(directory, `${basename}.failure.log`);
+  fs.writeFileSync(rawLog, result.output, "utf8");
+  fs.writeFileSync(path.join(directory, `${basename}.failure.json`), `${JSON.stringify({
+    command: result.command,
+    args: result.args,
+    status: result.status,
+    timedOut: result.timedOut,
+    elapsedMs: result.elapsedMs,
+    rawLog: path.basename(rawLog),
+  }, null, 2)}\n`, "utf8");
+  return rawLog;
 }
 
 function temporaryDirectory() { return fs.mkdtempSync(path.join(os.tmpdir(), "mozarie-test-")); }
@@ -166,8 +212,14 @@ function testPythonExecutable(environment = process.env) {
 }
 
 function backendEnvironment(temporaryRoot, coverageFile) {
-  const env = { ...process.env, COVERAGE_FILE: coverageFile, PYTHONPYCACHEPREFIX: path.join(temporaryRoot, "pycache") };
+  const env = {
+    ...process.env,
+    COVERAGE_FILE: coverageFile,
+    MOZARIE_TEST_APP_DIR: path.join(temporaryRoot, "app"),
+    PYTHONPYCACHEPREFIX: path.join(temporaryRoot, "pycache"),
+  };
   delete env.MOZARIE_PYTHON;
+  delete env.MOZARIE_TEST_PYTHON;
   delete env.MOZARIE_RUNTIME;
   return env;
 }
@@ -220,10 +272,10 @@ async function runBackend(temporaryRoot, artifacts) {
   const coverageXml = path.join(directory, "coverage.xml");
   const env = backendEnvironment(temporaryRoot, coverageFile);
   const python = testPythonExecutable(env);
-  const tests = await requiredCommand("backend tests", python, ["-m", "coverage", "run", "-m", "unittest", "discover", "-s", "tests", "-t", "."], { env });
+  const tests = await requiredCommand("backend tests", python, ["-m", "coverage", "run", "-m", "unittest", "discover", "-s", "tests", "-t", "."], { env, artifactDirectory: directory });
   assertNoSkippedUnittestTests(tests);
-  await requiredCommand("backend coverage", python, ["-m", "coverage", "report"], { env });
-  await requiredCommand("backend coverage XML", python, ["-m", "coverage", "xml", "-o", coverageXml], { env });
+  await requiredCommand("backend coverage", python, ["-m", "coverage", "report"], { env, artifactDirectory: directory });
+  await requiredCommand("backend coverage XML", python, ["-m", "coverage", "xml", "-o", coverageXml], { env, artifactDirectory: directory });
   const xml = fs.readFileSync(coverageXml, "utf8");
   const rates = coverageRates(xml);
   verifyBackendCoverage(xml);
@@ -242,13 +294,13 @@ function performanceEnvironment(source = process.env) {
 async function runFrontend(temporaryRoot, artifacts, dependencies = {}) {
   const run = dependencies.requiredCommand || requiredCommand;
   const directory = artifactDirectory(temporaryRoot, artifacts, "frontend");
-  await run("frontend syntax", process.platform === "win32" ? "npm.cmd" : "npm", ["run", "check"], { env: process.env });
+  await run("frontend syntax", process.platform === "win32" ? "npm.cmd" : "npm", ["run", "check"], { env: process.env, artifactDirectory: directory });
   const output = await run("frontend coverage", process.execPath, [path.join("scripts", "coverage-js.cjs")], {
-    env: { ...process.env, MOZARIE_JS_COVERAGE_DIR: directory },
+    env: { ...process.env, MOZARIE_JS_COVERAGE_DIR: directory }, artifactDirectory: directory,
   });
   if (!fs.existsSync(path.join(directory, "report", "coverage-final.json"))) throw new Error("frontend coverage JSON was not created");
   const performance = await run("frontend performance", process.execPath, frontendTestArguments(frontendPerformanceTestFiles()), {
-    env: performanceEnvironment(),
+    env: performanceEnvironment(), artifactDirectory: directory,
   });
   return `frontend: passed (${testCount(output)} coverage tests; ${testCount(performance)} performance tests; JavaScript coverage report created)`;
 }
@@ -276,4 +328,4 @@ async function main(argv = process.argv.slice(2)) {
 
 if (require.main === module) main().catch((error) => { console.error(error.message || error); process.exitCode = 1; });
 
-module.exports = { artifactDirectory, backendEnvironment, coverageRates, diagnostic, parseArguments, performanceEnvironment, requiredCommand, runCommand, runFrontend, runSuites, temporaryDirectory, testCount, testPythonExecutable, verifyBackendCoverage, workspaceArtifacts };
+module.exports = { artifactDirectory, backendEnvironment, coverageRates, diagnostic, parseArguments, performanceEnvironment, requiredCommand, runCommand, runFrontend, runSuites, temporaryDirectory, testCount, testPythonExecutable, verifyBackendCoverage, workspaceArtifacts, writeFailureArtifact };

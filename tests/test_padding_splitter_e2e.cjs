@@ -20,7 +20,8 @@ async function main() {
         return originalSetItem.call(this, key, value);
       };
     });
-    await page.goto(fixture.url, { waitUntil: "networkidle" });
+    await page.goto(fixture.url, { waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => state.settings && state.job && state.images.length === 2 && document.querySelectorAll(".gallery-item").length === 2);
     await page.locator(".gallery-item").first().click();
 
     const initialHistoryIndex = await page.evaluate(() => state.historyIndex);
@@ -56,7 +57,7 @@ async function main() {
     await saveTolerance("36");
     await page.locator("#brushTool").click();
     assert.equal(await tolerancePanel.evaluate((node) => node.matches(":popover-open")), false, "switching to another tool closes tolerance");
-    await page.reload({ waitUntil: "networkidle" }); await page.locator(".gallery-item").first().click();
+    await page.reload({ waitUntil: "domcontentloaded" }); await page.locator(".gallery-item").first().click();
     assert.equal(await toleranceInput.inputValue(), "36", "the shared tolerance changed from exclusion fill survives a reload");
     await openTolerance(); assert.equal(await toleranceInput.inputValue(), "36", "reopening shows the immediately saved shared tolerance");
     await page.locator("#bucketToleranceClose").click();
@@ -124,7 +125,8 @@ async function main() {
     await page.mouse.move(splitAfterReset.x + splitAfterReset.width / 2, splitAfterReset.y + splitAfterReset.height / 2);
     await page.mouse.down(); await page.mouse.move(canvas.x + canvas.width * .39, splitAfterReset.y + splitAfterReset.height / 2); await page.mouse.up();
     assert.equal(await splitter.getAttribute("aria-valuenow"), "39");
-    await page.reload({ waitUntil: "networkidle" });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await page.waitForFunction(() => state.settings && state.job && state.images.length === 2 && document.querySelectorAll(".gallery-item").length === 2);
     assert.equal(await page.locator("#compareSplitter").getAttribute("aria-valuenow"), "39", "reload restores the persisted and clamped ratio");
 
     const narrow = await page.evaluate(() => {

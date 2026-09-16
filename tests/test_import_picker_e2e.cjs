@@ -84,6 +84,10 @@ async function pointerGesture(page, start, end = start) {
   await page.mouse.up();
 }
 
+async function waitForFixtureReady(page) {
+  await page.waitForFunction(() => state.settings && state.job && state.images.length === 2);
+}
+
 function startFixtureServer() {
   const detectRequests = [];
   const applyRequests = [];
@@ -639,7 +643,14 @@ function startFixtureServer() {
 }
 
 function closeServer(server) {
-  return new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+    if (error) { reject(error); return; }
+    if (server.listening) { reject(new Error("fixture server is still listening after close")); return; }
+    resolve();
+    });
+    server.closeAllConnections?.();
+  });
 }
 
 // This fixture deliberately owns a single candidate image.  Keeping it apart
@@ -733,12 +744,25 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
       window.showOpenFilePicker = async () => [];
       window.showDirectoryPicker = async () => ({ async *values() {} });
       const setInterval = window.setInterval.bind(window);
+      const clearInterval = window.clearInterval.bind(window);
+      const candidateBlinkTimers = new Map();
+      let nextCandidateBlinkTimer = 0;
       window.setInterval = (callback, delay, ...args) => {
-        if (delay === 200) window.__candidateBlinkTick = callback;
+        if (delay === 200) {
+          const timer = `candidate-blink-${nextCandidateBlinkTimer += 1}`;
+          candidateBlinkTimers.set(timer, () => callback(...args));
+          window.__candidateBlinkTick = () => candidateBlinkTimers.get(timer)?.();
+          return timer;
+        }
         return setInterval(callback, delay, ...args);
       };
+      window.clearInterval = (timer) => {
+        if (candidateBlinkTimers.delete(timer)) return;
+        clearInterval(timer);
+      };
+      window.__candidateBlinkTimerCount = () => candidateBlinkTimers.size;
     });
-    await page.goto(scenario.url, { waitUntil: "networkidle" });
+    await page.goto(scenario.url, { waitUntil: "domcontentloaded" });
     await page.locator(`.gallery-item[data-id="${scenario.imageId}"]`).click();
     const row = page.locator(`[data-candidate-blink-id="${scenario.candidateId}"]`);
     await row.waitFor();
@@ -833,6 +857,7 @@ async function runCandidateBlinkScenario(browser, expanded = false) {
         && document.querySelector("#candidatePane")?.classList.contains("blink-active")
         && candidateRow.querySelector(".candidate-display-toggle")?.getAttribute("aria-pressed") === "true";
     }, scenario.candidateId);
+    assert.equal(await page.evaluate(() => window.__candidateBlinkTimerCount()), 1, "candidate blinking uses one manually ticked timer without a wall-clock race");
     recordDynamicControl(".candidate-row .candidate-display-toggle");
     const blinkTickReads = await page.evaluate(() => {
       const originalHasPixels = canvasHasPixels;
@@ -1151,7 +1176,8 @@ async function runExhaustiveCandidateScenarios(browser) {
 async function runDynamicProjectAndShortcutScenario(browser, fixtureUrl) {
   const page = await newCoveredPage(browser, { viewport: { width: 1280, height: 900 } });
   try {
-    await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    await page.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await waitForFixtureReady(page);
 
     await page.locator("#projectButton").click();
     await page.locator("#projectOpenList").click();
@@ -1670,7 +1696,8 @@ async function selectFixtureImage(page, pageErrors, consoleErrors) {
 // end of the sweep.
 async function runExhaustiveAddedScenarios(page, fixtureUrl, resetScenario) {
   const setupFixture = async () => {
-    await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    await page.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await waitForFixtureReady(page);
     await page.locator('.gallery-item[data-id="sample"]').click();
     await page.waitForFunction(() => state.currentId === "sample");
     await page.evaluate(async () => {
@@ -1807,7 +1834,8 @@ async function runControlLedger(page, fixtureUrl, contracts, finishCancel, holdS
     recordDynamicControl(selector);
   };
   const setupFixture = async () => {
-    await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    await page.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await waitForFixtureReady(page);
     await page.locator('.gallery-item[data-id="sample"]').click();
     await page.waitForFunction(() => state.currentId === "sample");
     // The catalog thumbnail is intentionally 2px.  Give the editor fixture a
@@ -2631,7 +2659,8 @@ async function main() {
         return originalFetch(...args);
       };
     });
-    await degradedBootstrapPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+    await degradedBootstrapPage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await degradedBootstrapPage.waitForFunction(() => state.settings && document.querySelector("#folderPath").value === "");
     assert.equal(await degradedBootstrapPage.locator("#folderPath").inputValue(), "", "an empty catalogue root remains an empty folder field");
     await stopCoveredPage(degradedBootstrapPage, true);
     const settingsFailurePage = await newCoveredPage(browser);
@@ -2658,7 +2687,8 @@ async function main() {
         ? Promise.reject(new Error("fixture offline"))
         : fetchOriginal(...args);
     });
-    await connectionRecoveryPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+    await connectionRecoveryPage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await waitForFixtureReady(connectionRecoveryPage);
     await connectionRecoveryPage.evaluate(async () => {
       window.__connectionOffline = true;
       state.pollFailures = 2;
@@ -2724,7 +2754,8 @@ async function main() {
       };
     });
     try {
-      await parallelismPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      await parallelismPage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+      await waitForFixtureReady(parallelismPage);
       await parallelismPage.evaluate(() => {
         window.__importUploadRegistry = {
           active: 0, peak: 0, started: 0, completed: 0, pending: [],
@@ -2854,7 +2885,8 @@ async function main() {
     page.on("console", (message) => {
       if (message.type() === "error") consoleErrors.push(message.text());
     });
-    await page.goto(fixtureUrl, { waitUntil: "networkidle" });
+    await page.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+    await waitForFixtureReady(page);
     // Keep the manifest presence check on an isolated page.  Do not use
     // HTMLElement.click() or synthetic input/change events here: those do not
     // prove that a user can operate a control, and (worse) used to count hidden
@@ -2865,7 +2897,8 @@ async function main() {
     inventoryPage.on("pageerror", (error) => inventoryErrors.push(error.message));
     for (const [width, language] of [[1024, "ja"], [1920, "en"]]) {
       await inventoryPage.setViewportSize({ width, height: 768 });
-      await inventoryPage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      await inventoryPage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+      await waitForFixtureReady(inventoryPage);
       await inventoryPage.evaluate((locale) => loadTranslations(locale), language);
       const inventory = await inventoryPage.evaluate((contracts) => contracts.map(({ id }) => {
         const node = document.getElementById(id);
@@ -3518,7 +3551,8 @@ async function main() {
     assert.deepEqual(detectRequests[2].targetClasses, ["pussy"], "current-image detection uses the visible pussy-only choice");
 
     const currentDetectionRequests = detectRequests.length;
-    await page.reload({ waitUntil: "networkidle" });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await waitForFixtureReady(page);
     const persistedDetection = await page.evaluate(() => structuredClone(state.settings.detection));
     failNextSettingsSave();
     await page.locator("#detectAllButton").click();
@@ -3556,7 +3590,8 @@ async function main() {
     assert.equal(detectRequests[currentDetectionRequests].parallelism, 4, "dialog parallelism should be submitted on GPU");
     assert.equal(Object.hasOwn(detectRequests[currentDetectionRequests], "mode"), false, "all-image detection must not submit a mode override");
     resetJob();
-    await page.reload({ waitUntil: "networkidle" });
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await waitForFixtureReady(page);
     await page.locator("#settingsButton").click();
     await page.locator("#settingsTabModels").click();
     await page.waitForFunction(() => document.querySelector("#settingsGpuDevice option[value='3']"));
@@ -4563,7 +4598,8 @@ async function main() {
       };
     });
     try {
-      await browserSavePage.goto(fixtureUrl, { waitUntil: "networkidle" });
+      await browserSavePage.goto(fixtureUrl, { waitUntil: "domcontentloaded" });
+      await waitForFixtureReady(browserSavePage);
       const folderRequestCount = folderRequests.length;
       const expectedFolderEpoch = await browserSavePage.evaluate(() => state.serverCatalogGeneration);
       await browserSavePage.locator("#pickFolder").click();

@@ -15,7 +15,7 @@ test("4K drag renders a preview before pointerup with one bounded worker", { tim
       window.showOpenFilePicker = async () => [];
       window.showDirectoryPicker = async () => ({ async *values() {} });
     });
-    await page.goto(fixture.url, { waitUntil: "networkidle" });
+    await page.goto(fixture.url, { waitUntil: "domcontentloaded" });
     await page.locator('.gallery-item[data-id="sample"]').click();
     await page.waitForFunction(() => state.currentId === "sample" && state.currentImage);
     const geometry = await page.evaluate(async () => {

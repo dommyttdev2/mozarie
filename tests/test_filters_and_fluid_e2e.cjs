@@ -13,23 +13,21 @@ async function freshPage(browser, fixture, initScript = null) {
   });
   if (initScript) await context.addInitScript(initScript);
   const page = await context.newPage();
-  await page.goto(fixture.url, { waitUntil: "networkidle" });
+  await page.goto(fixture.url, { waitUntil: "domcontentloaded" });
+  await page.waitForFunction(() => state.settings && state.job && state.images.length === 2 && document.querySelectorAll(".gallery-item").length === 2);
   return { context, page };
 }
 
 test("filter popover combines checked states and review-at-tail stays on the filtered image", { timeout: 60000 }, async () => {
   const fixture = await startFixtureServer();
+  fixture.setCatalog([
+    { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1, reviewed: false, hidden: false, hasEffectiveMask: true },
+    { id: "sample-two", relativePath: "sample-two.png", sourceKind: "session", width: 100, height: 80, candidateCount: 0, enabledCandidateCount: 0, reviewed: false, hidden: false, hasEffectiveMask: false },
+  ]);
   const browser = await chromium.launch({ headless: true });
   let context; let page;
   try {
     ({ context, page } = await freshPage(browser, fixture));
-    await page.evaluate(() => {
-      const [masked, plain] = state.images;
-      masked.candidateCount = 1; masked.enabledCandidateCount = 1; masked.reviewed = false;
-      plain.candidateCount = 0; plain.enabledCandidateCount = 0; plain.reviewed = false;
-      state.maskStatus.set(masked.id, true); state.maskStatus.set(plain.id, false);
-      renderGallery(true);
-    });
     await page.locator("#galleryFilterButton").click();
     await page.locator('[data-gallery-filter="masked"]').check();
     await page.locator('[data-gallery-filter="unreviewed"]').check();
@@ -117,18 +115,15 @@ test("hiding an image removes it from the visible all-image detection and save t
 
 test("filtered review and hide keep their tail, while deletion selects the previous filtered image", { timeout: 60000 }, async () => {
   const fixture = await startFixtureServer();
+  fixture.setCatalog([
+    { id: "sample", relativePath: "sample.png", sourceKind: "filesystem", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1, reviewed: false, hidden: false, hasEffectiveMask: true },
+    { id: "sample-two", relativePath: "sample-two.png", sourceKind: "session", width: 100, height: 80, candidateCount: 1, enabledCandidateCount: 1, reviewed: false, hidden: false, hasEffectiveMask: true },
+  ]);
   const browser = await chromium.launch({ headless: true });
   let context; let page;
   try {
     ({ context, page } = await freshPage(browser, fixture));
-    await page.evaluate(() => {
-      for (const image of state.images) {
-        image.candidateCount = 1; image.enabledCandidateCount = 1; image.reviewed = false; image.hidden = false;
-        state.maskStatus.set(image.id, true);
-      }
-      state.galleryFilter = new Set(["masked"]);
-      renderGallery(true);
-    });
+    await page.evaluate(() => { state.galleryFilter = new Set(["masked"]); renderGallery(true); });
 
     await page.locator('.gallery-item[data-id="sample-two"]').click();
     await page.waitForFunction(() => state.currentId === "sample-two" && state.currentImage);

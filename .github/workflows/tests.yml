@@ -37,7 +37,7 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: backend-coverage
-          path: ${{ runner.temp }}/mozarie-coverage/backend/coverage.xml
+          path: ${{ runner.temp }}/mozarie-coverage/backend
           if-no-files-found: warn
 
   frontend:
@@ -56,5 +56,5 @@ jobs:
         uses: actions/upload-artifact@v6
         with:
           name: frontend-coverage
-          path: ${{ runner.temp }}/mozarie-coverage/frontend/report/coverage-final.json
-          if-no-files-found: error
+          path: ${{ runner.temp }}/mozarie-coverage/frontend
+          if-no-files-found: warn

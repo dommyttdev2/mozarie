@@ -46,6 +46,10 @@ Pythonの自動テストは製品の`.venv`を参照・変更しない。リポ�
 
 CIは隔離fixtureで実行できるテストを常に実行する。frontend jobはcoverageを完了してから、非instrumentedの20,000件カタログ性能試験を1回実行する。Playwrightは利用者に見える画面と隔離した`BrowserContext`を使い、固定待機ではなくlocatorや応答などのweb-first条件で待つ。coverageは全対象のレポートを毎回生成し、未検証の境界を見つける補助にする。100%などの数値を合否条件にせず、損失・破損・権限・復旧の重要経路を人が確認する。数値達成のためのテスト、内部実装を固定するテスト、skipによる見かけの成功を作らない。実行時間やメモリが増える回帰は、小さいfixtureで件数に比例しないことを確認する。
 
+各suiteの子プロセスには用途別の上限時間を置き、失敗または時間切れでは経過時間と完全な標準出力・標準エラーをsuite artifactへ残す。CIはcoverageの有無にかかわらずsuite artifact全体をuploadする。ローカルでbackendの実行環境を明示する必要がある場合だけ、`MOZARIE_TEST_PYTHON`にPython実行ファイルを指定する。製品用`.venv`やGPU設定はテスト実行環境の選択に使わない。
+
+frontendの通常実行は、実ブラウザーfixtureのCPU競合を避けるため一並列にする。各ブラウザー試験は、`domcontentloaded`後に対象のAPI結果・状態・画面を待って開始する。`networkidle`や固定時間待機を準備条件に使わない。
+
 ## 参照
 
 - [Python unittest](https://docs.python.org/3/library/unittest.html)

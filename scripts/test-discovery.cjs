@@ -25,7 +25,9 @@ function frontendPerformanceTestFiles() {
 }
 
 function frontendTestArguments(files = frontendTestFiles()) {
-  return ["--test", "--test-reporter=./scripts/strict-tap-reporter.cjs", "--test-concurrency=4", ...files];
+  // Browser fixtures start real Chromium instances. One fixture process at a
+  // time keeps the shared runner from turning UI-state waits into CPU races.
+  return ["--test", "--test-reporter=./scripts/strict-tap-reporter.cjs", "--test-concurrency=1", ...files];
 }
 
 module.exports = { frontendPerformanceTestFiles, frontendTestArguments, frontendTestFiles };

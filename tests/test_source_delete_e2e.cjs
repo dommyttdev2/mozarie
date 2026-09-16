@@ -12,7 +12,7 @@ async function freshPage(browser, fixture) {
     window.showDirectoryPicker = async () => ({ async *values() {} });
   });
   const page = await context.newPage();
-  await page.goto(fixture.url, { waitUntil: "networkidle" });
+  await page.goto(fixture.url, { waitUntil: "domcontentloaded" });
   return { context, page };
 }
 
